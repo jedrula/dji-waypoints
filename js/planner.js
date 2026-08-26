@@ -23,6 +23,12 @@ export const DEFAULTS = {
   orbitPad: 15,          // metres outside the box corners
   orbitRings: 1,         // concentric rings; >1 forms a dome around the subject
   transect: false,       // crossing lines THROUGH the site, camera side-on
+  // Cross passes default to ONE height. Multi-level was built and measured:
+  // on its own it helps (45 -> 54% coverage over three levels), but alongside a
+  // multi-ring orbit it is redundant, because the low ring already supplies the
+  // near-horizontal low look. Low-wall coverage measured 85% with either one or
+  // two cross-pass levels. Height diversity belongs to the rings.
+  transectLevels: 1,
   transectSpacingScale: 1,
   subjectHeight: 0,      // height of what you are capturing; the orbit aims at
                          // its middle, not at the ground under it
@@ -176,7 +182,7 @@ function orbitPass(g) {
 // far more useful than a forward-facing camera, which barely changes view
 // direction as it advances.
 function transectPass(g) {
-  const { halfX, halfY, axis, f, alt, cam, frontOverlap, aimZ, spacingScale } = g;
+  const { halfX, halfY, axis, f, alt, cam, frontOverlap, aimZ, spacingScale, level } = g;
   const alongHalf = axis === 'NS' ? halfY : halfX;
   const crossHalf = axis === 'NS' ? halfX : halfY;
 
@@ -192,8 +198,11 @@ function transectPass(g) {
   const nShots = Math.max(2, Math.ceil((2 * alongHalf) / shotSpacing) + 1);
   const dAlong = (2 * alongHalf) / (nShots - 1);
 
-  // Aim the camera slightly down onto the subject's middle at the look distance.
-  const pitch = Math.round(-(Math.atan2(Math.max(0, alt - aimZ), look) * 180) / Math.PI * 10) / 10;
+  // Aim the camera at the subject's middle from this level's height. A low pass
+  // comes out near horizontal, which is what sees under an overhang and into
+  // the bottom of a structure; a high one looks down into the gaps instead.
+  const pitch = Math.round(-(Math.atan2(alt - aimZ, look) * 180) / Math.PI * 10) / 10;
+  void level;
 
   const pts = [];
   for (let i = 0; i < nLines; i++) {
@@ -258,18 +267,30 @@ export function planMission(rect, opts, cam) {
   }
   if (p.transect) {
     const aimZ = (p.subjectHeight ?? 0) / 2;
-    for (const axis of ['NS', 'EW']) {
-      const r = transectPass({
-        halfX, halfY, axis, f, cam, aimZ,
-        alt: p.altitude, frontOverlap: p.frontOverlap,
-        spacingScale: p.transectSpacingScale ?? 1,
-      });
-      waypoints.push(...r.pts);
-      passes.push({
-        name: `Cross pass ${axis === 'NS' ? 'N–S' : 'E–W'} ${r.pitch}°`,
-        count: r.pts.length,
-        detail: `${r.nLines} line${r.nLines > 1 ? 's' : ''}, side-on at ${r.look.toFixed(0)} m`,
-      });
+    const nLevels = Math.max(1, p.transectLevels ?? 1);
+    // Spread from a low band up to the set altitude, never below 2 m. The low
+    // pass is the one that earns its place -- it is the only camera in the whole
+    // plan that looks under things.
+    const lowest = Math.max(2, Math.min(p.altitude, p.altitude * 0.35));
+    const levels = nLevels === 1
+      ? [p.altitude]
+      : Array.from({ length: nLevels }, (_, k) => lowest + ((p.altitude - lowest) * k) / (nLevels - 1));
+
+    for (let li = 0; li < levels.length; li++) {
+      const levelAlt = levels[li];
+      for (const axis of ['NS', 'EW']) {
+        const r = transectPass({
+          halfX, halfY, axis, f, cam, aimZ, level: li,
+          alt: levelAlt, frontOverlap: p.frontOverlap,
+          spacingScale: p.transectSpacingScale ?? 1,
+        });
+        waypoints.push(...r.pts);
+        passes.push({
+          name: `Cross ${axis === 'NS' ? 'N–S' : 'E–W'} @ ${levelAlt.toFixed(1)} m ${r.pitch}°`,
+          count: r.pts.length,
+          detail: `${r.nLines} line${r.nLines > 1 ? 's' : ''}, side-on at ${r.look.toFixed(0)} m`,
+        });
+      }
     }
   }
   if (p.orbit) {

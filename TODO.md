@@ -71,6 +71,12 @@ What it cannot tell you:
       or letting the user place blocks on the map, would make the score specific
       to the place rather than to a generic cluster.
 
+- [ ] **Nothing gets under an overhang.** With rings and cross passes, low-wall
+      coverage plateaus around 85%; the remainder is surface at the bottom of
+      narrow gaps that only a camera inside the gap would see. Tighter cross
+      passes, or lines aligned to the gaps rather than to the box axes, are the
+      obvious next thing to measure.
+
 ## Known limitations
 
 - [ ] **3D view shows the plan, not the world.** No terrain, no trees, no

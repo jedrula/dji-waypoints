@@ -49,6 +49,25 @@ changes view direction as it advances, so it adds frames without adding
 information. The serpentine reverses each line, so one grid covers both flanks,
 and running both axes gives four azimuths.
 
+### Where height diversity comes from
+
+Only the **orbit** varies altitude. The nadir and oblique grids fly one height
+each — conventional, and their diversity comes from tilt and direction. Cross
+passes also default to one height, and that was measured rather than assumed:
+
+| Cross-pass levels | Alone | With 2 orbit rings |
+|---|---|---|
+| 1 | 45% coverage, 9% low walls | 85% low walls |
+| 2 | 50% coverage, 12% low walls | 85% low walls |
+| 3 | 54% coverage, 14% low walls | — |
+
+On their own, extra levels help. Alongside a multi-ring orbit they are
+redundant: the low ring already flies near-horizontal and sees the bottoms of
+things from 360°, so a second cross-pass height buys 0.2 extra views per low
+wall sample. `transectLevels` exists in the planner if you want it; it is not
+in the UI because there is no configuration a person would actually fly where
+it earns its waypoints.
+
 ### Why the orbit is a dome
 
 Multi-ring orbits pull in as they rise, holding a constant slant range to the

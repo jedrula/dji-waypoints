@@ -1,7 +1,15 @@
 # 3DGS Mission Planner — DJI Mini 5 Pro
 
+**Live: https://jedrula.github.io/dji-waypoints/**
+
 Draw a rectangle, get a proposed autonomous capture flight, export it as a KMZ
 that DJI Fly can execute. No accounts, no build step, no dependencies.
+
+Works on a phone, which is the point: a laptop has no GPS and positions itself
+from cached Wi-Fi scans (measured 32 minutes stale here). A phone has a real
+receiver, so **Where I am** actually lands on the subject. On mobile the panel
+stacks above the map and the box is sized by typing metres rather than by
+dragging.
 
 ```
 npm start          # http://localhost:8123

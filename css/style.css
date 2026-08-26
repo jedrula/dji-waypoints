@@ -1,0 +1,204 @@
+:root {
+  --bg: #101418;
+  --panel: #171c22;
+  --panel2: #1e242c;
+  --line: #2a323c;
+  --text: #e6edf3;
+  --dim: #8b98a5;
+  --accent: #4da3ff;
+  --accent2: #ffb84d;
+  --warn: #ff8f6b;
+  --ok: #5ad19a;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg); color: var(--text);
+}
+#app { display: flex; height: 100%; }
+#stage { flex: 1; height: 100%; position: relative; }
+#map { position: absolute; inset: 0; background: #0b0e11; }
+#map[hidden] { display: none; }
+#scene { position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+         background: #0b0e11; cursor: grab; touch-action: none; }
+#scene:active { cursor: grabbing; }
+#scene[hidden] { display: none; }
+#viewtabs { position: absolute; top: 12px; right: 12px; z-index: 500;
+            display: flex; background: rgba(16,20,24,0.9); border: 1px solid var(--line);
+            border-radius: 8px; overflow: hidden; }
+#viewtabs button { border: 0; border-radius: 0; background: transparent; color: var(--dim);
+                   padding: 6px 14px; font-size: 12px; }
+#viewtabs button.on { background: var(--accent); color: #04101d; font-weight: 600; }
+.dimlabel { background: rgba(16,20,24,0.85); border: 1px solid var(--line); color: var(--text);
+            border-radius: 5px; padding: 1px 6px; font-size: 11px; font-variant-numeric: tabular-nums;
+            white-space: nowrap; width: auto !important; height: auto !important; }
+
+#panel {
+  width: 340px; min-width: 340px; height: 100%; overflow-y: auto;
+  background: var(--panel); border-right: 1px solid var(--line);
+  padding: 18px 18px 40px;
+}
+#panel header { margin-bottom: 20px; }
+h1 { font-size: 17px; margin: 0; letter-spacing: -0.01em; }
+.sub { margin: 2px 0 0; color: var(--dim); font-size: 12px; }
+
+.step { border-top: 1px solid var(--line); padding: 16px 0; }
+.step:first-of-type { border-top: 0; padding-top: 0; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
+     color: var(--dim); margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+h2 .n {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--panel2); color: var(--text); font-size: 11px;
+}
+
+.search { display: flex; gap: 6px; margin-bottom: 10px; }
+input[type=text], select {
+  width: 100%; background: var(--panel2); border: 1px solid var(--line);
+  color: var(--text); border-radius: 7px; padding: 7px 9px; font: inherit; font-size: 13px;
+}
+input[type=text]:focus, select:focus { outline: none; border-color: var(--accent); }
+
+button {
+  background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 7px 12px; font: inherit; font-size: 13px; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: #3d4753; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #04101d; font-weight: 600; }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+button.primary.armed { background: var(--accent2); border-color: var(--accent2); }
+button.block { width: 100%; padding: 9px; }
+button:disabled { opacity: 0.4; cursor: default; }
+
+.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.row > span:first-child { color: var(--dim); font-size: 13px; white-space: nowrap; }
+.row select { width: 190px; }
+.ctl { display: flex; align-items: center; gap: 8px; }
+.ctl output { width: 54px; text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
+input[type=range] { width: 118px; accent-color: var(--accent); }
+
+.hint { color: var(--dim); font-size: 12px; margin: 4px 0 0; }
+.hint.gsd { color: var(--ok); margin-bottom: 12px; }
+
+fieldset.passes { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px 4px; margin: 14px 0; }
+fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; padding: 0 5px; }
+.chk { display: flex; gap: 9px; align-items: flex-start; margin-bottom: 10px; cursor: pointer; }
+.chk input { margin-top: 3px; accent-color: var(--accent); }
+.chk b { font-weight: 600; font-size: 13px; display: block; }
+.chk em { color: var(--dim); font-style: normal; font-size: 11.5px; }
+
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line);
+         border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 10px; }
+.stats.empty { display: block; background: var(--panel2); color: var(--dim);
+               padding: 14px; font-size: 12.5px; text-align: center; }
+.stat { background: var(--panel2); padding: 9px 11px; }
+.stat b { display: block; font-size: 16px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.stat span { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+
+.passlist { margin-bottom: 10px; }
+.passrow { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 3px 0; color: var(--dim); }
+.passrow i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex: none; }
+.passrow b { color: var(--text); font-weight: 500; }
+.passrow .c { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+.warn { background: #2b1f1a; border: 1px solid #4a3225; color: var(--warn);
+        border-radius: 7px; padding: 9px 11px; font-size: 12.5px; margin-bottom: 10px; }
+
+.help { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 6px; color: var(--dim); font-size: 12.5px; }
+.help summary { cursor: pointer; color: var(--text); font-size: 13px; }
+.help ol { padding-left: 18px; margin: 10px 0; }
+.help li { margin-bottom: 6px; }
+.help code { background: var(--panel2); padding: 1px 4px; border-radius: 4px; font-size: 11.5px; word-break: break-all; }
+
+/* map bits */
+.leaflet-container { background: #0b0e11; font: inherit; }
+.leaflet-control-attribution { background: rgba(16,20,24,0.8) !important; color: var(--dim) !important; }
+.leaflet-control-attribution a { color: var(--dim) !important; }
+#map.drawing { cursor: crosshair; }
+.handle { background: var(--accent); border: 2px solid #04101d; border-radius: 50%;
+          width: 12px; height: 12px; margin: -6px 0 0 -6px; cursor: move; }
+.wpdot { border-radius: 50%; margin: -2.5px 0 0 -2.5px; width: 5px; height: 5px; }
+
+#autofit { margin-bottom: 10px; }
+.stat.over b { color: var(--warn); }
+.stat.fits b { color: var(--ok); }
+
+.altnote { background: #16202b; border: 1px solid #26384a; color: #8fb8d9;
+           border-radius: 7px; padding: 9px 11px; font-size: 12.5px; margin-bottom: 10px; }
+
+details.adv { border: 1px solid var(--line); border-radius: 8px; padding: 0 12px; margin-top: 14px; }
+details.adv > summary { cursor: pointer; color: var(--dim); font-size: 12px;
+  text-transform: uppercase; letter-spacing: 0.08em; padding: 10px 0; list-style: none; }
+details.adv > summary::-webkit-details-marker { display: none; }
+details.adv > summary::before { content: '+ '; }
+details.adv[open] > summary::before { content: '\2212 '; }
+details.adv[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: 12px; }
+details.adv .row:last-child { margin-bottom: 12px; }
+
+.rectbox { cursor: move; }
+#map.drawing .rectbox { cursor: crosshair; }
+
+.areabtns { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
+.areabtns button { padding: 9px 12px; }
+.gpsdot { background: #4da3ff; border: 2px solid #fff; border-radius: 50%;
+          width: 12px; height: 12px; margin: -6px 0 0 -6px;
+          box-shadow: 0 0 0 1px rgba(0,0,0,0.4); }
+
+.linkish { background: none; border: 0; padding: 4px 0 0; color: var(--accent);
+           font-size: 12.5px; text-decoration: underline; text-underline-offset: 2px; }
+.linkish:hover { filter: brightness(1.15); }
+
+/* ---------------- mobile ---------------- */
+/* On a phone you are standing on the site: the map is for confirming, not for
+   drawing. Panel first, map below it, and every control big enough to hit. */
+@media (max-width: 780px) {
+  html, body { height: auto; }
+  #app { flex-direction: column; height: auto; min-height: 100%; }
+
+  #panel {
+    width: 100%; min-width: 0; height: auto; order: 1;
+    border-right: 0; border-bottom: 1px solid var(--line);
+    padding: 14px 16px 24px;
+    overflow: visible;
+  }
+  #stage { order: 2; height: 58vh; min-height: 320px; flex: none; }
+
+  h1 { font-size: 19px; }
+  .step { padding: 14px 0; }
+
+  /* thumb-sized controls */
+  button, input[type=text], select { min-height: 44px; font-size: 15px; }
+  button.block { padding: 13px; }
+  .areabtns button { padding: 13px 12px; }
+  input[type=range] { height: 34px; width: 100%; }
+  .row { flex-wrap: wrap; }
+  .ctl { flex: 1 1 100%; }
+  .row select { width: 100%; }
+  .chk { padding: 6px 0; }
+  .chk input { width: 20px; height: 20px; }
+
+  .stats { grid-template-columns: 1fr 1fr; }
+  .stat b { font-size: 18px; }
+
+  #viewtabs button { padding: 10px 18px; font-size: 13px; }
+  .handle { width: 22px; height: 22px; margin: -11px 0 0 -11px; }
+}
+
+@media (max-width: 420px) {
+  .areabtns { grid-template-columns: 1fr; }
+  .search { flex-wrap: wrap; }
+  .search input { flex: 1 1 100%; }
+  .search button { width: 100%; }
+}
+
+/* Size the box numerically instead of dragging — the field flow. */
+.sizebox { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+.sizebox label { display: grid; gap: 4px; }
+.sizebox span { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; }
+.sizebox input {
+  background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 8px 9px; font: inherit; font-size: 15px;
+  font-variant-numeric: tabular-nums; width: 100%;
+}
+.sizebox input:focus { outline: none; border-color: var(--accent); }

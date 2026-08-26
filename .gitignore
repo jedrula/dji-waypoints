@@ -1,0 +1,4 @@
+node_modules/
+backups/
+*.kmz
+.DS_Store

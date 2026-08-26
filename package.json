@@ -1,0 +1,15 @@
+{
+  "name": "dji-waypoints",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal 3DGS capture mission planner for DJI Mini 5 Pro -> DJI Fly KMZ",
+  "scripts": {
+    "start": "node tools/serve.mjs",
+    "test": "node test/run.mjs",
+    "check": "node tools/check.mjs",
+    "install-mission": "node tools/install.mjs",
+    "slots": "node tools/install.mjs --list",
+    "compare": "node tools/compare.mjs"
+  }
+}

@@ -412,6 +412,7 @@ function autofit() {
   controls.altitude.el.value = mission.params.altitude;
   $('photoMode').value = mission.params.photoMode;
   $('shotsPerStop').value = String(mission.stats.shotsPerStop);
+  $('orbitRings').value = String(mission.params.orbitRings ?? 1);
   state.autofitNote = fits ? note : note;
   state.autofitAlt = alternative;
   replan();
@@ -422,6 +423,9 @@ $('autofit').addEventListener('click', autofit);
 function replan() {
   const p = readParams();
   $('gsdHint').textContent = `${gsdCm(cam, p.altitude).toFixed(2)} cm/px ground resolution`;
+  $('subjectHint').textContent = p.subjectHeight > 0.5
+    ? `Orbit aims at ${(p.subjectHeight / 2).toFixed(1)} m — the middle of a ${p.subjectHeight} m subject.`
+    : '0 m = flat ground. Taller subjects get a multi-ring dome and a flatter camera.';
   if (!state.rect) return;
   if (!p.nadir && !p.oblique && !p.orbit && !p.transect) {
     state.mission = null;

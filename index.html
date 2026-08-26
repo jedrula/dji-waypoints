@@ -43,6 +43,12 @@
       <p class="hint gsd" id="gsdHint"></p>
 
       <label class="row">
+        <span>Subject height</span>
+        <span class="ctl"><input id="subjectHeight" type="range" min="0" max="30" step="1"><output id="subjectHeightOut"></output></span>
+      </label>
+      <p class="hint" id="subjectHint">0 m = flat ground. Taller subjects get a multi-ring dome and a flatter camera.</p>
+
+      <label class="row">
         <span>Frames per stop</span>
         <select id="shotsPerStop">
           <option value="1">1 — straight ahead</option>
@@ -75,10 +81,6 @@
         <label class="row">
           <span>Speed</span>
           <span class="ctl"><input id="speed" type="range" min="1" max="15" step="0.5"><output id="speedOut"></output></span>
-        </label>
-        <label class="row">
-          <span>Subject height</span>
-          <span class="ctl"><input id="subjectHeight" type="range" min="0" max="30" step="1"><output id="subjectHeightOut"></output></span>
         </label>
         <label class="row">
           <span>Orbit offset</span>

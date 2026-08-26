@@ -417,25 +417,57 @@ export function proposePlan(rect, base, cam, budget = {}) {
 
   const fits = (m) => m.stats.waypoints <= maxWp && m.stats.minutes <= maxMin;
 
-  // Lowest altitude (best GSD) that fits, for one shutter mode.
-  const lowestFit = (photoMode) => {
-    for (let alt = 20; alt <= 120; alt += 5) {
-      const m = planMission(rect, { ...base, altitude: alt, photoMode }, cam);
+  // Over flat ground one ring is enough -- the orbit is a supporting pass, and
+  // there is no vertical subject to see from several elevations. The moment
+  // something has height, elevation diversity is the biggest single win
+  // available: measured, one ring to two is +7.1 points of coverage, where two
+  // to three is +0.5 and three to four is +0.8.
+  const hasHeight = (base.subjectHeight ?? DEFAULTS.subjectHeight) > 0.5;
+  const ringChoices = hasHeight ? [3, 2, 1] : [1];
+
+  // How low the search may go. Over flat ground 20 m is a sensible floor. With
+  // a subject that has height, the useful altitudes are just above it -- an
+  // under-canopy playground wants 5-8 m, and a 20 m floor could never find it.
+  const floorAlt = hasHeight
+    ? Math.max(3, Math.round((base.subjectHeight ?? DEFAULTS.subjectHeight) * 1.5))
+    : 20;
+  const step = hasHeight ? 1 : 5;
+
+  // Lowest altitude (best GSD) that fits, for one shutter mode and ring count.
+  const lowestFit = (photoMode, orbitRings) => {
+    for (let alt = floorAlt; alt <= 120; alt += step) {
+      const m = planMission(rect, { ...base, altitude: alt, photoMode, orbitRings }, cam);
       if (fits(m)) return m;
     }
     return null;
   };
 
   // Waypoint-per-photo is the only shutter mode every DJI Fly build is known to
-  // honour, so exhaust it across the whole altitude range before considering
-  // the distance trigger -- a worse GSD that definitely flies beats a better one
-  // that might not.
-  const primary = lowestFit('waypoint');
-  const fallback = lowestFit('interval');
+  // honour, so exhaust it before considering the distance trigger -- a worse
+  // GSD that definitely flies beats a better one that might not.
+  const pick = (photoMode) => {
+    const options = ringChoices
+      .map((r) => ({ rings: r, mission: lowestFit(photoMode, r) }))
+      .filter((o) => o.mission);
+    if (!options.length) return null;
+    // Rings cost waypoints, which pushes altitude up. Never trade a lot of
+    // ground resolution for them: only accept extra rings whose altitude is
+    // within a third of the best altitude available.
+    const bestAlt = Math.min(...options.map((o) => o.mission.params.altitude));
+    const affordable = options.filter((o) => o.mission.params.altitude <= bestAlt * 1.34);
+    return affordable.sort((a, b) => b.rings - a.rings)[0].mission;
+  };
+
+  // Auto-fit stays predictable on purpose: lowest altitude that fits, with the
+  // ring count set by whether the subject has height. It deliberately does NOT
+  // optimise the coverage score -- that produced surprising picks (a single
+  // high ring, most of the budget unspent) and it cannot know about a canopy
+  // overhead. The scorer's job is to tell the pilot what a plan is missing,
+  // which the Coverage and Down-angle readouts and their warnings already do.
+  const primary = pick('waypoint');
+  const fallback = pick('interval');
 
   if (primary) {
-    // Surface the trade rather than hiding it: if the distance trigger would fit
-    // meaningfully lower, say so and let the pilot decide.
     const better = fallback && fallback.params.altitude < primary.params.altitude - 5;
     return {
       mission: primary,

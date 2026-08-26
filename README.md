@@ -51,6 +51,21 @@ and running both axes gives four azimuths.
 
 ### Where height diversity comes from
 
+**Subject height** drives it, and it defaults to **3 m** — almost everything
+worth splatting has height, so flat ground is the unusual case. Drawing a box
+and touching nothing else on a 69 x 49 m site gives:
+
+| Height | Waypoints | Tilts | Passes |
+|---|---|---|---|
+| 17.0 m | 32 | −15.1° | orbit |
+| 25.5 m | 32 | −23.8° | orbit |
+| 34.0 m | 135 | −90°, −45°, −33.1° | nadir, oblique, orbit |
+
+Set subject height to 0 and the same box collapses to a single 30 m ring,
+because over flat ground every pass points down and there is nothing to see
+from several elevations.
+
+
 Only the **orbit** varies altitude. The nadir and oblique grids fly one height
 each — conventional, and their diversity comes from tilt and direction. Cross
 passes also default to one height, and that was measured rather than assumed:

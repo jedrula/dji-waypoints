@@ -30,8 +30,12 @@ export const DEFAULTS = {
   // two cross-pass levels. Height diversity belongs to the rings.
   transectLevels: 1,
   transectSpacingScale: 1,
-  subjectHeight: 0,      // height of what you are capturing; the orbit aims at
-                         // its middle, not at the ground under it
+  // Height of what you are capturing; the orbit aims at its middle, not at the
+  // ground under it. Defaults to 3 m because almost everything worth splatting
+  // has height -- play equipment, cars, walls, hedges, people-sized things --
+  // and assuming flat ground is the unusual case, not the common one. Set it to
+  // 0 for genuinely flat terrain.
+  subjectHeight: 3,
   photoMode: 'waypoint', // 'waypoint' | 'interval'
   shotsPerStop: 1,       // 1 = single frame; >1 = gimbal pitch fan at the stop
   shotSpread: 20,        // degrees between frames in the fan

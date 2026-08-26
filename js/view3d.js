@@ -92,7 +92,33 @@ export function createView3D(canvas) {
     // Keep the frustum wedges readable rather than to scale.
     const frustumLen = Math.max(2, Math.min(span * 0.09, maxAlt * 0.7));
     const step = Math.max(1, Math.ceil(pts.length / 70));
-    scene = { pts, box, span, maxAlt, frustumLen, step };
+
+    // What actually flies at each height, so the scale can name it rather than
+    // just marking a number.
+    const NAME = { nadir: 'nadir', oblique: 'oblique', orbit: 'orbit', transect: 'cross' };
+    const byHeight = new Map();
+    for (const p of pts) {
+      const key = Math.round(p.z * 10) / 10;
+      if (!byHeight.has(key)) byHeight.set(key, { z: key, passes: new Set(), tilts: new Set(), n: 0 });
+      const e = byHeight.get(key);
+      e.passes.add(NAME[p.pass] ?? p.pass);
+      for (const t of p.shots) e.tilts.add(Math.round(t));
+      e.n++;
+    }
+    const levels = [...byHeight.values()]
+      .map((e) => ({
+        z: e.z,
+        n: e.n,
+        label: `${e.z.toFixed(e.z < 10 ? 1 : 0)} m`,
+        // Once several passes share a height the tilt list gets long enough to
+        // run across the drawing, so name the passes and drop the angles.
+        detail: e.passes.size > 2
+          ? [...e.passes].join(' + ')
+          : `${[...e.passes].join(' + ')} · ${[...e.tilts].sort((a, b) => b - a).join('/')}°`,
+      }))
+      .sort((a, b) => a.z - b.z);
+
+    scene = { pts, box, span, maxAlt, frustumLen, step, levels };
     view.target = { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2, z: maxAlt / 2 };
     view.dist = span * 2.2 + maxAlt * 2;
   }
@@ -227,6 +253,69 @@ export function createView3D(canvas) {
         ctx.fill();
       }
       ctx.globalAlpha = 1;
+    }
+
+    // Altitude scale: a mast at whichever box corner currently projects
+    // furthest left, ticked at every height the mission actually flies and
+    // labelled with which passes are up there.
+    if (scene.levels.length) {
+      const pad = span * 0.34;
+      const corners = [
+        { x: box.x0 - pad, y: box.y0 - pad }, { x: box.x1 + pad, y: box.y0 - pad },
+        { x: box.x1 + pad, y: box.y1 + pad }, { x: box.x0 - pad, y: box.y1 + pad },
+      ];
+      let anchor = null;
+      for (const c of corners) {
+        const v = toView({ ...c, z: 0 }, b);
+        if (v.z <= NEAR) continue;
+        const sp = project(v, w, h, f);
+        if (!anchor || sp.x < anchor.sx) anchor = { ...c, sx: sp.x };
+      }
+
+      if (anchor) {
+        ctx.strokeStyle = 'rgba(139,152,165,0.55)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        line({ ...anchor, z: 0 }, { ...anchor, z: scene.maxAlt }, b, w, h, f);
+        ctx.stroke();
+
+        ctx.font = '11px -apple-system, sans-serif';
+        ctx.textBaseline = 'middle';
+        const tick = span * 0.05;
+        let lastY = -Infinity;
+        for (const lv of scene.levels) {
+          const v = toView({ ...anchor, z: lv.z }, b);
+          if (v.z <= NEAR) continue;
+          const sp = project(v, w, h, f);
+          if (Math.abs(sp.y - lastY) < 13) continue;   // skip labels that would collide
+          lastY = sp.y;
+
+          const vEnd = toView({ x: anchor.x + tick, y: anchor.y + tick, z: lv.z }, b);
+          if (vEnd.z > NEAR) {
+            const spEnd = project(vEnd, w, h, f);
+            ctx.strokeStyle = 'rgba(139,152,165,0.75)';
+            ctx.beginPath();
+            ctx.moveTo(sp.x, sp.y);
+            ctx.lineTo(spEnd.x, spEnd.y);
+            ctx.stroke();
+          }
+
+          // Text runs LEFT of the mast, away from the drawing, on a backing
+          // panel so it stays readable if the mast ends up over the geometry.
+          ctx.textAlign = 'right';
+          const dw = ctx.measureText(lv.detail).width;
+          const lw = ctx.measureText(lv.label).width;
+          const right = sp.x - 8;
+          ctx.fillStyle = 'rgba(11,14,17,0.82)';
+          ctx.fillRect(right - dw - lw - 14, sp.y - 8, dw + lw + 18, 16);
+          ctx.fillStyle = '#8b98a5';
+          ctx.fillText(lv.detail, right, sp.y);
+          ctx.fillStyle = '#e6edf3';
+          ctx.fillText(lv.label, right - dw - 8, sp.y);
+        }
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+      }
     }
 
     // start marker

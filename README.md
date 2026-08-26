@@ -105,6 +105,12 @@ The **3D view** (top-right toggle) is the one that matters once a plan uses more
 than one altitude: multi-ring orbits, or comparing pass heights. It draws the
 ground grid, the box, the path coloured by pass, and a frustum wedge per camera
 so you can see what each shot actually frames. Drag to orbit, scroll to zoom.
+
+An **altitude scale** stands at whichever box corner currently projects furthest
+left, ticked at every height the mission flies and labelled with what is up
+there — `34 m nadir + oblique + cross + orbit`, `26 m orbit · −24°`,
+`17 m orbit · −15°`. The anchor corner is picked per frame, so the scale stays
+clear of the drawing as you orbit.
 It is a hand-rolled canvas renderer — a few thousand line segments did not
 justify pulling in a 3D library.
 

@@ -10,6 +10,7 @@
     "check": "node tools/check.mjs",
     "install-mission": "node tools/install.mjs",
     "slots": "node tools/install.mjs --list",
-    "compare": "node tools/compare.mjs"
+    "compare": "node tools/compare.mjs",
+    "bridge": "node tools/bridge.mjs"
   }
 }

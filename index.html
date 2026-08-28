@@ -12,131 +12,180 @@
   <aside id="panel">
     <header>
       <h1>3DGS Mission Planner</h1>
-      <p class="sub">DJI Mini 5 Pro → DJI Fly</p>
+      <p class="sub">DJI Mini 5 Pro &rarr; DJI Fly</p>
     </header>
 
-    <section class="step" id="step-area">
-      <h2><span class="n">1</span> Area</h2>
-      <div class="search">
-        <input id="q" type="text" placeholder="Search a place…" autocomplete="off">
-        <button id="go" type="button">Find</button>
-      </div>
-      <div class="areabtns">
-        <button id="draw" class="primary" type="button">Draw rectangle</button>
-        <button id="locate" type="button" title="Centre on your GPS position and put a box there">Where I am</button>
-      </div>
-      <p class="hint" id="areaHint">Click, then drag a box on the map.</p>
-      <button id="placeAnyway" class="linkish" type="button" hidden>Place the box there anyway</button>
-      <div class="sizebox">
-        <label><span>Width (m)</span><input id="boxW" type="number" min="5" max="1000" step="1" inputmode="numeric"></label>
-        <label><span>Depth (m)</span><input id="boxD" type="number" min="5" max="1000" step="1" inputmode="numeric"></label>
-      </div>
-    </section>
+    <nav id="menu"></nav>
 
-    <section class="step" id="step-params">
-      <h2><span class="n">2</span> Capture</h2>
+    <div class="pane" id="pane-plan">
+      <section class="step" id="step-area">
+        <h2><span class="n">1</span> Area</h2>
+        <div class="search">
+          <input id="q" type="text" placeholder="Search a place…" autocomplete="off">
+          <button id="go" type="button">Find</button>
+        </div>
+        <div class="areabtns">
+          <button id="draw" class="primary" type="button">Draw rectangle</button>
+          <button id="drop" type="button" title="Put a box in the middle of the map">Drop</button>
+          <button id="locate" type="button" title="Centre on your GPS position and put a box there">Where I am</button>
+        </div>
+        <p class="hint" id="areaHint">Find a place, then Drop a box — or draw one.</p>
+        <button id="placeAnyway" class="linkish" type="button" hidden>Place the box there anyway</button>
+      </section>
 
-      <label class="row">
-        <span>Altitude AGL</span>
-        <span class="ctl"><input id="altitude" type="range" min="3" max="120" step="1"><output id="altitudeOut"></output></span>
-      </label>
-      <p class="hint gsd" id="gsdHint"></p>
+      <section class="step" id="step-params">
+        <h2><span class="n">2</span> Capture</h2>
 
-      <label class="row">
-        <span>Subject height</span>
-        <span class="ctl"><input id="subjectHeight" type="range" min="0" max="30" step="1"><output id="subjectHeightOut"></output></span>
-      </label>
-      <p class="hint" id="subjectHint">0 m = flat ground. Taller subjects get a multi-ring dome and a flatter camera.</p>
-
-      <label class="row">
-        <span>Frames per stop</span>
-        <select id="shotsPerStop">
-          <option value="1">1 — straight ahead</option>
-          <option value="3">3 — pitch fan</option>
-        </select>
-      </label>
-
-      <fieldset class="passes">
-        <legend>Passes</legend>
-        <label class="chk"><input type="checkbox" id="nadir" checked>
-          <span><b>Nadir grid</b><em>&minus;90&deg; · geometry backbone</em></span></label>
-        <label class="chk"><input type="checkbox" id="oblique" checked>
-          <span><b>Oblique cross-grid</b><em>&minus;45&deg; · perpendicular lines</em></span></label>
-        <label class="chk"><input type="checkbox" id="orbit" checked>
-          <span><b>Perimeter orbit</b><em>aims at centre · facades &amp; edges</em></span></label>
-        <label class="chk"><input type="checkbox" id="transect">
-          <span><b>Cross passes</b><em>side-on, through the site · fills occlusions</em></span></label>
-      </fieldset>
-
-      <details class="adv">
-        <summary>Advanced</summary>
         <label class="row">
-          <span>Front overlap</span>
-          <span class="ctl"><input id="frontOverlap" type="range" min="50" max="90" step="5"><output id="frontOverlapOut"></output></span>
+          <span>Altitude AGL</span>
+          <span class="ctl"><input id="altitude" type="range" min="3" max="120" step="1"><output id="altitudeOut"></output></span>
         </label>
+        <p class="hint gsd" id="gsdHint"></p>
+
         <label class="row">
-          <span>Side overlap</span>
-          <span class="ctl"><input id="sideOverlap" type="range" min="40" max="85" step="5"><output id="sideOverlapOut"></output></span>
+          <span>Subject height</span>
+          <span class="ctl"><input id="subjectHeight" type="range" min="0" max="30" step="1"><output id="subjectHeightOut"></output></span>
         </label>
+
         <label class="row">
-          <span>Speed</span>
-          <span class="ctl"><input id="speed" type="range" min="1" max="15" step="0.5"><output id="speedOut"></output></span>
-        </label>
-        <label class="row">
-          <span>Orbit offset</span>
-          <span class="ctl"><input id="orbitPad" type="range" min="-30" max="40" step="1"><output id="orbitPadOut"></output></span>
-        </label>
-        <label class="row">
-          <span>Orbit rings</span>
-          <select id="orbitRings">
-            <option value="1">1</option>
-            <option value="2">2</option>
-            <option value="3">3 — low / level / down</option>
-            <option value="4">4</option>
-            <option value="5">5</option>
+          <span>Frames per stop</span>
+          <select id="shotsPerStop">
+            <option value="1">1 — straight ahead</option>
+            <option value="3">3 — pitch fan</option>
           </select>
         </label>
-        <label class="row">
-          <span>Shutter</span>
-          <select id="photoMode">
-            <option value="waypoint">One waypoint per photo</option>
-            <option value="interval">Distance interval (unverified)</option>
-          </select>
-        </label>
-        <label class="row">
-          <span>Export profile</span>
-          <select id="profile">
-            <option value="fly">DJI Fly (Mini / Air / Mavic)</option>
-            <option value="pilot2">DJI Pilot 2 (enterprise)</option>
-          </select>
-        </label>
-      </details>
-    </section>
 
-    <section class="step" id="step-review">
-      <h2><span class="n">3</span> Review</h2>
-      <div id="stats" class="stats empty">Draw an area to see the proposed flight.</div>
-      <button id="autofit" class="block" type="button">Re-propose a flight that fits one mission</button>
-      <div id="passList" class="passlist"></div>
-      <div id="altnote" class="altnote" hidden></div>
-      <div id="warn" class="warn" hidden></div>
-      <button id="export" class="primary block" type="button" disabled>Accept &amp; export KMZ</button>
-      <p class="hint" id="exportHint"></p>
-    </section>
+        <fieldset class="passes">
+          <legend>Passes</legend>
+          <label class="chk"><input type="checkbox" id="nadir" checked>
+            <span><b>Nadir grid</b><em>&minus;90&deg; · geometry backbone</em></span></label>
+          <label class="chk"><input type="checkbox" id="oblique" checked>
+            <span><b>Oblique cross-grid</b><em>&minus;45&deg; · perpendicular lines</em></span></label>
+          <label class="chk"><input type="checkbox" id="orbit" checked>
+            <span><b>Perimeter orbit</b><em>aims at centre · facades &amp; edges</em></span></label>
+          <label class="chk"><input type="checkbox" id="transect">
+            <span><b>Cross passes</b><em>side-on, through the site · fills occlusions</em></span></label>
+        </fieldset>
 
-    <details class="help">
-      <summary>Getting the KMZ into DJI Fly</summary>
-      <ol>
-        <li>In DJI Fly, create any throwaway waypoint mission so the app makes a mission folder.</li>
-        <li>Connect the RC / phone and open
-          <code>Android/data/dji.go.v5/files/waypoint/</code>.</li>
-        <li>Each mission is a folder named with a UUID containing one <code>&lt;same-UUID&gt;.kmz</code>.</li>
-        <li>Rename the exported file to that UUID and overwrite the one inside the folder.</li>
-        <li>Restart DJI Fly. The mission appears in the waypoint list.</li>
-      </ol>
-      <p>On iOS the path is <code>DJI Fly/wayline_mission/</code>. DJI Fly caps a mission
-      at 200 waypoints — longer plans are exported as numbered parts to fly back to back.</p>
-    </details>
+        <details class="adv">
+          <summary>Advanced</summary>
+          <label class="row">
+            <span>Front overlap</span>
+            <span class="ctl"><input id="frontOverlap" type="range" min="50" max="90" step="5"><output id="frontOverlapOut"></output></span>
+          </label>
+          <label class="row">
+            <span>Side overlap</span>
+            <span class="ctl"><input id="sideOverlap" type="range" min="40" max="85" step="5"><output id="sideOverlapOut"></output></span>
+          </label>
+          <label class="row">
+            <span>Speed</span>
+            <span class="ctl"><input id="speed" type="range" min="1" max="15" step="0.5"><output id="speedOut"></output></span>
+          </label>
+          <label class="row">
+            <span>Orbit offset</span>
+            <span class="ctl"><input id="orbitPad" type="range" min="-30" max="40" step="1"><output id="orbitPadOut"></output></span>
+          </label>
+          <label class="row">
+            <span>Orbit rings</span>
+            <select id="orbitRings">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3 — low / level / down</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+            </select>
+          </label>
+          <label class="row">
+            <span>Shutter</span>
+            <select id="photoMode">
+              <option value="waypoint">One waypoint per photo</option>
+              <option value="interval">Distance interval (unverified)</option>
+            </select>
+          </label>
+          <label class="row">
+            <span>Export profile</span>
+            <select id="profile">
+              <option value="fly">DJI Fly (Mini / Air / Mavic)</option>
+              <option value="pilot2">DJI Pilot 2 (enterprise)</option>
+            </select>
+          </label>
+        </details>
+      </section>
+
+      <section class="step" id="step-review">
+        <h2><span class="n">3</span> Review</h2>
+        <div id="stats" class="stats empty">Draw an area to see the proposed flight.</div>
+        <button id="autofit" class="block" type="button" hidden>Re-propose a flight that fits one mission</button>
+        <div id="passList" class="passlist"></div>
+        <div id="altnote" class="altnote" hidden></div>
+        <div id="warn" class="warn" hidden></div>
+        <p class="hint" id="sizeHint"></p>
+
+        <div class="planrow saverow">
+          <input id="planName" type="text" placeholder="Name this plan…" autocomplete="off">
+          <button id="planSave" class="primary" type="button">Save plan</button>
+        </div>
+        <p class="hint" id="saveStatus"></p>
+      </section>
+    </div>
+
+    <div class="pane" id="pane-saved" hidden>
+      <section class="step">
+        <h2>Saved plans</h2>
+        <p class="hint" id="planStatus"></p>
+        <div id="planList" class="planlist"></div>
+        <div class="syncrow">
+          <button id="syncNow" type="button">Sync</button>
+          <span class="hint">Saving syncs to your other device by itself.</span>
+        </div>
+      </section>
+    </div>
+
+    <div class="pane" id="pane-device" hidden>
+      <section class="step">
+        <h2>Controller</h2>
+        <div id="instAuto" hidden>
+          <h3 class="substep"><span class="n">1</span> Connect</h3>
+          <div class="devrow">
+            <button id="instScan" type="button">Find controller</button>
+            <select id="instDevice" hidden></select>
+          </div>
+          <p class="hint" id="instStatus">Plug the controller in over USB.</p>
+
+          <h3 class="substep"><span class="n">2</span> Plan to install</h3>
+          <div id="instPlans" class="slots"></div>
+          <label class="kmzpick">
+            <input id="instFile" type="file" accept=".kmz,application/vnd.google-earth.kmz">
+            <span id="instFileName">…or a KMZ file from disk</span>
+          </label>
+
+          <h3 class="substep"><span class="n">3</span> Mission to overwrite</h3>
+          <div id="instSlots" class="slots"></div>
+
+          <h3 class="substep"><span class="n">4</span> Install</h3>
+          <div id="instXfer" class="xferbox"></div>
+          <button id="instGo" class="primary block" type="button" disabled>Overwrite this mission</button>
+        </div>
+        <p class="hint" id="instNoApi" hidden>No local server behind this page, so it cannot reach a
+        controller over USB. Serve it with <code>npm start</code> for that — or do it by hand:</p>
+
+        <details class="help">
+          <summary>Getting the KMZ into DJI Fly</summary>
+          <p>With the controller plugged into this machine, the panel above does all of
+          this for you. By hand, on a phone, or from the published copy of this page:</p>
+          <ol>
+            <li>In DJI Fly, create any throwaway waypoint mission so the app makes a mission folder.</li>
+            <li>Connect the RC / phone and open
+              <code>Android/data/dji.go.v5/files/waypoint/</code>.</li>
+            <li>Each mission is a folder named with a UUID containing one <code>&lt;same-UUID&gt;.kmz</code>.</li>
+            <li>Rename the exported file to that UUID and overwrite the one inside the folder.</li>
+            <li>Restart DJI Fly. The mission appears in the waypoint list.</li>
+          </ol>
+          <p>On iOS the path is <code>DJI Fly/wayline_mission/</code>. DJI Fly caps a mission
+          at 200 waypoints — longer plans are exported as numbered parts to fly back to back.</p>
+        </details>
+      </section>
+    </div>
   </aside>
 
   <main id="stage">
@@ -146,6 +195,7 @@
       <button type="button" class="on" data-view="map">Map</button>
       <button type="button" data-view="3d">3D</button>
     </div>
+    <div id="basetabs"></div>
   </main>
 </div>
 

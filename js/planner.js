@@ -252,13 +252,16 @@ export function planMission(rect, opts, cam) {
 
   const waypoints = [];
   const passes = [];
+  // `push(...pts)` blows the call stack once a pass runs into six figures of
+  // points, which a big box at low altitude does; append instead of spreading.
+  const add = (pts) => { for (const q of pts) waypoints.push(q); };
 
   if (p.nadir) {
     const r = gridPass({
       halfCross: halfX, halfAlong: halfY, sideSpacing, fwdSpacing,
       axis: 'NS', f, alt: p.altitude, pitch: -90, pass: 'nadir',
     });
-    waypoints.push(...r.pts);
+    add(r.pts);
     passes.push({ name: 'Nadir grid', count: r.pts.length, detail: `${r.nLines} lines @ ${r.dCross.toFixed(1)} m` });
   }
   if (p.oblique) {
@@ -266,7 +269,7 @@ export function planMission(rect, opts, cam) {
       halfCross: halfY, halfAlong: halfX, sideSpacing, fwdSpacing,
       axis: 'EW', f, alt: p.altitude, pitch: p.obliquePitch, pass: 'oblique',
     });
-    waypoints.push(...r.pts);
+    add(r.pts);
     passes.push({ name: `Oblique grid ${p.obliquePitch}°`, count: r.pts.length, detail: `${r.nLines} lines @ ${r.dCross.toFixed(1)} m` });
   }
   if (p.transect) {
@@ -288,7 +291,7 @@ export function planMission(rect, opts, cam) {
           alt: levelAlt, frontOverlap: p.frontOverlap,
           spacingScale: p.transectSpacingScale ?? 1,
         });
-        waypoints.push(...r.pts);
+        add(r.pts);
         passes.push({
           name: `Cross ${axis === 'NS' ? 'N–S' : 'E–W'} @ ${levelAlt.toFixed(1)} m ${r.pitch}°`,
           count: r.pts.length,
@@ -303,7 +306,7 @@ export function planMission(rect, opts, cam) {
       subjectHeight: p.subjectHeight,
       alt: p.altitude, pitchOverride: p.orbitPitch, rings: Math.max(1, p.orbitRings),
     });
-    waypoints.push(...r.pts);
+    add(r.pts);
     const ringTxt = r.heights.length > 1
       ? `${r.heights.length} rings, r = ${r.r.toFixed(0)} m`
       : `r = ${r.r.toFixed(0)} m`;

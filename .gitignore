@@ -2,3 +2,12 @@ node_modules/
 backups/
 *.kmz
 .DS_Store
+
+# wrangler dev keeps its local KV emulator here
+.wrangler/
+
+# except the reference mission pulled off a real Mini 5 Pro
+!test/fixtures/*.kmz
+
+# compiled on demand by tools/bridge.mjs
+tools/mtptool

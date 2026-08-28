@@ -1,0 +1,10 @@
+name = "dji-waypoints-sync"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+# One namespace holds every sync key's plans, keyed by the hash of the key.
+# Created with `wrangler kv namespace create PLANS`. `wrangler dev --local`
+# ignores the id and uses its own emulated store.
+[[kv_namespaces]]
+binding = "PLANS"
+id = "13e721f08df046358f3cee073f427921"

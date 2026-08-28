@@ -1,4 +1,4 @@
-import { writeFileSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, mkdirSync, statSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -8,6 +8,12 @@ import { CAMERAS, footprint, gsdCm } from '../js/camera.js';
 import { planMission, DEFAULTS } from '../js/planner.js';
 import { buildKmz, templateKml, waylinesWpml, PROFILES } from '../js/wpml.js';
 import { distM } from '../js/geo.js';
+import { listSlots, install } from '../tools/bridge.mjs';
+import { encodePlan, decodePlan } from '../js/share.js';
+import { readKmz } from '../js/kmzread.js';
+import { routeFromRead, inferPass } from '../js/route.js';
+import { createPlanStore, merge as clientMerge, SYNC_KEY } from '../js/plans.js';
+import { merge as workerMerge, clean } from '../sync/worker.js';
 
 let fails = 0;
 const ok = (name, cond, extra = '') => {
@@ -517,6 +523,169 @@ ok('catches something that is not a zip at all',
 const sh = shape(Buffer.from(bytes));
 ok('shape fingerprint counts elements per file',
    sh['wpmz/waylines.wpml'].get('Placemark') === m.exported.length);
+
+console.log('\nplan codes');
+{
+  const ui = {
+    altitude: 52, frontOverlap: 80, sideOverlap: 70, speed: 4, orbitPad: 5, subjectHeight: 3,
+    photoMode: 'waypoint', shotsPerStop: 3, orbitRings: 3, profile: 'fly',
+    nadir: true, oblique: true, orbit: true, transect: false,
+  };
+  const code = encodePlan(rect, ui);
+  const back = decodePlan(code);
+  ok('a plan code round-trips the box to 6 decimals',
+     near(back.rect.north, rect.north, 5e-7) && near(back.rect.west, rect.west, 5e-7));
+  ok('a plan code round-trips every control', Object.keys(ui).every((k) => back.ui[k] === ui[k]));
+  ok('a plan code survives being pasted as a whole url',
+     decodePlan(`https://example.com/x/#plan=${code}`).ui.altitude === 52);
+  ok('a plan code is short enough to message', code.length < 260, `${code.length} chars`);
+  ok('rejects junk', decodePlan('hello') === null && decodePlan('') === null);
+  ok('rejects a code whose payload is not a plan', decodePlan('v1.' + Buffer.from('{"r":[1]}').toString('base64')) === null);
+
+  // Same code, same plan: the point of shipping a code instead of a file.
+  const a = planMission(rect, { altitude: ui.altitude, speed: ui.speed }, cam);
+  const b = planMission(back.rect, { altitude: back.ui.altitude, speed: back.ui.speed }, cam);
+  ok('a restored plan produces the same waypoints', a.exported.length === b.exported.length);
+}
+
+console.log('\nthe real thing');
+{
+  // A two-waypoint mission created in DJI Fly on a Mini 5 Pro and pulled off the
+  // controller over MTP. The validator has to accept what the aircraft itself
+  // writes, or it will refuse a legitimate mission on the day it matters.
+  const real = readFileSync(new URL('./fixtures/dji-fly-mini5pro.kmz', import.meta.url));
+  const { info, errors } = checkKmz(real);
+  ok('accepts a mission DJI Fly wrote itself', errors.length === 0, errors[0] ?? '');
+  ok('DJI Fly on a Mini 5 Pro writes drone 68/0', info.drone === '68/0', info.drone);
+  ok('and the consumer namespace', info.flavour.startsWith('DJI Fly'), info.flavour);
+  ok('our export claims the same drone enum',
+     checkKmz(Buffer.from(bytes)).info.drone === info.drone);
+}
+
+console.log('\nreading a mission back');
+{
+  const real = readFileSync(new URL('./fixtures/dji-fly-mini5pro.kmz', import.meta.url));
+  const back = await readKmz(real);
+  ok('reads a deflated KMZ that DJI Fly wrote', back.meta.waypoints === 2);
+  ok('and its drone enum', back.meta.drone === '68/0');
+
+  const ours = await readKmz(Buffer.from(bytes));
+  ok('reads our own stored KMZ', ours.meta.waypoints === m.exported.length);
+  ok('round-trips the first waypoint position',
+     near(ours.waypoints[0].lat, m.exported[0].lat, 1e-6) && near(ours.waypoints[0].lon, m.exported[0].lon, 1e-6));
+  ok('round-trips altitude', near(ours.waypoints[0].alt, m.exported[0].alt ?? m.params.altitude, 0.05));
+  // Gimbal pitch is written once per pass and held; reading has to carry it
+  // forward or most waypoints look like they point at the horizon.
+  ok('carries a held gimbal pitch forward', ours.waypoints.every((w) => Number.isFinite(w.pitch)));
+  ok('counts the photos', ours.meta.photos > 0);
+  ok('refuses something that is not a KMZ',
+     await readKmz(Buffer.from('hello there')).then(() => false, () => true));
+}
+
+console.log('\none route shape');
+{
+  // The planner's output and a mission read off a controller have to be the
+  // same kind of thing, or every renderer needs two code paths.
+  const read = await readKmz(Buffer.from(bytes));
+  const route = routeFromRead(read, cam);
+  const needs = (r) => ['waypoints', 'rect', 'frame', 'cam'].every((k) => r[k] !== undefined);
+  ok('a read mission carries what the renderers need', needs(route));
+  ok('the planner s mission carries the same', needs(m));
+  ok('a read waypoint has what a drawn waypoint has',
+     ['lat', 'lon', 'alt', 'yaw', 'pitch', 'pass', 'shots'].every((k) => route.waypoints[0][k] !== undefined));
+  ok('the box round-trips as the extent of the route',
+     near(route.rect.north, Math.max(...m.exported.map((w) => w.lat)), 1e-6));
+  ok('every waypoint lands in a known pass',
+     route.waypoints.every((w) => ['nadir', 'oblique', 'orbit', 'transect'].includes(w.pass)));
+  ok('an aim-at-a-point waypoint is read as orbit',
+     inferPass({ headingMode: 'towardPOI', pitch: -30 }) === 'orbit');
+  ok('straight down is read as nadir', inferPass({ headingMode: 'followWayline', pitch: -90 }) === 'nadir');
+  ok('near level is read as a cross pass', inferPass({ headingMode: 'followWayline', pitch: -5 }) === 'transect');
+}
+
+console.log('\nsaved plans');
+{
+  const mem = new Map();
+  const storage = {
+    getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+    setItem: (k, v) => mem.set(k, v),
+    removeItem: (k) => mem.delete(k),
+  };
+  const store = createPlanStore({ storage, endpoint: 'https://sync.example' , fetchImpl: async (url, opt) => {
+    lastRequest = { url, key: opt.headers['X-Sync-Key'], body: JSON.parse(opt.body) };
+    return { ok: true, json: async () => ({ plans: remotePlans }) };
+  } });
+  let lastRequest = null;
+  let remotePlans = [];
+
+  const a = store.save({ name: 'Zablocie yard', code: 'v1.aaa' });
+  store.save({ name: 'Playground', code: 'v1.bbb' });
+  ok('saves and lists plans', store.list().length === 2);
+  ok('newest plan sorts first', store.list()[0].name === 'Playground');
+
+  store.save({ id: a.id, name: 'Zablocie yard', code: 'v1.ccc' });
+  ok('saving over an id replaces rather than duplicates', store.list().length === 2);
+  ok('and keeps the new code', store.list().find((p) => p.id === a.id).code === 'v1.ccc');
+
+  store.remove(a.id);
+  ok('a removed plan leaves the list', store.list().length === 1);
+
+  remotePlans = [{ id: 'remote1', name: 'From the phone', code: 'v1.ddd', updatedAt: Date.now() + 1000 }];
+  const res = await store.sync();
+  ok('sync sends the hardcoded key in a header, with nothing to set up', lastRequest.key === SYNC_KEY);
+  ok('and the Worker would accept it', /^[A-Za-z0-9_-]{16,128}$/.test(SYNC_KEY));
+  ok('sync sends tombstones too, so a delete propagates',
+     lastRequest.body.plans.some((p) => p.deleted));
+  ok('sync pulls the other device\'s plans in', store.list().some((p) => p.name === 'From the phone'));
+  ok('and reports what arrived', res.pulled === 1);
+
+  // The client and the Worker have to agree, or a plan flickers between devices.
+  const older = { id: 'x', name: 'old', code: 'v1.o', updatedAt: 100 };
+  const newer = { id: 'x', name: 'new', code: 'v1.n', updatedAt: 200 };
+  ok('client merge is last-write-wins', clientMerge([older], [newer])[0].name === 'new');
+  ok('worker merge is last-write-wins', workerMerge([newer], [older])[0].name === 'new');
+  ok('a tombstone beats an older edit',
+     workerMerge([older], [{ id: 'x', deleted: true, updatedAt: 300 }])[0].deleted === true);
+
+  ok('worker rejects a plan with no code', clean({ id: 'abcdef', updatedAt: 1, name: 'x' }) === null);
+  ok('worker rejects a forged id', clean({ id: '../etc', updatedAt: 1, name: 'x', code: 'v1.a' }) === null);
+  ok('worker accepts a well-formed plan', clean({ id: 'abcdef', updatedAt: 1, name: 'x', code: 'v1.a' }).code === 'v1.a');
+}
+
+console.log('\ncontroller bridge');
+{
+  // A fake waypoint tree: one folder holding a mission, one folder holding
+  // nothing, which is the shape DJI Fly leaves on a controller.
+  const root = mkdtempSync(join(tmpdir(), 'dji-bridge-'));
+  const dest = join(root, 'Android/data/dji.go.v5/files/waypoint');
+  const full = 'AAAAAAAA-0000-4000-8000-000000000001';
+  const bare = 'BBBBBBBB-0000-4000-8000-000000000002';
+  mkdirSync(join(dest, full), { recursive: true });
+  mkdirSync(join(dest, bare), { recursive: true });
+  writeFileSync(join(dest, full, `${full}.kmz`), Buffer.from(bytes));
+
+  const t = `dir:${dest}`;
+  const slots = listSlots(t);
+  ok('lists every mission folder', slots.length === 2);
+  ok('reads the waypoint count out of an installed mission',
+     slots.find((x) => x.id === full)?.waypoints === m.exported.length);
+  ok('marks a folder with no kmz as unusable', slots.find((x) => x.id === bare)?.exists === false);
+
+  const smaller = buildKmz(planMission(rect, { altitude: 90, speed: 4 }, cam), 'fly');
+  const res = install(t, full, smaller);
+  ok('installing overwrites the file inside the folder',
+     listSlots(t).find((x) => x.id === full).size === smaller.length);
+  ok('installing keeps a copy of what it replaced',
+     res.backup !== null && statSync(res.backup).size === bytes.length);
+  rmSync(res.backup, { force: true });
+
+  let refused = false;
+  try { install(t, full, Buffer.from('not a kmz')); } catch { refused = true; }
+  ok('refuses to install something that fails validation', refused);
+  ok('and leaves the previous mission in place',
+     listSlots(t).find((x) => x.id === full).size === smaller.length);
+  rmSync(root, { recursive: true, force: true });
+}
 
 console.log(`\n${fails === 0 ? 'ALL PASS' : fails + ' FAILURES'}`);
 console.log(`sample kmz: ${kmzPath} (${bytes.length} bytes, ${m.exported.length} waypoints)`);

@@ -4,20 +4,72 @@ import { planMission, proposePlan, splitMission, DEFAULTS, DJI_FLY_MAX_WAYPOINTS
 import { buildKmz } from './wpml.js';
 import { createView3D } from './view3d.js';
 import { scoreCoverage } from './coverage.js';
+import { initInstall } from './install.js';
+import { encodePlan, decodePlan } from './share.js';
+import { initPlans } from './plansui.js';
+import { routeFromRead } from './route.js';
+import { createMenu } from './menu.js';
 
 const cam = CAMERAS.mini5pro;
 const $ = (id) => document.getElementById(id);
 
 const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff' };
 
-const state = { rect: null, mission: null, drawing: false };
+const state = { rect: null, mission: null, drawing: false, onDevice: null };
+
+/* ---------- the three views ---------- */
+// Planning, the plans you keep, and the controller are separate jobs on the
+// same map. The menu owns which one is on screen; each view owns its own pane
+// and talks to the others only through the callbacks wired up further down.
+const menu = createMenu([
+  { id: 'plan', label: 'New plan' },
+  { id: 'saved', label: 'Saved' },
+  { id: 'device', label: 'Controller', onShow: () => bridge.refresh() },
+]);
 
 /* ---------- map ---------- */
 const map = L.map('map', { zoomControl: true, attributionControl: true }).setView([50.0614, 19.9366], 16);
-L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-  maxZoom: 21, maxNativeZoom: 19,
-  attribution: 'Imagery &copy; Esri',
-}).addTo(map);
+
+// Imagery is what you plan against -- you are looking for the actual roof, tree
+// or slab. Streets are for finding the place at all, and topo for knowing
+// whether the ground under a 40 m flight is flat. All three come from the same
+// provider, so no extra attribution and no API key.
+const BASEMAPS = {
+  satellite: { label: 'Satellite', url: 'World_Imagery', attribution: 'Imagery &copy; Esri' },
+  streets: { label: 'Streets', url: 'World_Street_Map', attribution: 'Map &copy; Esri' },
+  topo: { label: 'Topo', url: 'World_Topo_Map', attribution: 'Topo &copy; Esri' },
+};
+const BASEMAP_KEY = 'dji.basemap';
+const tiles = {};
+let baseLayer = null;
+
+function setBasemap(name) {
+  const spec = BASEMAPS[name] ?? BASEMAPS.satellite;
+  tiles[name] ??= L.tileLayer(
+    `https://server.arcgisonline.com/ArcGIS/rest/services/${spec.url}/MapServer/tile/{z}/{y}/{x}`,
+    { maxZoom: 21, maxNativeZoom: 19, attribution: spec.attribution },
+  );
+  if (baseLayer === tiles[name]) return;
+  if (baseLayer) map.removeLayer(baseLayer);
+  baseLayer = tiles[name];
+  // Underneath the box, the path and the handles, all of which are already on
+  // the map by the time you switch.
+  baseLayer.addTo(map).bringToBack();
+  for (const b of document.querySelectorAll('#basetabs button')) b.classList.toggle('on', b.dataset.base === name);
+  try { localStorage.setItem(BASEMAP_KEY, name); } catch { /* private window */ }
+}
+
+for (const [name, spec] of Object.entries(BASEMAPS)) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.dataset.base = name;
+  b.textContent = spec.label;
+  b.addEventListener('click', () => setBasemap(name));
+  $('basetabs').append(b);
+}
+let savedBase = null;
+try { savedBase = localStorage.getItem(BASEMAP_KEY); } catch { /* private window */ }
+setBasemap(savedBase ?? 'satellite');
 
 const layers = {
   rect: L.rectangle([[0, 0], [0, 0]], {
@@ -26,6 +78,9 @@ const layers = {
   }),
   path: L.layerGroup().addTo(map),
   dots: L.layerGroup().addTo(map),
+  devicePath: L.layerGroup().addTo(map),
+  deviceDots: L.layerGroup().addTo(map),
+  devicePoses: L.layerGroup().addTo(map),
   handles: L.layerGroup().addTo(map),
   dims: L.layerGroup().addTo(map),
   gps: L.layerGroup().addTo(map),
@@ -41,6 +96,7 @@ for (const btn of document.querySelectorAll('#viewtabs button')) {
     for (const b of document.querySelectorAll('#viewtabs button')) b.classList.toggle('on', b === btn);
     $('map').hidden = activeView !== 'map';
     $('scene').hidden = activeView !== '3d';
+    $('basetabs').hidden = activeView !== 'map';
     if (activeView === 'map') map.invalidateSize();
     else view3d.reset();
   });
@@ -115,7 +171,6 @@ function showDims(b) {
 
 function setRect(b) {
   applyRect(b);
-  syncSizeInputs();
   drawHandles();
   $('areaHint').textContent = 'Drag the box to move it, corners to resize.';
   autofit();
@@ -127,29 +182,6 @@ function applyRect(b) {
   state.rect = { north: b.getNorth(), south: b.getSouth(), east: b.getEast(), west: b.getWest() };
   layers.rect.setBounds(b).addTo(map);
   showDims(b);
-}
-
-// Typing a size beats pinch-dragging a box on a phone, and it is exact.
-function syncSizeInputs() {
-  if (!state.rect) return;
-  const fr = frame((state.rect.north + state.rect.south) / 2, (state.rect.east + state.rect.west) / 2);
-  const c1 = fr.toLocal(state.rect.south, state.rect.west);
-  const c2 = fr.toLocal(state.rect.north, state.rect.east);
-  if (document.activeElement !== $('boxW')) $('boxW').value = Math.round(Math.abs(c2.x - c1.x));
-  if (document.activeElement !== $('boxD')) $('boxD').value = Math.round(Math.abs(c2.y - c1.y));
-}
-
-function resizeFromInputs() {
-  if (!state.rect) return;
-  const w = Math.max(5, Math.min(1000, +$('boxW').value || 0));
-  const d = Math.max(5, Math.min(1000, +$('boxD').value || 0));
-  const lat = (state.rect.north + state.rect.south) / 2;
-  const lon = (state.rect.east + state.rect.west) / 2;
-  setRect(boxAround(lat, lon, w, d));   // grows about the centre
-}
-for (const id of ['boxW', 'boxD']) {
-  $(id).addEventListener('change', resizeFromInputs);
-  $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } });
 }
 
 /* ---------- drag the whole box ---------- */
@@ -221,6 +253,15 @@ function boxAround(lat, lon, sideX, sideY) {
   const dLat = sideY / 2 / mPerDegLat(lat);
   const dLon = sideX / 2 / mPerDegLon(lat);
   return L.latLngBounds([lat - dLat, lon - dLon], [lat + dLat, lon + dLon]);
+}
+
+// A box that already exists keeps its size and just moves -- resizing is a
+// separate decision from placing, and having to redo it every time you move
+// somewhere is the annoying part.
+function dropBoxAt(lat, lon) {
+  const sideX = state.rect ? state.mission?.sizeX ?? 30 : 30;
+  const sideY = state.rect ? state.mission?.sizeY ?? 30 : 30;
+  setRect(boxAround(lat, lon, sideX, sideY));
 }
 
 const GPS_ERRORS = {
@@ -317,11 +358,7 @@ $('locate').addEventListener('click', async () => {
 
   const stale = age > STALE_MS;
   const rough = accuracy > 25;
-  const place = () => {
-    const sideX = state.rect ? state.mission?.sizeX ?? 30 : 30;
-    const sideY = state.rect ? state.mission?.sizeY ?? 30 : 30;
-    setRect(boxAround(lat, lon, sideX, sideY));
-  };
+  const place = () => dropBoxAt(lat, lon);
 
   map.setView([lat, lon], Math.max(map.getZoom(), 19));
 
@@ -354,14 +391,29 @@ async function search() {
   try {
     const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`);
     const j = await r.json();
-    if (j[0]) map.setView([+j[0].lat, +j[0].lon], 17);
-    else $('areaHint').textContent = 'Nothing found for that search.';
+    if (j[0]) {
+      map.setView([+j[0].lat, +j[0].lon], 17);
+      $('areaHint').textContent = `Found ${j[0].display_name.split(',').slice(0, 2).join(',')}. Drop a box, or draw one.`;
+    } else $('areaHint').textContent = 'Nothing found for that search.';
   } catch {
     $('areaHint').textContent = 'Search unavailable — pan the map instead.';
   }
   $('go').textContent = 'Find';
 }
 $('go').addEventListener('click', search);
+$('q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); search(); } });
+
+// Search moves the map; Drop commits to it. Two steps because a geocoder result
+// is a guess -- you want to look at the imagery before a box lands on it.
+$('drop').addEventListener('click', () => {
+  const c = map.getCenter();
+  const had = Boolean(state.rect);
+  dropBoxAt(c.lat, c.lng);
+  $('placeAnyway').hidden = true;
+  $('areaHint').textContent = had
+    ? 'Box moved. Drag it, or resize with the corners.'
+    : 'Box dropped. Drag it, or resize with the corners.';
+});
 $('q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); search(); } });
 
 /* ---------- params ---------- */
@@ -380,20 +432,42 @@ controls.speed.el.value = DEFAULTS.speed;
 controls.orbitPad.el.value = DEFAULTS.orbitPad;
 controls.subjectHeight.el.value = DEFAULTS.subjectHeight;
 
-function readParams() {
+// The values the controls are actually showing, which is what a plan code
+// stores. readParams() derives from these; restoring has to go the other way.
+function uiValues() {
+  const v = {};
+  for (const k of Object.keys(controls)) v[k] = +controls[k].el.value;
+  for (const id of ['nadir', 'oblique', 'orbit', 'transect']) v[id] = $(id).checked;
+  v.photoMode = $('photoMode').value;
+  v.profile = $('profile').value;
+  v.shotsPerStop = +$('shotsPerStop').value;
+  v.orbitRings = +$('orbitRings').value;
+  return v;
+}
+
+function applyUiValues(v) {
+  for (const k of Object.keys(controls)) if (v[k] !== undefined) controls[k].el.value = v[k];
+  for (const id of ['nadir', 'oblique', 'orbit', 'transect']) if (v[id] !== undefined) $(id).checked = v[id];
+  for (const id of ['photoMode', 'profile', 'shotsPerStop', 'orbitRings'])
+    if (v[id] !== undefined) $(id).value = String(v[id]);
+}
+
+// Planner params out of stored UI values. Everything that plans -- the live
+// controls and a saved code alike -- comes through here, so the two can never
+// drift apart.
+function paramsFromUi(v) {
   const p = {};
-  for (const [k, c] of Object.entries(controls)) {
-    p[k] = c.val(c.el.value);
-    $(k + 'Out').textContent = c.fmt(c.el.value);
-  }
-  p.nadir = $('nadir').checked;
-  p.oblique = $('oblique').checked;
-  p.orbit = $('orbit').checked;
-  p.transect = $('transect').checked;
-  p.photoMode = $('photoMode').value;
-  p.shotsPerStop = +$('shotsPerStop').value;
-  p.orbitRings = +$('orbitRings').value;
+  for (const [k, c] of Object.entries(controls)) p[k] = c.val(v[k]);
+  for (const id of ['nadir', 'oblique', 'orbit', 'transect']) p[id] = v[id];
+  p.photoMode = v.photoMode;
+  p.shotsPerStop = v.shotsPerStop;
+  p.orbitRings = v.orbitRings;
   return p;
+}
+
+function readParams() {
+  for (const [k, c] of Object.entries(controls)) $(k + 'Out').textContent = c.fmt(c.el.value);
+  return paramsFromUi(uiValues());
 }
 
 const override = () => { state.autofitNote = null; state.autofitAlt = null; replan(); };
@@ -423,9 +497,6 @@ $('autofit').addEventListener('click', autofit);
 function replan() {
   const p = readParams();
   $('gsdHint').textContent = `${gsdCm(cam, p.altitude).toFixed(2)} cm/px ground resolution`;
-  $('subjectHint').textContent = p.subjectHeight > 0.5
-    ? `Orbit aims at ${(p.subjectHeight / 2).toFixed(1)} m — the middle of a ${p.subjectHeight} m subject.`
-    : '0 m = flat ground. Taller subjects get a multi-ring dome and a flatter camera.';
   if (!state.rect) return;
   if (!p.nadir && !p.oblique && !p.orbit && !p.transect) {
     state.mission = null;
@@ -433,7 +504,7 @@ function replan() {
     $('stats').className = 'stats empty';
     $('stats').textContent = 'Enable at least one pass.';
     $('passList').innerHTML = '';
-    $('export').disabled = true;
+    $('autofit').hidden = true;
     return;
   }
   state.mission = planMission(state.rect, p, cam);
@@ -441,20 +512,33 @@ function replan() {
   // (tools/compare.mjs) scores every frame.
   state.coverage = scoreCoverage(state.mission, { maxCameras: 220 });
   renderPath(state.mission);
+  if (state.onDevice) showRoute(null);
   renderStats(state.mission);
   view3d.setMission(state.mission, state.coverage);
 }
 
-function renderPath(m) {
-  layers.path.clearLayers();
-  layers.dots.clearLayers();
+const PLAN_GROUPS = () => ({ path: layers.path, dots: layers.dots, poses: layers.poses });
+const DEVICE_GROUPS = () => ({ path: layers.devicePath, dots: layers.deviceDots, poses: layers.devicePoses });
+
+// `dashed` is the only difference between a plan and what is on the controller:
+// same colours, same pose ticks, same dot thinning, with a dark casing under
+// white dashes so a device route stays legible on any basemap and never reads
+// as yours.
+function renderPath(m, { groups = PLAN_GROUPS(), dashed = false } = {}) {
+  groups.path.clearLayers();
+  groups.dots.clearLayers();
   let run = [];
   let runPass = null;
   const flush = () => {
     if (run.length > 1) {
+      if (dashed) {
+        L.polyline(run, { color: '#12181f', weight: 4.5, opacity: 0.5, interactive: false })
+          .addTo(groups.path);
+      }
       L.polyline(run, {
-        color: PASS_COLOR[runPass], weight: 2, opacity: 0.85, interactive: false,
-      }).addTo(layers.path);
+        color: PASS_COLOR[runPass], weight: 2, opacity: dashed ? 1 : 0.85,
+        dashArray: dashed ? '5,4' : null, interactive: false,
+      }).addTo(groups.path);
     }
   };
   for (const w of m.waypoints) {
@@ -465,7 +549,7 @@ function renderPath(m) {
 
   // Which way each camera looks. Length encodes tilt: a nadir shot is a stub,
   // a horizontal shot is a full tick.
-  layers.poses.clearLayers();
+  groups.poses.clearLayers();
   const poseStep = Math.max(1, Math.ceil(m.waypoints.length / 120));
   m.waypoints.forEach((w, i) => {
     if (i % poseStep) return;
@@ -477,7 +561,7 @@ function renderPath(m) {
     );
     L.polyline([[w.lat, w.lon], end], {
       color: PASS_COLOR[w.pass], weight: 1.2, opacity: 0.75, interactive: false,
-    }).addTo(layers.poses);
+    }).addTo(groups.poses);
   });
 
   const step = Math.max(1, Math.ceil(m.waypoints.length / 400)); // keep the map responsive
@@ -486,12 +570,13 @@ function renderPath(m) {
     L.marker([w.lat, w.lon], {
       icon: L.divIcon({ className: 'wpdot', iconSize: [5, 5] }),
       interactive: false,
-    }).addTo(layers.dots)._icon.style.background = PASS_COLOR[w.pass];
+    }).addTo(groups.dots)._icon.style.background = PASS_COLOR[w.pass];
   });
 
   L.circleMarker([m.waypoints[0].lat, m.waypoints[0].lon],
-    { radius: 6, color: '#fff', weight: 2, fillColor: PASS_COLOR[m.waypoints[0].pass], fillOpacity: 1 })
-    .addTo(layers.path).bindTooltip('Start');
+    { radius: 6, color: dashed ? '#12181f' : '#fff', weight: 2,
+      fillColor: PASS_COLOR[m.waypoints[0].pass], fillOpacity: 1 })
+    .addTo(groups.path).bindTooltip(dashed ? 'On the controller' : 'Start');
 }
 
 // Round to whole seconds first, or 959.7 s renders as "15:60".
@@ -547,12 +632,18 @@ function renderStats(m) {
   $('warn').hidden = warns.length === 0;
   $('warn').innerHTML = warns.map((w) => `<div>${w}</div>`).join('');
 
+  // Nothing to re-propose while the plan already fits a single mission.
+  $('autofit').hidden = parts.length < 2;
+
   $('altnote').hidden = !state.autofitAlt;
   $('altnote').textContent = state.autofitAlt || '';
 
-  $('export').disabled = false;
-  $('export').textContent = parts.length > 1 ? `Accept & export ${parts.length} KMZ parts` : 'Accept & export KMZ';
-  $('exportHint').textContent = `${m.sizeX.toFixed(0)} × ${m.sizeY.toFixed(0)} m · ${s.areaHa.toFixed(2)} ha · lines ${s.sideSpacing.toFixed(1)} m apart, shots every ${s.fwdSpacing.toFixed(1)} m`;
+  $('sizeHint').textContent = `${m.sizeX.toFixed(0)} × ${m.sizeY.toFixed(0)} m · ${s.areaHa.toFixed(2)} ha · lines ${s.sideSpacing.toFixed(1)} m apart, shots every ${s.fwdSpacing.toFixed(1)} m`;
+
+  // The hash makes the plan reloadable and linkable; it is the same string the
+  // copy button hands you.
+  const code = encodePlan(state.rect, uiValues());
+  if (code) history.replaceState(null, '', `#plan=${code}`);
 }
 
 /* ---------- export ---------- */
@@ -564,10 +655,12 @@ function uuid() {
   }).toUpperCase();
 }
 
-$('export').addEventListener('click', () => {
-  if (!state.mission) return;
-  const profile = $('profile').value;
-  const parts = splitMission(state.mission);
+// KMZ files come out of Saved plans, not out of the plan being drawn: a flight
+// worth putting on the aircraft is a flight worth keeping. The file name is a
+// UUID because that is what DJI Fly wants it renamed to anyway -- one less
+// thing to get wrong at the controller.
+function downloadKmz(mission, profile) {
+  const parts = splitMission(mission);
   parts.forEach((part, i) => {
     const bytes = buildKmz(part, profile);
     const name = parts.length > 1 ? `${uuid()}_part${i + 1}of${parts.length}.kmz` : `${uuid()}.kmz`;
@@ -577,8 +670,110 @@ $('export').addEventListener('click', () => {
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
   });
-  $('exportHint').textContent = `Exported ${parts.length} file${parts.length > 1 ? 's' : ''}. Rename to the UUID of a mission folder in DJI Fly's waypoint directory.`;
+  return parts.length;
+}
+
+// A mission read back off the controller, drawn over the plan rather than
+// instead of it -- the point is comparing what is there with what you are about
+// to replace it with. Dashed and pale so it never looks like your plan.
+// A mission read off the controller becomes the same kind of thing the planner
+// produces, so it draws through renderPath and flies through the 3D view with
+// its frustum wedges -- the whole point of reading it back is looking at it
+// properly, not at a bare outline.
+// The one "other route" channel: a mission read off the controller, or a saved
+// plan being looked at before it is installed. Dashed, next to yours, one at a
+// time, and any replan takes it back down.
+function showRoute(src) {
+  for (const g of Object.values(DEVICE_GROUPS())) g.clearLayers();
+  state.onDevice = !src ? null
+    : src.kind === 'device' ? routeFromRead(src.read, cam)
+    : src.mission;
+  if (!state.onDevice) {
+    view3d.setMission(state.mission, state.coverage);
+    return;
+  }
+  renderPath(state.onDevice, { groups: DEVICE_GROUPS(), dashed: true });
+  // 3D shows whichever route you asked to look at; replanning takes it back.
+  view3d.setMission(state.onDevice, null);
+  map.fitBounds(L.latLngBounds(state.onDevice.waypoints.map((w) => [w.lat, w.lon])),
+    { padding: [50, 50], maxZoom: 19 });
+}
+
+// Builds the same bytes the export button downloads, so what the install panel
+// shows going onto the controller is what the export would have produced.
+// One shape for "files this mission becomes", whether they are going to disk or
+// to a controller.
+function partsFromMission(mission, profile, label) {
+  const all = splitMission(mission);
+  return all.map((part, i) => ({
+    name: all.length > 1 ? `${label} — part ${i + 1} of ${all.length}` : label,
+    waypoints: part.exported.length,
+    detail: `${part.params.altitude} m · ${part.passes.length} passes`,
+    bytes: buildKmz(part, profile),
+  }));
+}
+
+function missionFromCode(code) {
+  const plan = decodePlan(code);
+  if (!plan) return null;
+  return { plan, mission: planMission(plan.rect, paramsFromUi(plan.ui), cam) };
+}
+
+const bridge = initInstall({
+  badge: (text, kind) => menu.badge('device', text, kind),
+  showRoute,
+  planRoute: (saved) => missionFromCode(saved.code)?.mission ?? null,
+  // The controller installs a saved plan, so the list of them is the choice --
+  // `plans` is defined below and only read when the panel renders.
+  savedPlans: () => plans.list(),
+  partsForPlan: (saved) => {
+    const built = missionFromCode(saved.code);
+    if (!built) return null;
+    return partsFromMission(built.mission, built.plan.ui.profile ?? $('profile').value, saved.name);
+  },
 });
+
+function applyPlan(plan) {
+  applyUiValues(plan.ui);
+  const b = L.latLngBounds([plan.rect.south, plan.rect.west], [plan.rect.north, plan.rect.east]);
+  applyRect(b);
+  drawHandles();
+  map.fitBounds(b, { padding: [60, 60], maxZoom: 19 });
+  $('areaHint').textContent = 'Plan restored. Drag the box to move it, corners to resize.';
+  state.autofitNote = null;
+  state.autofitAlt = null;
+  replan();
+}
+
+// Saved plans store the same code the link carries, so a saved plan and a
+// pasted link are the same thing arriving by different routes.
+const plans = initPlans({
+  getCode: () => encodePlan(state.rect, uiValues()),
+  // Saving or deleting one changes what the controller can be handed.
+  onChange: () => bridge.plansChanged(),
+  setCount: (n) => menu.badge('saved', n || ''),
+  // You loaded a plan to work on it, so the plan is what you should be looking at.
+  onLoaded: () => menu.show('plan'),
+  applyCode: (code) => {
+    const plan = decodePlan(code);
+    if (plan) applyPlan(plan);
+    return Boolean(plan);
+  },
+  // Exporting a saved plan does not disturb the one on screen: it replans from
+  // the stored code and hands over the files.
+  exportPlan: (code) => {
+    const built = missionFromCode(code);
+    if (!built) return 0;
+    return downloadKmz(built.mission, built.plan.ui.profile ?? $('profile').value);
+  },
+  // A plan nobody named is still worth finding again: say where and how big.
+  describe: () => (state.mission
+    ? `${state.mission.sizeX.toFixed(0)}×${state.mission.sizeY.toFixed(0)} m at ${state.rect.north.toFixed(4)}, ${state.rect.west.toFixed(4)}`
+    : null),
+});
+
+const fromHash = decodePlan(location.hash);
+if (fromHash) applyPlan(fromHash);
 
 readParams();
 $('gsdHint').textContent = `${gsdCm(cam, DEFAULTS.altitude).toFixed(2)} cm/px ground resolution`;

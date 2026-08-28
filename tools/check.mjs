@@ -65,15 +65,22 @@ export function checkKmz(buf, label = 'kmz') {
   const cfg = first(wl, 'Document/missionConfig');
   if (!cfg) err('waylines.wpml has no missionConfig');
   else {
-    for (const k of ['flyToWaylineMode', 'finishAction', 'exitOnRCLost', 'takeOffSecurityHeight', 'globalTransitionalSpeed']) {
+    for (const k of ['flyToWaylineMode', 'finishAction', 'exitOnRCLost', 'globalTransitionalSpeed']) {
       if (textOf(cfg, k) === undefined) err(`missionConfig missing ${k}`);
     }
+    // The spec lists takeOffSecurityHeight as required; DJI Fly does not write
+    // it, and a mission pulled off a Mini 5 Pro has no such element. Refusing
+    // that file would mean refusing what the aircraft itself produced.
+    if (textOf(cfg, 'takeOffSecurityHeight') === undefined) warn('missionConfig has no takeOffSecurityHeight (DJI Fly omits it too)');
     for (const [k, allowed] of Object.entries(ENUMS)) {
       const v = textOf(cfg, k);
       if (v !== undefined && !allowed.includes(v)) err(`missionConfig/${k} = "${v}" not in ${allowed.join('|')}`);
     }
-    const th = parseFloat(textOf(cfg, 'takeOffSecurityHeight'));
-    if (th < 1.2 || th > 1500) err(`takeOffSecurityHeight ${th} outside [1.2, 1500]`);
+    const thText = textOf(cfg, 'takeOffSecurityHeight');
+    if (thText !== undefined) {
+      const th = parseFloat(thText);
+      if (!(th >= 1.2 && th <= 1500)) err(`takeOffSecurityHeight ${th} outside [1.2, 1500]`);
+    }
     const gs = parseFloat(textOf(cfg, 'globalTransitionalSpeed'));
     if (!(gs > 0 && gs <= 15)) err(`globalTransitionalSpeed ${gs} outside (0, 15]`);
     info.drone = `${textOf(cfg, 'droneInfo/droneEnumValue') ?? '?'}/${textOf(cfg, 'droneInfo/droneSubEnumValue') ?? '?'}`;
@@ -155,9 +162,17 @@ export function checkKmz(buf, label = 'kmz') {
         }
         const acts = find(g, 'action');
         if (!acts.length) err(`${at} actionGroup ${gid} has no action`);
+        // DJI Fly numbers action ids from 1 within a group, not 0. Unique and
+        // increasing is what actually matters -- the ids are referenced by
+        // nothing, and a real Mini 5 Pro mission fails a from-zero rule.
+        const seenIds = new Set();
+        let lastId = -Infinity;
         acts.forEach((a, ai) => {
           const id = textOf(a, 'actionId');
-          if (+id !== ai) err(`${at} actionGroup ${gid}: actionId ${id} at position ${ai} (must be contiguous from 0)`);
+          if (id === undefined || !Number.isFinite(+id)) err(`${at} actionGroup ${gid} action ${ai} has no actionId`);
+          else if (seenIds.has(+id)) err(`${at} actionGroup ${gid}: duplicate actionId ${id}`);
+          else if (+id < lastId) err(`${at} actionGroup ${gid}: actionId ${id} goes backwards`);
+          if (id !== undefined) { seenIds.add(+id); lastId = +id; }
           const fn = textOf(a, 'actionActuatorFunc');
           if (!fn) err(`${at} actionGroup ${gid} action ${ai} missing actionActuatorFunc`);
           else if (!ENUMS.actionActuatorFunc.includes(fn)) err(`${at} unknown action "${fn}"`);

@@ -35,11 +35,30 @@ body {
             white-space: nowrap; width: auto !important; height: auto !important; }
 
 #panel {
+  --pad: 18px;
   width: 340px; min-width: 340px; height: 100%; overflow-y: auto;
   background: var(--panel); border-right: 1px solid var(--line);
-  padding: 18px 18px 40px;
+  padding: 0 var(--pad) 40px;
 }
-#panel header { margin-bottom: 20px; }
+#panel header { padding-top: var(--pad); margin-bottom: 14px; }
+
+/* The switch between the three jobs the pane does. Sticky, because the plan
+   view is long and the way out of it should not be a scroll away. */
+#menu {
+  position: sticky; top: 0; z-index: 5; background: var(--panel);
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
+  margin: 0 calc(-1 * var(--pad)) 4px; padding: 4px var(--pad) 12px;
+  border-bottom: 1px solid var(--line);
+}
+#menu button { display: flex; align-items: center; justify-content: center; gap: 5px;
+               padding: 8px 4px; font-size: 12.5px; color: var(--dim); }
+#menu button.on { background: var(--panel2); border-color: #3d4753; color: var(--text);
+                  font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
+.mbadge:empty { display: none; }
+.mbadge { font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--dim);
+          border: 1px solid var(--line); border-radius: 999px; padding: 0 5px; }
+.mbadge.ok { color: var(--ok); border-color: transparent; padding: 0; font-size: 13px; }
+.pane[hidden] { display: none; }
 h1 { font-size: 17px; margin: 0; letter-spacing: -0.01em; }
 .sub { margin: 2px 0 0; color: var(--dim); font-size: 12px; }
 
@@ -47,11 +66,16 @@ h1 { font-size: 17px; margin: 0; letter-spacing: -0.01em; }
 .step:first-of-type { border-top: 0; padding-top: 0; }
 h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
      color: var(--dim); margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
-h2 .n {
+h2 .n, .substep .n {
   display: inline-flex; align-items: center; justify-content: center;
   width: 18px; height: 18px; border-radius: 50%;
   background: var(--panel2); color: var(--text); font-size: 11px;
 }
+
+/* the steps inside a view, as in the controller workflow */
+.substep { font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em;
+           color: var(--dim); margin: 18px 0 8px; display: flex; align-items: center; gap: 7px; }
+.substep:first-child { margin-top: 0; }
 
 .search { display: flex; gap: 6px; margin-bottom: 10px; }
 input[type=text], select {
@@ -139,7 +163,7 @@ details.adv .row:last-child { margin-bottom: 12px; }
 .rectbox { cursor: move; }
 #map.drawing .rectbox { cursor: crosshair; }
 
-.areabtns { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
+.areabtns { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; }
 .areabtns button { padding: 9px 12px; }
 .gpsdot { background: #4da3ff; border: 2px solid #fff; border-radius: 50%;
           width: 12px; height: 12px; margin: -6px 0 0 -6px;
@@ -157,11 +181,14 @@ details.adv .row:last-child { margin-bottom: 12px; }
   #app { flex-direction: column; height: auto; min-height: 100%; }
 
   #panel {
+    --pad: 16px;
     width: 100%; min-width: 0; height: auto; order: 1;
     border-right: 0; border-bottom: 1px solid var(--line);
-    padding: 14px 16px 24px;
+    padding: 0 var(--pad) 24px;
     overflow: visible;
   }
+  #panel header { padding-top: var(--pad); }
+  #menu button { min-height: 40px; font-size: 13px; }
   #stage { order: 2; height: 58vh; min-height: 320px; flex: none; }
 
   h1 { font-size: 19px; }
@@ -192,13 +219,74 @@ details.adv .row:last-child { margin-bottom: 12px; }
   .search button { width: 100%; }
 }
 
-/* Size the box numerically instead of dragging — the field flow. */
-.sizebox { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
-.sizebox label { display: grid; gap: 4px; }
-.sizebox span { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; }
-.sizebox input {
-  background: var(--panel2); border: 1px solid var(--line); color: var(--text);
-  border-radius: 7px; padding: 8px 9px; font: inherit; font-size: 15px;
-  font-variant-numeric: tabular-nums; width: 100%;
+/* install panel */
+.devrow { display: grid; grid-template-columns: 1fr; gap: 6px; margin-bottom: 8px; }
+.devrow select:not([hidden]) { display: block; }
+.hint.ok { color: var(--ok); }
+.hint.bad { color: var(--warn); }
+
+.slots { margin: 10px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.slots:empty { display: none; }
+.slots .hint { padding: 9px 11px; margin: 0; }
+.slot {
+  display: flex; align-items: center; gap: 9px; padding: 8px 10px; cursor: pointer;
+  background: var(--panel2); border-top: 1px solid var(--line);
 }
-.sizebox input:focus { outline: none; border-color: var(--accent); }
+.slot:first-child { border-top: 0; }
+.slot input { accent-color: var(--accent); flex: none; }
+.slot.on { background: #1b2735; }
+.slot.unusable { opacity: 0.45; cursor: default; }
+.slotmain { flex: 1; min-width: 0; }
+.slotmain b { display: block; font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.slotmain em { font-style: normal; color: var(--dim); font-size: 11px; }
+.slotmeta { color: var(--dim); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.slotmeta.bad { color: var(--warn); }
+
+.xferbox { margin-bottom: 10px; }
+.xferbox .hint { margin-top: 8px; }
+.xfer {
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 9px 10px; margin-bottom: 6px;
+}
+.xfer b { display: block; font-size: 12.5px; font-weight: 600; }
+.xfer em { font-style: normal; display: block; color: var(--dim); font-size: 11px; }
+.xsrc b { color: var(--ok); }
+.xdst b { color: var(--warn); font-variant-numeric: tabular-nums; }
+.xarrow { color: var(--dim); }
+
+.kmzpick { display: block; margin: 8px 0; font-size: 12px; color: var(--dim); cursor: pointer; }
+.kmzpick input { display: none; }
+.kmzpick span { display: block; border: 1px dashed var(--line); border-radius: 7px; padding: 8px 10px; }
+.kmzpick span:hover { border-color: var(--accent); color: var(--text); }
+.kmzpick.loaded span { border-style: solid; border-color: var(--ok); color: var(--ok); }
+
+/* saved plans */
+.planrow { display: flex; gap: 6px; }
+.saverow { margin-top: 14px; }
+.planrow input { flex: 1; font-size: 12px; }
+.planlist { margin: 8px 0; }
+.planitem { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 7px;
+            background: var(--panel2); border: 1px solid var(--line); margin-bottom: 5px; }
+.planitem.on { border-color: var(--accent); }
+.planmain { flex: 1; min-width: 0; }
+.planmain b { display: block; font-size: 12.5px; font-weight: 600; color: var(--text);
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.planmain em { font-style: normal; color: var(--dim); font-size: 11px; }
+.planitem button { padding: 4px 9px; font-size: 11.5px; }
+.planx { background: none; border: 0; color: var(--dim); font-size: 16px; padding: 0 4px; }
+.planx:hover { color: var(--warn); }
+.syncrow { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+
+/* basemap switcher, under the map/3d tabs */
+#basetabs { position: absolute; top: 48px; right: 12px; z-index: 500;
+            display: flex; background: rgba(16,20,24,0.9); border: 1px solid var(--line);
+            border-radius: 8px; overflow: hidden; }
+#basetabs[hidden] { display: none; }
+#basetabs button { border: 0; border-radius: 0; background: transparent; color: var(--dim);
+                   padding: 5px 11px; font-size: 11.5px; }
+#basetabs button.on { background: var(--panel2); color: var(--text); font-weight: 600; }
+.slotview { background: none; border: 1px solid var(--line); color: var(--dim);
+            padding: 3px 7px; font-size: 11px; border-radius: 6px; }
+.slotview:hover { color: var(--text); border-color: var(--accent); }
+.slotview.on { color: var(--text); border-color: var(--accent); background: #1b2735; }

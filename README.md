@@ -13,8 +13,9 @@ dragging.
 
 ```
 npm start          # http://localhost:8123
-npm test           # 125 assertions: geometry, poses, coverage, KMZ, validator
+npm test           # 175 assertions: geometry, poses, coverage, KMZ read+write, codes, plans, sync, bridge
 npm run compare    # score capture configurations against each other
+npm run bridge     # what controller can this machine see?
 ```
 
 **Where I am** puts a 30 m box at your GPS position with an accuracy circle, so
@@ -100,6 +101,12 @@ equiv → 71.6° × 56.8° FOV) at the chosen altitude, times `1 − overlap`.
 The map shows the flight path with **live dimensions** on the box while you drag
 it, plus a short tick at each station showing where that camera looks — the tick
 is a stub for a nadir shot and full length for a horizontal one.
+
+Three basemaps under the Map/3D tabs, and the choice sticks: **Satellite** to
+see the actual roof or slab you are planning against, **Streets** to find the
+place at all — imagery has no labels, and one courtyard looks much like another
+— and **Topo** to see whether the ground under the flight is flat. All three are
+Esri, so no API key and no second attribution.
 
 The **3D view** (top-right toggle) is the one that matters once a plan uses more
 than one altitude: multi-ring orbits, or comparing pass heights. It draws the
@@ -189,6 +196,145 @@ sufficient — a well-covered surface still reconstructs badly if it is
 textureless or moving, and the box proxy does not model the thin structures
 (chains, bars, netting) where real captures usually fail.
 
+## Saved plans, and sync between devices
+
+Plans are saved by name in the browser, and a plan is only its code, so the
+whole library is a few kilobytes. **Saved plans** at the top of the panel: name
+it, Save, Load it back later. That alone needs no server and no account.
+
+Sync adds the other device, and there is nothing to set up: no login, no key to
+copy. Every device runs under one **sync key** hardcoded in `js/plans.js`, and
+saving syncs by itself — save on the phone, open the panel on the Mac, the plan
+is there. The Sync button is only for a page that was already open. Both devices
+push to `sync/worker.js` on Cloudflare, which namespaces storage by the key's
+SHA-256 — what is stored cannot be turned back into a key. Merging is
+last-write-wins per plan id, with deletions as timestamped tombstones so
+removing a plan on the phone removes it on the Mac. Client and Worker run the
+same merge on purpose.
+
+The key ships in a public app, so it is a name and not a secret: anyone reading
+the source can read and write that plan list. For one person's saved boxes that
+is the right trade against copying a key between devices. When there is more
+than one person, the key becomes the user id and a real login goes in front of
+the same storage; nothing about the shape has to change.
+
+    cd sync && wrangler dev --local    # KV in a local emulator, no account
+    wrangler kv namespace create PLANS # then put the id in wrangler.toml
+    wrangler deploy
+
+Set `SYNC_URL` in `js/plans.js` to the deployed URL, or `dji.syncUrl` in
+localStorage to point one browser somewhere else. With neither, the app says so
+and stays local-only.
+
+## Phone, controller, MacBook
+
+The three devices each hold one piece and none of them talk: the phone has a
+real GNSS receiver and knows where you are standing, the controller has the
+mission folder, and only the MacBook can reach that folder over USB. The KMZ
+does not have to make that trip, though — a plan is deterministic, so the same
+box and settings rebuild the same file anywhere. What travels is a **plan code**:
+
+```
+v1.eyJyIjpbNTAuMDYzNzcsNTAuMDYyNzYsMTkuOTMyNDIsMTku…      (~200 characters)
+```
+
+1. On the phone, on site: **Where I am**, size the box, adjust.
+2. **Copy plan link** — it copies a link and mirrors it into the page's URL, so
+   AirDrop, Messages, or Notes all carry it.
+3. On the MacBook: paste it into **Paste a plan code** in step 1, or open the
+   link. The box, every slider, the passes and the profile come back exactly.
+4. Install onto the controller from step 4.
+
+The code carries the box corners to six decimals (about 10 cm) and the raw
+control values rather than derived ones, so a restored plan is the same plan and
+not a near miss. The test suite plans both ends and checks the waypoint counts
+match.
+
+If a KMZ reaches the Mac some other way — AirDropped from the phone, exported
+last week, sent by someone else — step 4 takes a file directly instead of the
+current plan.
+
+Why not just point the phone at the Mac's dev server over Wi-Fi? Because browser
+geolocation needs a secure context, and `http://192.168.x.x:8123` is not one, so
+the phone would lose the only thing it was brought along for.
+
+## Installing onto the controller
+
+DJI Fly has no import button, and on a controller with its own screen there is
+no iPhone Files app to fall back on. Step **4 Install** in the panel does the
+copy-rename-overwrite dance over `adb`, and shows the trade before it commits:
+
+```
+Planned mission            A1B2C3D4…0002
+67 wp · 120 m · 3 passes → replaces 52 wp from 26 Aug, 12:00
+```
+
+It is deliberately not one click. Installing destroys a mission that is already
+on the controller, so the panel lists every mission folder with its waypoint
+count and date, you pick the one to lose, and the replaced file is copied to
+`backups/` before anything is written. A KMZ that fails `check.mjs` is refused
+rather than written, because a bad file does not fail visibly in DJI Fly — the
+mission simply will not open, and you find out on site.
+
+**View** next to a slot draws what is actually in it on the map — white dashes
+over your plan — with its waypoint count, heights and drone enum. Overwriting is
+destructive, so seeing the route you are about to replace is worth more than
+reading the number of waypoints in it. `js/kmzread.js` does the reading:
+central-directory zip parsing plus `DecompressionStream`, so a KMZ that DJI Fly
+deflated opens in the browser with no dependency and no build step.
+
+The `⤓` next to a slot pulls that mission back off the controller. A mission
+DJI Fly wrote itself is the reference that settles what this aircraft expects:
+
+```
+npm run check -- ours.kmz pulled-from-controller.kmz
+```
+
+One-time setup: `brew install libmtp pkg-config`, and make a few throwaway
+waypoint missions in DJI Fly. DJI Fly only lists folders it created itself, so
+those throwaways are the slots — there is no way to add a mission, only to
+overwrite one. A multi-part plan takes as many consecutive slots as it has
+parts. Waypoint is a flight mode, so creating a dummy needs the aircraft
+powered on and linked; you do not have to fly it.
+
+Transports, in the order they are tried: **MTP** (a DJI RC), then any `adb`
+device, then `Android/data/dji.go.v5/files/waypoint` under `/Volumes` (an SD
+card or a mount), then `BRIDGE_DIR` if you set it. The API is loopback-only, so
+planning from a phone against this server works but installing does not
+(`BRIDGE_ALLOW_LAN=1` if you want it to).
+
+### Why MTP, and why a C file in a repo with no build step
+
+**adb does not work on a DJI RC 2 and never will.** Published work on this
+controller (KATMAI, Android 11, Qualcomm QCS5430) found the adb interface held
+offline, with key injection, wireless pairing, property toggles and reboot
+flows all refused; root needed boot-image patching. The RC does expose a USB
+still-image interface — class 6, subclass 1, which is MTP — and DJI leaves
+`/Android/data` browsable through it.
+
+Two things stand between that and a working install, and both cost more time to
+rediscover than to write down:
+
+**macOS hands the device to Image Capture.** `ptpcamerad` claims any still-image
+USB device the moment it is plugged in, and libmtp then gets `LIBMTP PANIC:
+Unable to initialize device` from a failed `libusb_claim_interface`. It is
+launchd-managed and respawns instantly, so the fix is to kill it immediately
+before each MTP command rather than once up front. That is what
+`shooAwayImageCapture()` does, and it is the entire reason a controller that
+"cannot connect" suddenly can.
+
+**libmtp's own CLI cannot write into a folder.** `mtp-sendfile` takes no parent,
+so it aims at the storage root with storage id 0, and the RC answers
+`get_suggested_storage_id(): could not get storage id from parent id`. Worse,
+MTP object handles are per-session: a folder id read in one process is an
+Invalid Object Handle in the next, so resolving a path and writing to it have to
+happen inside one connection. `tools/mtptool.c` is fifty lines against the same
+library that does exactly that — `ls`, `get`, `put`, `rm`, one session, path
+resolved a level at a time. `tools/bridge.mjs` compiles it on demand and
+recompiles when the source changes.
+
+`tools/install.mjs` is the same thing from the command line.
+
 ## Checking a KMZ
 
 ```
@@ -196,8 +342,18 @@ npm run check -- mission.kmz                    # validate
 npm run check -- mission.kmz from-dji-fly.kmz   # validate + diff against a real DJI file
 ```
 
+`test/fixtures/dji-fly-mini5pro.kmz` is a two-waypoint mission created in DJI
+Fly on a Mini 5 Pro and pulled off the controller. It is the reference for what
+the aircraft actually writes, and the suite asserts the validator accepts it —
+it did not, at first. DJI omits `takeOffSecurityHeight` entirely and numbers
+action ids from 1, both of which the validator called errors, so it would have
+refused a mission the drone itself produced. It also confirms the one value
+nobody could verify from documentation: **DJI Fly on a Mini 5 Pro writes
+`droneEnumValue` 68, `droneSubEnumValue` 0** — the same pair this planner
+exports.
+
 The validator enforces the WPML spec: required elements, enum values, speed and
-gimbal ranges, contiguous waypoint indices and action ids, action-group ranges
+gimbal ranges, contiguous waypoint indices, unique increasing action ids, action-group ranges
 inside the folder, POI coordinates. It reads deflated archives, so you can point
 it at a KMZ **DJI Fly generated itself** — and the second argument diffs the two
 element vocabularies, which is the only way to find out what DJI includes that

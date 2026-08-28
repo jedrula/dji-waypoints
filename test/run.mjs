@@ -182,6 +182,18 @@ console.log('\ndragged levels');
   ok('the level the grids fly at belongs to the altitude, not to a ring',
      levels.filter((l) => l.z === 40).length === 1);
 
+  // The top ring IS the altitude -- the grids fly there too, so the two are one
+  // level and nothing can prise them apart.
+  const forced = planMission(rect, { ...base, orbitHeights: [12, 20, 25] }, cam);
+  ok('the top ring stays at the set altitude even if an override says otherwise',
+     Math.max(...forced.waypoints.map((w) => w.alt)) === 40);
+  ok('and a pinned ring cannot be lifted through the ceiling',
+     alts(planMission(rect, { ...base, orbitHeights: [99, 20, 40] }, cam))
+       .every((z) => z <= 40));
+  ok('the shared level answers to the altitude even with the grids off',
+     planMission(rect, base, cam).levels.filter((l) => l.z === 40)
+       .every((l) => l.kind === 'altitude'));
+
   const xh = planMission(rect, { altitude: 40, transect: true, transectLevels: 3, nadir: false, oblique: false, orbit: false }, cam);
   const xp = planMission(rect, { altitude: 40, transect: true, transectLevels: 3, nadir: false, oblique: false, orbit: false,
                                  transectHeights: [3, xh.heights.transect[1], 40] }, cam);

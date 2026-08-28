@@ -129,10 +129,12 @@ last read it, and the mast only hops to another corner when that corner is
 clearly better.
 
 **Drag a level to move it.** Each labelled height has a grip; pull it up or down
-and the plan replans live. The height the grids fly at *is* the altitude, so
-dragging that one moves the altitude slider and everything derived from it
-follows; dragging a single orbit ring or cross-pass level pins just that one and
-leaves the rest of the spread alone. Pinned heights ride along in the plan code,
+and the plan replans live. The top level is the altitude: rings spread up *to*
+the set altitude, which is also where the grids fly, so the nadir grid, the
+oblique grid and the highest orbit ring are one level and stay tied to each
+other — drag it and the whole ceiling moves, and nothing can prise them apart.
+Below it, dragging a single orbit ring or cross-pass level pins just that one
+and leaves the rest of the spread alone. Pinned heights ride along in the plan code,
 so a dragged plan reproduces exactly on the other device. Touching any slider —
 or an auto-fit — drops the pins and returns the derived spread, which is also
 the way back out.

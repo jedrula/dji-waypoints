@@ -142,7 +142,14 @@ function orbitPass(g) {
   const derivedHeights = rings <= 1
     ? [alt]
     : Array.from({ length: rings }, (_, k) => alt * (0.5 + (0.5 * k) / (rings - 1)));
-  const heights = heightOverride?.length === derivedHeights.length ? heightOverride : derivedHeights;
+  // The TOP ring is the set altitude, always. Rings spread up TO the altitude,
+  // which is the same height the grids fly, so those two are one level and stay
+  // tied -- an override governs the rings below it, and cannot lift one through
+  // the ceiling either.
+  const top = derivedHeights.length - 1;
+  const heights = heightOverride?.length === derivedHeights.length
+    ? heightOverride.map((z, i) => (i === top ? alt : Math.min(z, alt)))
+    : derivedHeights;
 
   // Rings form a DOME rather than a cylinder: each one pulls in as it rises so
   // the slant range to the subject stays constant. That keeps framing and
@@ -270,7 +277,10 @@ export function planMission(rect, opts, cam) {
   // points, which a big box at low altitude does; append instead of spreading.
   const add = (pts) => { for (const q of pts) waypoints.push(q); };
 
-  if (p.nadir || p.oblique) heightLevels.push({ kind: 'altitude', index: 0, z: p.altitude });
+  // Something always flies at the set altitude -- the grids, the top orbit ring,
+  // the top cross level -- and they are tied to it rather than to each other,
+  // so that level answers to the altitude slider and never to one pass.
+  heightLevels.push({ kind: 'altitude', index: 0, z: p.altitude });
   if (p.nadir) {
     const r = gridPass({
       halfCross: halfX, halfAlong: halfY, sideSpacing, fwdSpacing,
@@ -297,7 +307,10 @@ export function planMission(rect, opts, cam) {
     const derived = nLevels === 1
       ? [p.altitude]
       : Array.from({ length: nLevels }, (_, k) => lowest + ((p.altitude - lowest) * k) / (nLevels - 1));
-    const levels = p.transectHeights?.length === derived.length ? p.transectHeights : derived;
+    const xTop = derived.length - 1;
+    const levels = p.transectHeights?.length === derived.length
+      ? p.transectHeights.map((z, i) => (i === xTop ? p.altitude : Math.min(z, p.altitude)))
+      : derived;
     transectHeightsUsed = levels;
 
     for (let li = 0; li < levels.length; li++) {

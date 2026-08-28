@@ -24,6 +24,16 @@ body {
          background: #0b0e11; cursor: grab; touch-action: none; }
 #scene:active { cursor: grabbing; }
 #scene[hidden] { display: none; }
+
+/* Split: map and 3D side by side, with a hairline between them. Wide screens
+   split left/right; a phone splits top/bottom, because half of a narrow screen
+   is not a map. */
+#stage.split #map { inset: 0 50% 0 0; }
+#stage.split #scene { inset: 0 0 0 50%; width: 50%;
+                      border-left: 1px solid var(--line); }
+/* The basemap picker belongs to the map, so in split it sits over the map half
+   rather than floating on the 3D side. */
+#stage.split #basetabs { right: calc(50% + 12px); }
 #viewtabs { position: absolute; top: 12px; right: 12px; z-index: 500;
             display: flex; background: rgba(16,20,24,0.9); border: 1px solid var(--line);
             border-radius: 8px; overflow: hidden; }
@@ -208,7 +218,13 @@ details.adv .row:last-child { margin-bottom: 12px; }
   .stats { grid-template-columns: 1fr 1fr; }
   .stat b { font-size: 18px; }
 
-  #viewtabs button { padding: 10px 18px; font-size: 13px; }
+  #viewtabs button { padding: 10px 14px; font-size: 13px; }
+  #stage { order: 2; }
+  #stage.split { height: 72vh; }
+  #stage.split #map { inset: 0 0 50% 0; }
+  #stage.split #scene { inset: 50% 0 0 0; width: 100%; height: 50%;
+                        border-left: 0; border-top: 1px solid var(--line); }
+  #stage.split #basetabs { right: 12px; }
   .handle { width: 22px; height: 22px; margin: -11px 0 0 -11px; }
 }
 

@@ -102,7 +102,7 @@ The map shows the flight path with **live dimensions** on the box while you drag
 it, plus a short tick at each station showing where that camera looks — the tick
 is a stub for a nadir shot and full length for a horizontal one.
 
-Three basemaps under the Map/3D tabs, and the choice sticks: **Satellite** to
+Three basemaps under the Map/Split/3D tabs, and the choice sticks: **Satellite** to
 see the actual roof or slab you are planning against, **Streets** to find the
 place at all — imagery has no labels, and one courtyard looks much like another
 — and **Topo** to see whether the ground under the flight is flat. All three are
@@ -112,12 +112,27 @@ The **3D view** (top-right toggle) is the one that matters once a plan uses more
 than one altitude: multi-ring orbits, or comparing pass heights. It draws the
 ground grid, the box, the path coloured by pass, and a frustum wedge per camera
 so you can see what each shot actually frames. Drag to orbit, scroll to zoom.
+**Split** puts the map and the 3D side by side — "where" and "at what height"
+come up together often enough that switching tabs between them is the annoying
+part. On a phone the two stack instead of splitting, because half a phone screen
+is not a map.
 
 An **altitude scale** stands at whichever box corner currently projects furthest
 left, ticked at every height the mission flies and labelled with what is up
 there — `34 m nadir + oblique + cross + orbit`, `26 m orbit · −24°`,
-`17 m orbit · −15°`. The anchor corner is picked per frame, so the scale stays
-clear of the drawing as you orbit.
+`17 m orbit · −15°`. The labels are pinned to the left margin rather than hung
+off the mast, so orbiting slides the leader lines and leaves the text where you
+last read it, and the mast only hops to another corner when that corner is
+clearly better.
+
+**Drag a level to move it.** Each labelled height has a grip; pull it up or down
+and the plan replans live. The height the grids fly at *is* the altitude, so
+dragging that one moves the altitude slider and everything derived from it
+follows; dragging a single orbit ring or cross-pass level pins just that one and
+leaves the rest of the spread alone. Pinned heights ride along in the plan code,
+so a dragged plan reproduces exactly on the other device. Touching any slider —
+or an auto-fit — drops the pins and returns the derived spread, which is also
+the way back out.
 It is a hand-rolled canvas renderer — a few thousand line segments did not
 justify pulling in a 3D library.
 

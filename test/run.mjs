@@ -157,6 +157,37 @@ ok('tilt steepens with height — level low, looking down high',
 ok(`tilt spans a real range (${rr[0][1].pitch}° to ${rr[3][1].pitch}°)`,
    rr[0][1].pitch - rr[3][1].pitch > 10);
 
+// Dragging a level in the 3D view pins one height and leaves the rest alone.
+console.log('\ndragged levels');
+{
+  const base = { altitude: 40, orbitRings: 3, nadir: false, oblique: false };
+  const derived = planMission(rect, base, cam);
+  const alts = (m) => [...new Set(m.waypoints.map((w) => Math.round(w.alt * 10) / 10))].sort((a, b) => a - b);
+  ok('the planner reports the heights it flew', derived.heights.orbit.length === 3);
+
+  const pinned = planMission(rect, { ...base, orbitHeights: [12, ...derived.heights.orbit.slice(1)] }, cam);
+  ok('a pinned ring flies at the height it was dragged to', alts(pinned)[0] === 12);
+  ok('and the other rings do not move',
+     alts(pinned).slice(1).join() === alts(derived).slice(1).join());
+
+  // A stale list -- one written before the ring count changed -- is ignored
+  // rather than half-applied.
+  const stale = planMission(rect, { ...base, orbitRings: 4, orbitHeights: [12, 20, 40] }, cam);
+  ok('a height list that no longer fits the ring count is dropped',
+     alts(stale).join() === alts(planMission(rect, { ...base, orbitRings: 4 }, cam)).join());
+
+  const levels = planMission(rect, { altitude: 40, orbitRings: 2 }, cam).levels;
+  ok('every level names the knob that owns it',
+     levels.some((l) => l.kind === 'altitude' && l.z === 40) && levels.some((l) => l.kind === 'orbit'));
+  ok('the level the grids fly at belongs to the altitude, not to a ring',
+     levels.filter((l) => l.z === 40).length === 1);
+
+  const xh = planMission(rect, { altitude: 40, transect: true, transectLevels: 3, nadir: false, oblique: false, orbit: false }, cam);
+  const xp = planMission(rect, { altitude: 40, transect: true, transectLevels: 3, nadir: false, oblique: false, orbit: false,
+                                 transectHeights: [3, xh.heights.transect[1], 40] }, cam);
+  ok('a cross-pass level can be pinned too', alts(xp)[0] === 3);
+}
+
 // Orbit density must stay inside the published 7.5-15 deg guidance.
 for (const [label, opts] of [
   ['tight ring', { altitude: 5, subjectHeight: 3, orbitPad: 0 }],
@@ -540,6 +571,12 @@ console.log('\nplan codes');
      decodePlan(`https://example.com/x/#plan=${code}`).ui.altitude === 52);
   ok('a plan code is short enough to message', code.length < 260, `${code.length} chars`);
   ok('rejects junk', decodePlan('hello') === null && decodePlan('') === null);
+  const dragged = decodePlan(encodePlan(rect, { ...ui, orbitHeights: [11, 25, 40] }));
+  ok('a plan code carries heights dragged in the 3D view',
+     dragged.ui.orbitHeights.join() === '11,25,40');
+  const payload = JSON.parse(Buffer.from(code.slice(3), 'base64url').toString());
+  ok('and leaves them out of the code entirely when nothing was dragged',
+     payload.H === undefined && payload.L === undefined);
   ok('rejects a code whose payload is not a plan', decodePlan('v1.' + Buffer.from('{"r":[1]}').toString('base64')) === null);
 
   // Same code, same plan: the point of shipping a code instead of a file.

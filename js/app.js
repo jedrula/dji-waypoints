@@ -15,7 +15,12 @@ const $ = (id) => document.getElementById(id);
 
 const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff' };
 
-const state = { rect: null, mission: null, drawing: false, onDevice: null };
+const state = {
+  rect: null, mission: null, drawing: false, onDevice: null,
+  // Heights pinned by dragging a level in the 3D view. Null means "whatever
+  // the planner derives from the altitude", which is where every plan starts.
+  orbitHeights: null, transectHeights: null,
+};
 
 /* ---------- the three views ---------- */
 // Planning, the plans you keep, and the controller are separate jobs on the
@@ -90,18 +95,29 @@ const layers = {
 /* ---------- 3D view ---------- */
 const view3d = createView3D($('scene'));
 let activeView = 'map';
-for (const btn of document.querySelectorAll('#viewtabs button')) {
-  btn.addEventListener('click', () => {
-    activeView = btn.dataset.view;
-    for (const b of document.querySelectorAll('#viewtabs button')) b.classList.toggle('on', b === btn);
-    $('map').hidden = activeView !== 'map';
-    $('scene').hidden = activeView !== '3d';
-    $('basetabs').hidden = activeView !== 'map';
-    if (activeView === 'map') map.invalidateSize();
-    else view3d.reset();
-  });
+
+// Split shows both at once: the map answers "where", the 3D answers "at what
+// height", and the two questions come up together often enough that switching
+// tabs between them is the annoying part.
+function setView(name) {
+  activeView = name;
+  const showMap = name !== '3d';
+  const show3d = name !== 'map';
+  for (const b of document.querySelectorAll('#viewtabs button')) b.classList.toggle('on', b.dataset.view === name);
+  $('stage').classList.toggle('split', name === 'split');
+  $('map').hidden = !showMap;
+  $('scene').hidden = !show3d;
+  $('basetabs').hidden = !showMap;
+  if (showMap) map.invalidateSize();
+  if (show3d) view3d.draw();
 }
-window.addEventListener('resize', () => { if (activeView === '3d') view3d.draw(); });
+for (const btn of document.querySelectorAll('#viewtabs button')) {
+  btn.addEventListener('click', () => setView(btn.dataset.view));
+}
+window.addEventListener('resize', () => {
+  if (activeView !== 'map') view3d.draw();
+  if (activeView === 'split') map.invalidateSize();
+});
 
 /* ---------- draw a rectangle by dragging ---------- */
 let dragStart = null;
@@ -442,10 +458,14 @@ function uiValues() {
   v.profile = $('profile').value;
   v.shotsPerStop = +$('shotsPerStop').value;
   v.orbitRings = +$('orbitRings').value;
+  v.orbitHeights = state.orbitHeights;
+  v.transectHeights = state.transectHeights;
   return v;
 }
 
 function applyUiValues(v) {
+  state.orbitHeights = v.orbitHeights ?? null;
+  state.transectHeights = v.transectHeights ?? null;
   for (const k of Object.keys(controls)) if (v[k] !== undefined) controls[k].el.value = v[k];
   for (const id of ['nadir', 'oblique', 'orbit', 'transect']) if (v[id] !== undefined) $(id).checked = v[id];
   for (const id of ['photoMode', 'profile', 'shotsPerStop', 'orbitRings'])
@@ -462,6 +482,8 @@ function paramsFromUi(v) {
   p.photoMode = v.photoMode;
   p.shotsPerStop = v.shotsPerStop;
   p.orbitRings = v.orbitRings;
+  p.orbitHeights = v.orbitHeights ?? null;
+  p.transectHeights = v.transectHeights ?? null;
   return p;
 }
 
@@ -470,7 +492,15 @@ function readParams() {
   return paramsFromUi(uiValues());
 }
 
-const override = () => { state.autofitNote = null; state.autofitAlt = null; replan(); };
+const override = () => {
+  state.autofitNote = null;
+  state.autofitAlt = null;
+  // Heights dragged in the 3D view are relative to nothing once a slider
+  // moves, so touching a control is also how you get the derived spread back.
+  state.orbitHeights = null;
+  state.transectHeights = null;
+  replan();
+};
 for (const c of Object.values(controls)) c.el.addEventListener('input', override);
 for (const id of ['nadir', 'oblique', 'orbit', 'transect', 'photoMode', 'profile', 'shotsPerStop', 'orbitRings'])
   $(id).addEventListener('change', override);
@@ -489,9 +519,46 @@ function autofit() {
   $('orbitRings').value = String(mission.params.orbitRings ?? 1);
   state.autofitNote = fits ? note : note;
   state.autofitAlt = alternative;
+  // An auto-fit re-derives the whole plan, including how many rings there are,
+  // so heights pinned against the old one no longer refer to anything.
+  state.orbitHeights = null;
+  state.transectHeights = null;
   replan();
 }
 $('autofit').addEventListener('click', autofit);
+
+// Dragging a level in the 3D view writes back to whatever set that height. The
+// level the grids fly at IS the altitude, so dragging it moves the slider and
+// everything derived from it; a single orbit ring or cross-pass level instead
+// gets pinned, leaving the rest of the spread alone.
+view3d.onLevelChange((handles, z) => {
+  if (!state.mission) return;
+  if (handles.some((hd) => hd.kind === 'altitude')) {
+    const el = controls.altitude.el;
+    const v = Math.round(Math.max(+el.min || 1, Math.min(+el.max || 200, z)));
+    if (+el.value === v) return;
+    el.value = v;
+    state.autofitNote = null;
+    state.autofitAlt = null;
+    replan();
+    return;
+  }
+  const ceiling = +controls.altitude.el.value;
+  const pinned = Math.round(Math.max(1, Math.min(ceiling, z)) * 10) / 10;
+  const used = state.mission.heights;
+  let changed = false;
+  for (const hd of handles) {
+    const cur = hd.kind === 'orbit' ? state.orbitHeights ?? used.orbit
+      : hd.kind === 'transect' ? state.transectHeights ?? used.transect : null;
+    if (!cur || cur[hd.index] === undefined || cur[hd.index] === pinned) continue;
+    const next = cur.slice();
+    next[hd.index] = pinned;
+    if (hd.kind === 'orbit') state.orbitHeights = next;
+    else state.transectHeights = next;
+    changed = true;
+  }
+  if (changed) replan();
+});
 
 
 function replan() {

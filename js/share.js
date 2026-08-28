@@ -22,6 +22,10 @@ const FIELDS = [
   ['shotsPerStop', 'n'],
   ['orbitRings', 'g'],
   ['profile', 'x'],
+  // Heights pinned by dragging a level in the 3D view. Lists, not numbers,
+  // and usually absent -- a code only carries them once you have dragged.
+  ['orbitHeights', 'H'],
+  ['transectHeights', 'L'],
 ];
 const PASSES = ['nadir', 'oblique', 'orbit', 'transect'];
 
@@ -38,7 +42,7 @@ function unb64url(s) {
 export function encodePlan(rect, ui) {
   if (!rect) return null;
   const o = { r: [rect.north, rect.south, rect.east, rect.west].map((n) => +n.toFixed(6)) };
-  for (const [key, short] of FIELDS) o[short] = ui[key];
+  for (const [key, short] of FIELDS) if (ui[key] !== undefined && ui[key] !== null) o[short] = ui[key];
   o.p = PASSES.reduce((mask, name, i) => mask | (ui[name] ? 1 << i : 0), 0);
   return `${VERSION}.${b64url(JSON.stringify(o))}`;
 }

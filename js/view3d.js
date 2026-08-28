@@ -29,6 +29,13 @@ export function createView3D(canvas) {
   let showCoverage = true;
   const view = { az: 35, el: 28, dist: 400, target: { x: 0, y: 0, z: 0 } };
   const NEAR = 0.5;
+  const VFOV = 28 * DEG;
+
+  let onLevelChange = null;   // set by the app; enables dragging the levels
+  let scale = null;           // last drawn altitude scale, for hit testing
+  let anchorIdx = -1;         // which outset corner currently carries the mast
+  let hoverZ = null;          // level under the pointer, or being dragged
+  let framedKey = null;       // ground box the camera was last framed to
 
   function basis() {
     const el = view.el * DEG;
@@ -52,6 +59,22 @@ export function createView3D(canvas) {
 
   function project(v, w, h, f) {
     return { x: w / 2 + (v.x / v.z) * f, y: h / 2 - (v.y / v.z) * f };
+  }
+
+  const focal = (h) => h / 2 / Math.tan(VFOV);
+
+  // The inverse of project() along the mast: which height on the vertical line
+  // through `anchor` lands on screen row `sy`. The mast is a straight line in
+  // view space, so this solves exactly rather than searching.
+  function zAtScreenY(anchor, sy, b, h, f) {
+    const v0 = toView({ x: anchor.x, y: anchor.y, z: 0 }, b);
+    const v1 = toView({ x: anchor.x, y: anchor.y, z: 1 }, b);
+    const dy = v1.y - v0.y;
+    const dz = v1.z - v0.z;
+    const k = (h / 2 - sy) / f;
+    const den = dy - k * dz;
+    if (Math.abs(den) < 1e-9) return null;
+    return (k * v0.z - v0.y) / den;
   }
 
   // Clip a segment against the near plane so points behind the camera do not
@@ -105,6 +128,10 @@ export function createView3D(canvas) {
       for (const t of p.shots) e.tilts.add(Math.round(t));
       e.n++;
     }
+    // Which planner knob owns each height, so a dragged level can be handed
+    // back to it. A height nothing claims (a device route, say) still gets a
+    // label, just no grip.
+    const owners = mission.levels ?? [];
     const levels = [...byHeight.values()]
       .map((e) => ({
         z: e.z,
@@ -115,12 +142,21 @@ export function createView3D(canvas) {
         detail: e.passes.size > 2
           ? [...e.passes].join(' + ')
           : `${[...e.passes].join(' + ')} · ${[...e.tilts].sort((a, b) => b - a).join('/')}°`,
+        handles: owners.filter((o) => Math.round(o.z * 10) / 10 === e.z),
       }))
       .sort((a, b) => a.z - b.z);
 
     scene = { pts, box, span, maxAlt, frustumLen, step, levels };
-    view.target = { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2, z: maxAlt / 2 };
-    view.dist = span * 2.2 + maxAlt * 2;
+
+    // Re-frame only when the ground box itself changed. Replanning -- which
+    // happens on every slider tick and on every pixel of a level drag -- must
+    // not yank the camera back to its default while you are working.
+    const key = `${box.x0.toFixed(1)},${box.y0.toFixed(1)},${box.x1.toFixed(1)},${box.y1.toFixed(1)}`;
+    if (key !== framedKey) {
+      framedKey = key;
+      view.target = { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2, z: maxAlt / 2 };
+      view.dist = span * 2.2 + maxAlt * 2;
+    }
   }
 
   function draw() {
@@ -138,7 +174,7 @@ export function createView3D(canvas) {
     if (!scene) return;
 
     const b = basis();
-    const f = h / 2 / Math.tan(28 * DEG);
+    const f = focal(h);
     const { box, span, pts, frustumLen, step } = scene;
 
     // ground grid
@@ -255,65 +291,131 @@ export function createView3D(canvas) {
       ctx.globalAlpha = 1;
     }
 
-    // Altitude scale: a mast at whichever box corner currently projects
-    // furthest left, ticked at every height the mission actually flies and
-    // labelled with which passes are up there.
+    // Altitude scale: a mast standing at whichever box corner currently
+    // projects furthest left, ticked at every height the mission actually
+    // flies. The readable part -- the labels -- is pinned to the left margin
+    // instead of hanging off the mast, so orbiting slides the leader lines and
+    // leaves the text where you last read it.
+    scale = null;
     if (scene.levels.length) {
-      const pad = span * 0.34;
+      const pad = span * 0.22;
       const corners = [
         { x: box.x0 - pad, y: box.y0 - pad }, { x: box.x1 + pad, y: box.y0 - pad },
         { x: box.x1 + pad, y: box.y1 + pad }, { x: box.x0 - pad, y: box.y1 + pad },
-      ];
-      let anchor = null;
-      for (const c of corners) {
+      ].map((c) => {
         const v = toView({ ...c, z: 0 }, b);
-        if (v.z <= NEAR) continue;
-        const sp = project(v, w, h, f);
-        if (!anchor || sp.x < anchor.sx) anchor = { ...c, sx: sp.x };
+        return v.z <= NEAR ? null : { ...c, sx: project(v, w, h, f).x };
+      });
+
+      // Hysteresis: the leftmost corner changes twice per quarter turn, and a
+      // scale that hops corners every few degrees of orbit is unreadable. Hold
+      // the current one until another is clearly, not marginally, better.
+      let bestIdx = -1;
+      for (let k = 0; k < corners.length; k++) {
+        if (corners[k] && (bestIdx < 0 || corners[k].sx < corners[bestIdx].sx)) bestIdx = k;
       }
+      if (bestIdx >= 0 && (anchorIdx < 0 || !corners[anchorIdx]
+                           || corners[bestIdx].sx < corners[anchorIdx].sx - w * 0.08)) {
+        anchorIdx = bestIdx;
+      }
+      const anchor = corners[anchorIdx];
 
       if (anchor) {
-        ctx.strokeStyle = 'rgba(139,152,165,0.55)';
+        ctx.strokeStyle = 'rgba(139,152,165,0.5)';
         ctx.lineWidth = 1;
         ctx.beginPath();
         line({ ...anchor, z: 0 }, { ...anchor, z: scene.maxAlt }, b, w, h, f);
         ctx.stroke();
 
-        ctx.font = '11px -apple-system, sans-serif';
+        ctx.font = '12px -apple-system, sans-serif';
         ctx.textBaseline = 'middle';
+        ctx.textAlign = 'left';
         const tick = span * 0.05;
-        let lastY = -Infinity;
+        const ticks = [];
         for (const lv of scene.levels) {
           const v = toView({ ...anchor, z: lv.z }, b);
           if (v.z <= NEAR) continue;
           const sp = project(v, w, h, f);
-          if (Math.abs(sp.y - lastY) < 13) continue;   // skip labels that would collide
-          lastY = sp.y;
-
-          const vEnd = toView({ x: anchor.x + tick, y: anchor.y + tick, z: lv.z }, b);
-          if (vEnd.z > NEAR) {
-            const spEnd = project(vEnd, w, h, f);
-            ctx.strokeStyle = 'rgba(139,152,165,0.75)';
-            ctx.beginPath();
-            ctx.moveTo(sp.x, sp.y);
-            ctx.lineTo(spEnd.x, spEnd.y);
-            ctx.stroke();
-          }
-
-          // Text runs LEFT of the mast, away from the drawing, on a backing
-          // panel so it stays readable if the mast ends up over the geometry.
-          ctx.textAlign = 'right';
-          const dw = ctx.measureText(lv.detail).width;
           const lw = ctx.measureText(lv.label).width;
-          const right = sp.x - 8;
-          ctx.fillStyle = 'rgba(11,14,17,0.82)';
-          ctx.fillRect(right - dw - lw - 14, sp.y - 8, dw + lw + 18, 16);
-          ctx.fillStyle = '#8b98a5';
-          ctx.fillText(lv.detail, right, sp.y);
-          ctx.fillStyle = '#e6edf3';
-          ctx.fillText(lv.label, right - dw - 8, sp.y);
+          const dw = ctx.measureText(lv.detail).width;
+          const grip = lv.handles.length ? 14 : 0;
+          ticks.push({ z: lv.z, lv, sp, lw, grip, ly: sp.y, bw: 10 + grip + lw + 8 + dw + 10 });
         }
-        ctx.textAlign = 'left';
+        // Levels a few metres apart project a few pixels apart. Dropping the
+        // ones that collide would also drop their grips, so the labels are
+        // pushed apart into a legible stack instead and the leader line takes
+        // the strain -- it still points at the height the level really is.
+        ticks.sort((m, n) => m.sp.y - n.sp.y);
+        const ROW = 25;
+        for (let k = 1; k < ticks.length; k++) {
+          ticks[k].ly = Math.max(ticks[k].ly, ticks[k - 1].ly + ROW);
+        }
+        for (let k = ticks.length - 2; k >= 0; k--) {
+          // Then squeeze back up if the stack ran off the bottom of the canvas.
+          ticks[k].ly = Math.min(ticks[k].ly, Math.min(ticks[k + 1].ly - ROW, h - 46 - ROW * (ticks.length - 2 - k)));
+        }
+        for (const t of ticks) {
+          t.ly = Math.max(t.ly, 14);
+          t.box = { x: 12, y: t.ly - 11, w: t.bw, h: 22 };
+        }
+
+        // Leaders first, so the panels sit on top of their own lines.
+        ctx.strokeStyle = 'rgba(139,152,165,0.35)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        for (const t of ticks) {
+          const from = t.box.x + t.box.w + 6;
+          if (t.sp.x > from) { ctx.moveTo(from, t.ly); ctx.lineTo(t.sp.x - 3, t.sp.y); }
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Ticks on the mast, angled into the scene so the height reads as a
+        // plane through the site rather than a mark on a stick.
+        ctx.strokeStyle = 'rgba(200,212,224,0.8)';
+        ctx.beginPath();
+        for (const t of ticks) {
+          const vEnd = toView({ x: anchor.x + tick, y: anchor.y + tick, z: t.z }, b);
+          if (vEnd.z <= NEAR) continue;
+          const spEnd = project(vEnd, w, h, f);
+          ctx.moveTo(t.sp.x, t.sp.y);
+          ctx.lineTo(spEnd.x, spEnd.y);
+        }
+        ctx.stroke();
+
+        for (const t of ticks) {
+          const hot = hoverZ !== null && Math.abs(hoverZ - t.z) < 0.05;
+          const r = t.box;
+          ctx.beginPath();
+          if (ctx.roundRect) ctx.roundRect(r.x, r.y, r.w, r.h, 5);
+          else ctx.rect(r.x, r.y, r.w, r.h);
+          ctx.fillStyle = hot ? 'rgba(24,32,41,0.96)' : 'rgba(11,14,17,0.9)';
+          ctx.fill();
+          ctx.strokeStyle = hot ? 'rgba(77,163,255,0.9)' : 'rgba(139,152,165,0.28)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+
+          let x = r.x + 10;
+          if (t.grip) {
+            // Three stacked bars: the same grip every draggable row in every
+            // app uses, which is the whole point of drawing it.
+            ctx.strokeStyle = hot ? '#4da3ff' : 'rgba(139,152,165,0.75)';
+            ctx.beginPath();
+            for (let k = -1; k <= 1; k++) {
+              ctx.moveTo(x, t.ly + k * 4);
+              ctx.lineTo(x + 8, t.ly + k * 4);
+            }
+            ctx.stroke();
+            x += t.grip;
+          }
+          ctx.fillStyle = '#f0f6fc';
+          ctx.fillText(t.lv.label, x, t.ly);
+          ctx.fillStyle = hot ? '#c9d5e1' : '#9dabb9';
+          ctx.fillText(t.lv.detail, x + t.lw + 8, t.ly);
+        }
+
+        scale = { anchor, ticks };
         ctx.textBaseline = 'alphabetic';
       }
     }
@@ -331,7 +433,7 @@ export function createView3D(canvas) {
     // scale + altitude readout
     ctx.fillStyle = '#8b98a5';
     ctx.font = '11px -apple-system, sans-serif';
-    ctx.fillText(`grid ${grid} m · top ${scene.maxAlt.toFixed(0)} m AGL · drag to orbit, scroll to zoom`, 10, h - 10);
+    ctx.fillText(`grid ${grid} m · top ${scene.maxAlt.toFixed(0)} m AGL · drag to orbit, scroll to zoom${onLevelChange ? ', drag a level to move it' : ''}`, 10, h - 10);
     if (showCoverage && coverage) {
       let lx = 10;
       const legend = [['good', 'good'], ['flat', 'no parallax'], ['thin', '<3 views'], ['unseen', 'unseen']];
@@ -349,12 +451,62 @@ export function createView3D(canvas) {
 
   // interaction
   let drag = null;
+
+  const local = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+
+  // Which level panel, if any, is under the pointer. Generous by a few pixels
+  // because these are small targets on a touchscreen.
+  function levelAt(x, y) {
+    if (!scale || !onLevelChange) return null;
+    for (const t of scale.ticks) {
+      if (!t.lv.handles.length) continue;
+      const r = t.box;
+      if (x >= r.x - 4 && x <= r.x + r.w + 6 && y >= r.y - 3 && y <= r.y + r.h + 3) return t;
+    }
+    return null;
+  }
+
+  // Height under the pointer, read off the mast the scale is currently drawn on.
+  function dragZ(pt) {
+    if (!scale) return null;
+    const h = canvas.clientHeight;
+    return zAtScreenY(scale.anchor, pt.y, basis(), h, focal(h));
+  }
+
   canvas.addEventListener('pointerdown', (e) => {
-    drag = { x: e.clientX, y: e.clientY };
+    const pt = local(e);
+    const t = levelAt(pt.x, pt.y);
+    if (t) {
+      // Grab offset, so the level does not jump to the pointer on the first
+      // pixel of the drag.
+      const z = dragZ(pt);
+      drag = { handles: t.lv.handles, grab: z === null ? 0 : z - t.z };
+      hoverZ = t.z;
+    } else {
+      drag = { x: e.clientX, y: e.clientY };
+    }
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener('pointermove', (e) => {
-    if (!drag) return;
+    if (!drag) {
+      const pt = local(e);
+      const t = levelAt(pt.x, pt.y);
+      canvas.style.cursor = t ? 'ns-resize' : '';
+      const z = t ? t.z : null;
+      if (z !== hoverZ) { hoverZ = z; draw(); }
+      return;
+    }
+    if (drag.handles) {
+      const z = dragZ(local(e));
+      if (z === null) return;
+      const target = Math.round(Math.max(1, Math.min(500, z - drag.grab)) * 10) / 10;
+      hoverZ = target;
+      onLevelChange(drag.handles, target);   // the app replans, which redraws
+      return;
+    }
     view.az -= (e.clientX - drag.x) * 0.4;
     view.el = Math.max(-5, Math.min(89, view.el + (e.clientY - drag.y) * 0.3));
     drag = { x: e.clientX, y: e.clientY };
@@ -363,6 +515,11 @@ export function createView3D(canvas) {
   const stop = () => { drag = null; };
   canvas.addEventListener('pointerup', stop);
   canvas.addEventListener('pointercancel', stop);
+  canvas.addEventListener('pointerleave', () => {
+    if (drag || hoverZ === null) return;
+    hoverZ = null;
+    draw();
+  });
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
     view.dist = Math.max(5, Math.min(6000, view.dist * (e.deltaY > 0 ? 1.12 : 0.89)));
@@ -371,10 +528,13 @@ export function createView3D(canvas) {
 
   return {
     setMission(m, cov) { mission = m; coverage = cov ?? null; build(); draw(); },
+    // Called with the planner handles owning the dragged level and its new
+    // height; setting it is what makes the levels draggable at all.
+    onLevelChange(fn) { onLevelChange = fn; },
     setCoverage(c) { coverage = c; draw(); },
     toggleCoverage(on) { showCoverage = on; draw(); },
     draw,
-    reset() { build(); draw(); },
+    reset() { framedKey = null; build(); draw(); },
     get view() { return view; },
   };
 }

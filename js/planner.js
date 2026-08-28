@@ -30,6 +30,12 @@ export const DEFAULTS = {
   // two cross-pass levels. Height diversity belongs to the rings.
   transectLevels: 1,
   transectSpacingScale: 1,
+  // Per-level height overrides, written by dragging a level in the 3D view.
+  // null, or a list whose length no longer matches the ring/level count, falls
+  // back to the derived spread -- so changing the ring count, or moving the
+  // altitude slider, quietly discards heights that no longer mean anything.
+  orbitHeights: null,
+  transectHeights: null,
   // Height of what you are capturing; the orbit aims at its middle, not at the
   // ground under it. Defaults to 3 m because almost everything worth splatting
   // has height -- play equipment, cars, walls, hedges, people-sized things --
@@ -100,7 +106,7 @@ function gridPass(g) {
 }
 
 function orbitPass(g) {
-  const { halfX, halfY, pad, f, alt, pitchOverride, rings, cam, frontOverlap } = g;
+  const { halfX, halfY, pad, f, alt, pitchOverride, rings, cam, frontOverlap, heightOverride } = g;
   const aimZ = (g.subjectHeight ?? 0) / 2;
   // A negative offset pulls the ring inside the box corners, which is what a
   // small subject at low altitude needs -- orbiting a playground from 50 m out
@@ -133,15 +139,16 @@ function orbitPass(g) {
   // guidance is three or more orbits at different elevations -- one looking
   // level, one down, one up -- because a subject only ever seen from one
   // elevation has no data for the others.
-  const heights = rings <= 1
+  const derivedHeights = rings <= 1
     ? [alt]
     : Array.from({ length: rings }, (_, k) => alt * (0.5 + (0.5 * k) / (rings - 1)));
+  const heights = heightOverride?.length === derivedHeights.length ? heightOverride : derivedHeights;
 
   // Rings form a DOME rather than a cylinder: each one pulls in as it rises so
   // the slant range to the subject stays constant. That keeps framing and
   // ground resolution even across rings, and it is the shape the guidance
   // recommends for anything with height.
-  const slant = Math.hypot(r, Math.max(0.5, heights[0] - aimZ));
+  const slant = Math.hypot(r, Math.max(0.5, Math.min(...heights) - aimZ));
 
   for (let ri = 0; ri < heights.length; ri++) {
     const h = heights[ri];
@@ -252,10 +259,18 @@ export function planMission(rect, opts, cam) {
 
   const waypoints = [];
   const passes = [];
+  // Every distinct height the plan flies, tagged with what owns it, so the 3D
+  // view can hand a dragged level back to the knob that set it.
+  const heightLevels = [];
+  // The heights each multi-level pass actually flew, so the UI can pin one of
+  // them without having to re-derive the whole spread.
+  let orbitHeightsUsed = null;
+  let transectHeightsUsed = null;
   // `push(...pts)` blows the call stack once a pass runs into six figures of
   // points, which a big box at low altitude does; append instead of spreading.
   const add = (pts) => { for (const q of pts) waypoints.push(q); };
 
+  if (p.nadir || p.oblique) heightLevels.push({ kind: 'altitude', index: 0, z: p.altitude });
   if (p.nadir) {
     const r = gridPass({
       halfCross: halfX, halfAlong: halfY, sideSpacing, fwdSpacing,
@@ -279,12 +294,15 @@ export function planMission(rect, opts, cam) {
     // pass is the one that earns its place -- it is the only camera in the whole
     // plan that looks under things.
     const lowest = Math.max(2, Math.min(p.altitude, p.altitude * 0.35));
-    const levels = nLevels === 1
+    const derived = nLevels === 1
       ? [p.altitude]
       : Array.from({ length: nLevels }, (_, k) => lowest + ((p.altitude - lowest) * k) / (nLevels - 1));
+    const levels = p.transectHeights?.length === derived.length ? p.transectHeights : derived;
+    transectHeightsUsed = levels;
 
     for (let li = 0; li < levels.length; li++) {
       const levelAlt = levels[li];
+      if (levelAlt !== p.altitude) heightLevels.push({ kind: 'transect', index: li, z: levelAlt });
       for (const axis of ['NS', 'EW']) {
         const r = transectPass({
           halfX, halfY, axis, f, cam, aimZ, level: li,
@@ -305,8 +323,18 @@ export function planMission(rect, opts, cam) {
       halfX, halfY, pad: p.orbitPad, f, cam, frontOverlap: p.frontOverlap,
       subjectHeight: p.subjectHeight,
       alt: p.altitude, pitchOverride: p.orbitPitch, rings: Math.max(1, p.orbitRings),
+      heightOverride: p.orbitHeights,
     });
     add(r.pts);
+    orbitHeightsUsed = r.heights;
+    r.heights.forEach((h, i) => {
+      // The top ring normally sits exactly at the set altitude, where the grids
+      // already are; leave that level to the altitude slider so a drag there
+      // moves the whole plan rather than pinning one ring to it.
+      if (!heightLevels.some((lv) => lv.kind === 'altitude' && lv.z === h)) {
+        heightLevels.push({ kind: 'orbit', index: i, z: h });
+      }
+    });
     const ringTxt = r.heights.length > 1
       ? `${r.heights.length} rings, r = ${r.r.toFixed(0)} m`
       : `r = ${r.r.toFixed(0)} m`;
@@ -377,6 +405,8 @@ export function planMission(rect, opts, cam) {
     waypoints,          // every planned photo station (for drawing)
     exported,           // what actually goes into the KMZ
     passes,
+    levels: heightLevels,
+    heights: { orbit: orbitHeightsUsed, transect: transectHeightsUsed },
     stats: {
       photos,
       waypoints: exported.length,

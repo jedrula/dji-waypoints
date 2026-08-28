@@ -57,9 +57,11 @@ export function buildProxy(halfX, halfY, subjectHeight) {
   }));
 }
 
-function sampleSurfaces(halfX, halfY, boxes, cfg) {
+// `boxes` are the surfaces being scored; `occluders` is everything solid,
+// which is those plus whatever you drew. There is no ground under either.
+function sampleSurfaces(halfX, halfY, boxes, occluders, cfg) {
   const out = [];
-  const inABox = (x, y) => boxes.some((b) =>
+  const inABox = (x, y) => occluders.some((b) =>
     x > b.min.x && x < b.max.x && y > b.min.y && y < b.max.y);
 
   // ground
@@ -117,11 +119,16 @@ function raySegmentHitsBox(p, dir, maxT, b) {
   return t1 > 1e-4;
 }
 
+// `opts.boxes` are the obstacles you drew, in the mission's local frame. They
+// block the view of everything behind them, and they are never sampled: a tree
+// next to the house is not a surface you failed to photograph, and scoring it
+// would only make a good plan look bad.
 export function scoreCoverage(mission, opts = {}) {
   const cfg = { ...SCORE_DEFAULTS, ...opts };
   const halfX = mission.sizeX / 2;
   const halfY = mission.sizeY / 2;
   const boxes = buildProxy(halfX, halfY, mission.params.subjectHeight ?? 0);
+  const occluders = [...boxes, ...(opts.boxes ?? [])];
   // Sample density follows site size: a 20 m playground needs finer steps than
   // a 400 m block, and a fixed step would either under-sample one or bury the
   // other in millions of rays.
@@ -130,7 +137,7 @@ export function scoreCoverage(mission, opts = {}) {
     groundStep: opts.groundStep ?? Math.max(1, Math.min(6, Math.min(halfX, halfY) / 6)),
     faceStep: opts.faceStep ?? Math.max(0.4, Math.min(2.5, Math.min(halfX, halfY) / 12)),
   };
-  const samples = sampleSurfaces(halfX, halfY, boxes, scaleCfg);
+  const samples = sampleSurfaces(halfX, halfY, boxes, occluders, scaleCfg);
 
   // One camera per frame: a stop with a 3-pitch fan is three cameras.
   const f = fov(mission.cam);
@@ -174,7 +181,7 @@ export function scoreCoverage(mission, opts = {}) {
       if (Math.abs(dot(v, c.up) / z) > tanV) continue;
 
       const start = { x: s.p.x + s.n.x * 0.02, y: s.p.y + s.n.y * 0.02, z: s.p.z + s.n.z * 0.02 };
-      if (boxes.some((b) => raySegmentHitsBox(start, dir, dist - 0.05, b))) continue;
+      if (occluders.some((b) => raySegmentHitsBox(start, dir, dist - 0.05, b))) continue;
 
       dirs.push(dir);
       passes.add(c.pass);
@@ -227,6 +234,7 @@ export function scoreCoverage(mission, opts = {}) {
   return {
     samples: results,
     boxes,
+    occluders,
     cameras: cams.length,
     summary: {
       surfaces: results.length,

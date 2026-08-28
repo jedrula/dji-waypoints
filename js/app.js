@@ -9,14 +9,26 @@ import { encodePlan, decodePlan } from './share.js';
 import { initPlans } from './plansui.js';
 import { routeFromRead } from './route.js';
 import { createMenu } from './menu.js';
+import { initWorld } from './worldui.js';
+import { localBox, overlaps, describe } from './obstacles.js';
+import { checkObstacles, clearingAltitude } from './collide.js';
+import { createHistory } from './history.js';
 
 const cam = CAMERAS.mini5pro;
 const $ = (id) => document.getElementById(id);
 
 const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff' };
 
+// What an obstacle looks like once the flight has been measured against it.
+// Slate is "the plan stays clear of this"; the other two are the two kinds of
+// bad news, and they are the same two colours everywhere they appear.
+const OBSTACLE_COLOR = { clear: '#9aa7b4', near: '#ffb84d', strike: '#ff5d5d' };
+
 const state = {
-  rect: null, mission: null, drawing: false, onDevice: null,
+  rect: null, mission: null, draw: null, onDevice: null,
+  // The latest collision check, and the lowest altitude that would clear
+  // everything the flight passes over. Both are null until there is a plan.
+  hazard: null, clearAlt: null,
   // Heights pinned by dragging a level in the 3D view. Null means "whatever
   // the planner derives from the altitude", which is where every plan starts.
   orbitHeights: null, transectHeights: null,
@@ -26,10 +38,29 @@ const state = {
 // Planning, the plans you keep, and the controller are separate jobs on the
 // same map. The menu owns which one is on screen; each view owns its own pane
 // and talks to the others only through the callbacks wired up further down.
+// Two startup latches, and they live up here for the same reason: module setup
+// calls into code that is written for a running app -- createMenu shows a view
+// while it is still being constructed, setBasemap runs before the map has been
+// pointed anywhere. A `let` declared further down is not merely undefined at
+// that point, it throws, which takes the whole module with it.
+//
+// `ready`: the panes and layers exist, so a view change can redraw them.
+// `urlFrozen`: startup is still deciding what the view is, so nothing should be
+// writing that decision back to the address bar yet.
+let ready = false;
+let urlFrozen = true;
+// Leaving a view cancels any half-armed rubber band: it is as clear a "no" as
+// pressing Cancel.
+function paneChanged() {
+  if (!ready) return;
+  setDrawing(null);   // which redraws the obstacles
+}
+
 const menu = createMenu([
-  { id: 'plan', label: 'New plan' },
-  { id: 'saved', label: 'Saved' },
-  { id: 'device', label: 'Controller', onShow: () => bridge.refresh() },
+  { id: 'plan', label: 'Plan', onShow: () => paneChanged() },
+  { id: 'saved', label: 'Saved', onShow: () => paneChanged() },
+  { id: 'world', label: 'Obstacles', onShow: () => paneChanged() },
+  { id: 'device', label: 'Controller', onShow: () => { paneChanged(); bridge.refresh(); } },
 ]);
 
 /* ---------- map ---------- */
@@ -47,9 +78,11 @@ const BASEMAPS = {
 const BASEMAP_KEY = 'dji.basemap';
 const tiles = {};
 let baseLayer = null;
+let activeBase = 'satellite';
 
 function setBasemap(name) {
   const spec = BASEMAPS[name] ?? BASEMAPS.satellite;
+  activeBase = BASEMAPS[name] ? name : 'satellite';
   tiles[name] ??= L.tileLayer(
     `https://server.arcgisonline.com/ArcGIS/rest/services/${spec.url}/MapServer/tile/{z}/{y}/{x}`,
     { maxZoom: 21, maxNativeZoom: 19, attribution: spec.attribution },
@@ -61,7 +94,11 @@ function setBasemap(name) {
   // the map by the time you switch.
   baseLayer.addTo(map).bringToBack();
   for (const b of document.querySelectorAll('#basetabs button')) b.classList.toggle('on', b.dataset.base === name);
+  // localStorage is the fallback for a bare visit; the URL is what wins when it
+  // has something to say. Keeping both means opening someone's link does not
+  // permanently retune your own default.
   try { localStorage.setItem(BASEMAP_KEY, name); } catch { /* private window */ }
+  writeUrl();
 }
 
 for (const [name, spec] of Object.entries(BASEMAPS)) {
@@ -81,11 +118,18 @@ const layers = {
     color: '#4da3ff', weight: 2, fill: true, fillOpacity: 0.06,
     dashArray: '5,4', className: 'rectbox',
   }),
+  // Under the flight path: what is already there is the background you are
+  // planning against, not the thing you are reading.
+  obstacles: L.layerGroup().addTo(map),
   path: L.layerGroup().addTo(map),
   dots: L.layerGroup().addTo(map),
   devicePath: L.layerGroup().addTo(map),
   deviceDots: L.layerGroup().addTo(map),
   devicePoses: L.layerGroup().addTo(map),
+  // Over it: the legs that come too close are the one thing on this map you
+  // must not miss.
+  conflicts: L.layerGroup().addTo(map),
+  obsHandles: L.layerGroup().addTo(map),
   handles: L.layerGroup().addTo(map),
   dims: L.layerGroup().addTo(map),
   gps: L.layerGroup().addTo(map),
@@ -111,10 +155,59 @@ function setView(name) {
   $('basetabs').hidden = !showMap;
   if (showMap) map.invalidateSize();
   if (show3d) view3d.draw();
+  writeUrl();
 }
 for (const btn of document.querySelectorAll('#viewtabs button')) {
   btn.addEventListener('click', () => setView(btn.dataset.view));
 }
+
+/* ---------- the URL is where the view lives ---------- */
+// One reader at startup, one writer, and nothing in between keeping a private
+// copy: where you are looking is in the address bar, so a reload lands where you
+// left off and a link lands someone else there too.
+//
+// Deliberately only the VIEW -- which basemap, which pane, where the map is
+// pointed. The plan itself already lives in the hash, and the two are different
+// kinds of thing: the hash is the content, the query is the camera on it. What
+// stays in localStorage is what is nobody else's business and would be rude to
+// force on them through a link: the split-divider position, and your default
+// basemap for a visit that names none.
+//
+function writeUrl() {
+  if (urlFrozen) return;
+  const c = map.getCenter();
+  const q = new URLSearchParams({
+    v: activeView,
+    b: activeBase,
+    c: `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`,
+    z: String(map.getZoom()),
+  });
+  const code = state.rect ? encodePlan(state.rect, uiValues()) : null;
+  window.history.replaceState(null, '', `?${q}${code ? `#plan=${code}` : ''}`);
+}
+
+function readUrl() {
+  const q = new URLSearchParams(location.search);
+  if (BASEMAPS[q.get('b')]) setBasemap(q.get('b'));
+  if (['map', 'split', '3d'].includes(q.get('v'))) setView(q.get('v'));
+  const [lat, lon] = (q.get('c') ?? '').split(',').map(Number);
+  const zoom = Number(q.get('z'));
+  // A centre without a zoom, or either of them nonsense, leaves the map where
+  // whatever else ran put it -- an auto-fit to the plan, or the default.
+  if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
+      && Number.isFinite(zoom) && zoom >= 1 && zoom <= 22) {
+    // Not animated, for two reasons. Opening a link should land where the link
+    // says, not fly there from a default somewhere else. And Leaflet's animated
+    // path waits on a CSS transition to finish -- which never happens in a tab
+    // the browser is not painting, leaving the map showing one zoom while
+    // believing it is at another.
+    map.setView([lat, lon], zoom, { animate: false });
+  }
+}
+
+// Panning is a view change like any other. `moveend` fires once per gesture,
+// so this is one write per drag rather than one per frame.
+map.on('moveend', writeUrl);
 window.addEventListener('resize', () => {
   if (activeView === 'split') setSplit(splitPct, { store: false });
   else if (activeView !== 'map') view3d.draw();
@@ -171,46 +264,74 @@ $('splitter').addEventListener('pointercancel', endSplit);
 $('splitter').addEventListener('dblclick', () => { splitPct = 50; setSplit(50); });
 
 /* ---------- draw a rectangle by dragging ---------- */
+// One rubber band, two jobs: the capture area, and a box standing in the field.
+// The gesture is identical and so is the too-small guard, so the mode is a
+// single value rather than two draw systems that each have to know the other
+// exists.
 let dragStart = null;
-$('draw').addEventListener('click', () => setDrawing(!state.drawing));
 
-function setDrawing(on) {
-  state.drawing = on;
-  $('draw').classList.toggle('armed', on);
-  $('draw').textContent = on ? 'Cancel — drag on the map' : (state.rect ? 'Redraw rectangle' : 'Draw rectangle');
-  $('map').classList.toggle('drawing', on);
-  if (on) { map.dragging.disable(); map.doubleClickZoom.disable(); }
-  else { map.dragging.enable(); map.doubleClickZoom.enable(); }
+// The area has `layers.rect` to grow into. An obstacle has nothing until it is
+// finished, so it borrows this.
+const band = L.rectangle([[0, 0], [0, 0]], {
+  color: OBSTACLE_COLOR.clear, weight: 2, dashArray: '5,4',
+  fill: true, fillOpacity: 0.15, interactive: false,
+});
+
+$('draw').addEventListener('click', () => setDrawing(state.draw === 'area' ? null : 'area'));
+
+const bandRect = (b) => ({ north: b.getNorth(), south: b.getSouth(), east: b.getEast(), west: b.getWest() });
+
+function setDrawing(mode) {
+  state.draw = mode;
+  const area = mode === 'area';
+  $('draw').classList.toggle('armed', area);
+  $('draw').textContent = area ? 'Cancel — drag on the map' : (state.rect ? 'Redraw rectangle' : 'Draw rectangle');
+  $('obsDraw').classList.toggle('armed', mode === 'obstacle');
+  $('obsDraw').textContent = mode === 'obstacle' ? 'Cancel — drag on the map' : 'Draw obstacle';
+  $('map').classList.toggle('drawing', Boolean(mode));
+  if (mode) { map.dragging.disable(); map.doubleClickZoom.disable(); }
+  else { map.dragging.enable(); map.doubleClickZoom.enable(); band.remove(); }
+  if (ready) renderObstacles();   // they stop being clickable while drawing
 }
 
 map.on('mousedown', (e) => {
-  if (!state.drawing) return;
+  if (!state.draw) return;
   dragStart = e.latlng;
-  layers.rect.setBounds(L.latLngBounds(dragStart, dragStart)).addTo(map);
+  const b = L.latLngBounds(dragStart, dragStart);
+  if (state.draw === 'area') layers.rect.setBounds(b).addTo(map);
+  else band.setBounds(b).addTo(map);
 });
 map.on('mousemove', (e) => {
-  if (!state.drawing || !dragStart) return;
+  if (!state.draw || !dragStart) return;
   const live = L.latLngBounds(dragStart, e.latlng);
-  layers.rect.setBounds(live);
-  showDims(live);
+  if (state.draw === 'area') { layers.rect.setBounds(live); showDims(live); }
+  else { band.setBounds(live); showDims(live); }
 });
 map.on('mouseup', (e) => {
-  if (!state.drawing || !dragStart) return;
+  if (!state.draw || !dragStart) return;
   const b = L.latLngBounds(dragStart, e.latlng);
+  const mode = state.draw;
   dragStart = null;
+  layers.dims.clearLayers();
   // A click with no drag is not a box. Stay armed rather than silently
   // dropping out of draw mode and leaving the user wondering what happened.
   const px = map.latLngToContainerPoint.bind(map);
   const a = px(b.getNorthWest());
   const c = px(b.getSouthEast());
   if (Math.abs(c.x - a.x) < 8 || Math.abs(c.y - a.y) < 8) {
+    if (mode === 'obstacle') {
+      band.remove();
+      $('obsStatus').textContent = 'Too small — press and drag to size the box.';
+      return;
+    }
     if (!state.rect) layers.rect.remove();
     else layers.rect.setBounds([[state.rect.south, state.rect.west], [state.rect.north, state.rect.east]]);
     $('areaHint').textContent = 'Too small — press and drag to size the box.';
     return;
   }
-  setDrawing(false);
-  setRect(b);
+  setDrawing(null);
+  if (mode === 'area') setRect(b);
+  else world.add(bandRect(b));
 });
 
 // Metre dimensions on the box edges, live while dragging. Uses the same
@@ -241,6 +362,7 @@ function setRect(b) {
   drawHandles();
   $('areaHint').textContent = 'Drag the box to move it, corners to resize.';
   autofit();
+  history.commit();
 }
 
 // Geometry only -- no handles, no re-proposal. Cheap enough to run per frame
@@ -248,6 +370,11 @@ function setRect(b) {
 function applyRect(b) {
   state.rect = { north: b.getNorth(), south: b.getSouth(), east: b.getEast(), west: b.getWest() };
   layers.rect.setBounds(b).addTo(map);
+  // Adding a layer puts it on top of its pane, which would leave the capture
+  // area covering every obstacle inside it -- and an obstacle you cannot click
+  // is one you cannot select. The area is the backdrop you place things on, so
+  // it belongs at the bottom.
+  layers.rect.bringToBack();
   showDims(b);
 }
 
@@ -256,7 +383,7 @@ let boxDrag = null;
 let dragFrame = null;
 
 layers.rect.on('mousedown', (e) => {
-  if (state.drawing || !state.rect) return;
+  if (state.draw || !state.rect) return;
   boxDrag = { start: e.latlng, bounds: layers.rect.getBounds() };
   map.dragging.disable();
   layers.handles.clearLayers();
@@ -286,6 +413,8 @@ map.on('mouseup', () => {
   if (dragFrame) { cancelAnimationFrame(dragFrame); dragFrame = null; }
   drawHandles();
   replan();
+  // One entry for the whole drag, not one per frame of it.
+  history.commit();
 });
 
 function drawHandles() {
@@ -310,6 +439,145 @@ function drawHandles() {
       showDims(live);
     });
     m.on('dragend', () => { setRect(layers.rect.getBounds()); });
+  }
+}
+
+/* ---------- saying what just happened ---------- */
+// Undo and auto-adjust both change the plan on the map rather than anything in
+// the panel, and a change you did not see is indistinguishable from one that
+// did not happen. This is the only place either of them speaks.
+let toastTimer = null;
+
+function toast(text) {
+  const el = $('toast');
+  el.textContent = text;
+  el.hidden = false;
+  el.classList.remove('fading');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.classList.add('fading');
+    toastTimer = setTimeout(() => { el.hidden = true; }, 260);
+  }, 2600);
+}
+
+/* ---------- obstacles on the map ---------- */
+// Every obstacle is drawn on every view, because "what is already there" is
+// context for planning, not a mode you switch into. Only the obstacles view
+// makes them touchable: a box you can grab is a box you can move by accident
+// while dragging the capture area over it.
+
+// Far enough that no leg of a Mini-class mission reaches out of it, near enough
+// that the global list never turns into a per-frame cost. Obstacles beyond this
+// cannot affect a plan, so they are never converted or measured.
+const NEARBY_DEG = 0.01;   // about 1.1 km
+
+function nearbyObstacles(rect) {
+  if (!rect) return [];
+  const pad = {
+    north: rect.north + NEARBY_DEG, south: rect.south - NEARBY_DEG,
+    east: rect.east + NEARBY_DEG, west: rect.west - NEARBY_DEG,
+  };
+  return world.list().filter((o) => overlaps(o, pad));
+}
+
+const gradeOf = (id) => state.hazard?.obstacles.find((o) => o.id === id)?.grade ?? 'clear';
+
+let obsDrag = null;
+
+function renderObstacles() {
+  layers.obstacles.clearLayers();
+  layers.obsHandles.clearLayers();
+  // Clickable from every view, not just the obstacles one. What is standing
+  // there is context you read while planning, and having to change panes before
+  // you can point at a building is a rule about this app rather than about the
+  // site. Drawing is the one exception: while a rubber band is armed, a press
+  // on the map means the band and nothing else.
+  const live = !state.draw;
+  for (const o of world.list()) {
+    const grade = gradeOf(o.id);
+    const on = world.selected() === o.id;
+    const box = L.rectangle([[o.south, o.west], [o.north, o.east]], {
+      color: OBSTACLE_COLOR[grade],
+      weight: on ? 2.5 : 1.5,
+      fill: true,
+      fillOpacity: grade === 'clear' ? 0.12 : 0.24,
+      interactive: live,
+      className: 'obsbox',
+    }).addTo(layers.obstacles);
+    if (!live) continue;
+    box.bindTooltip(`${describe(o)} · ${o.height} m`, { direction: 'top', sticky: true });
+    // Selecting and moving are the same gesture: press, and either let go
+    // (select) or drag (move). Re-rendering on the press would destroy the
+    // layer the drag is holding, so nothing is redrawn until the mouse is up.
+    box.on('mousedown', (e) => {
+      obsDrag = { id: o.id, start: e.latlng, bounds: box.getBounds(), box, moved: false };
+      map.dragging.disable();
+      layers.obsHandles.clearLayers();
+      L.DomEvent.stopPropagation(e);
+    });
+    if (on) obstacleHandles(o, box);
+  }
+}
+
+map.on('mousemove', (e) => {
+  if (!obsDrag) return;
+  const dLat = e.latlng.lat - obsDrag.start.lat;
+  const dLon = e.latlng.lng - obsDrag.start.lng;
+  if (Math.abs(dLat) > 1e-7 || Math.abs(dLon) > 1e-7) obsDrag.moved = true;
+  const b = obsDrag.bounds;
+  obsDrag.box.setBounds(L.latLngBounds(
+    [b.getSouth() + dLat, b.getWest() + dLon],
+    [b.getNorth() + dLat, b.getEast() + dLon],
+  ));
+});
+
+map.on('mouseup', () => {
+  if (!obsDrag) return;
+  const { id, box, moved } = obsDrag;
+  obsDrag = null;
+  map.dragging.enable();
+  if (moved) { world.reshape(id, bandRect(box.getBounds())); return; }
+  // Same as clicking one in the 3D view: selecting a box is asking to work on
+  // it, so the pane holding its name, its height and its delete comes with it.
+  const next = world.selected() === id ? null : id;
+  if (next) menu.show('world');
+  world.select(next);
+});
+
+function obstacleHandles(o, box) {
+  for (const [lat, lon] of [[o.north, o.west], [o.north, o.east], [o.south, o.west], [o.south, o.east]]) {
+    const mk = L.marker([lat, lon], {
+      draggable: true,
+      icon: L.divIcon({ className: 'handle obs', iconSize: [12, 12] }),
+    }).addTo(layers.obsHandles);
+    mk.on('drag', (e) => {
+      const p = e.target.getLatLng();
+      // the opposite corner stays put
+      const oppLat = Math.abs(lat - o.north) < 1e-9 ? o.south : o.north;
+      const oppLon = Math.abs(lon - o.west) < 1e-9 ? o.east : o.west;
+      const live = L.latLngBounds([p.lat, p.lng], [oppLat, oppLon]);
+      box.setBounds(live);
+      showDims(live);
+    });
+    mk.on('dragend', () => {
+      layers.dims.clearLayers();
+      world.reshape(o.id, bandRect(box.getBounds()));
+    });
+  }
+}
+
+// The flagged legs, laid over the path in the colour of the news. Drawn from
+// the collision result rather than re-derived, so what you see red is exactly
+// what the panel counted.
+function renderConflicts() {
+  layers.conflicts.clearLayers();
+  for (const leg of state.hazard?.legs ?? []) {
+    L.polyline([[leg.a.lat, leg.a.lon], [leg.b.lat, leg.b.lon]], {
+      color: OBSTACLE_COLOR[leg.grade],
+      weight: leg.grade === 'strike' ? 4 : 3,
+      opacity: 0.95,
+      interactive: false,
+    }).addTo(layers.conflicts);
   }
 }
 
@@ -576,7 +844,7 @@ function autofit() {
   state.transectHeights = null;
   replan();
 }
-$('autofit').addEventListener('click', autofit);
+$('autofit').addEventListener('click', () => { autofit(); history.commit(); });
 
 // Dragging a level in the 3D view writes back to whatever set that height. The
 // level the grids fly at IS the altitude, so dragging it moves the slider and
@@ -612,27 +880,193 @@ view3d.onLevelChange((handles, z) => {
 });
 
 
+// Everything downstream of "which boxes are where", without replanning the
+// flight. An obstacle moving or growing changes what the flight is measured
+// AGAINST, not the flight itself -- so a drag can track the pointer instead of
+// paying for a fresh plan and a fresh coverage score on every frame.
+function recheck() {
+  if (!state.mission) { renderObstacles(); renderFixBar(); return; }
+  const boxes = nearbyObstacles(state.rect).map((o) => localBox(o, state.mission.frame));
+  state.hazard = checkObstacles(state.mission, boxes, { clearance: world.clearance() });
+  state.clearAlt = null;
+  world.setReport(state.hazard);
+  renderObstacles();
+  renderConflicts();
+  renderHazard();
+  renderFixBar();
+  view3d.setObstacles(graded(boxes), state.hazard.legs);
+}
+
 function replan() {
   const p = readParams();
   $('gsdHint').textContent = `${gsdCm(cam, p.altitude).toFixed(2)} cm/px ground resolution`;
-  if (!state.rect) return;
+  // No area, no flight -- and so nothing true left to say about what it hits.
+  // Undo can land here, which is the only way it happens after startup, and a
+  // hazard warning about a plan that no longer exists is worse than none.
+  if (!state.rect) {
+    state.mission = null;
+    state.hazard = null;
+    state.clearAlt = null;
+    world.setReport(null);
+    for (const g of [layers.path, layers.dots, layers.poses, layers.conflicts]) g.clearLayers();
+    $('stats').className = 'stats empty';
+    $('stats').textContent = 'Draw an area to see the proposed flight.';
+    $('passList').innerHTML = '';
+    $('sizeHint').textContent = '';
+    $('warn').hidden = true;
+    $('autofit').hidden = true;
+    renderHazard();
+    renderFixBar();
+    renderObstacles();
+    view3d.setMission(null);
+    view3d.setObstacles([], []);
+    writeUrl();   // no plan left to name in the address bar either
+    return;
+  }
   if (!p.nadir && !p.oblique && !p.orbit && !p.transect) {
     state.mission = null;
-    layers.path.clearLayers(); layers.dots.clearLayers();
+    state.hazard = null;
+    state.clearAlt = null;
+    world.setReport(null);
+    layers.path.clearLayers(); layers.dots.clearLayers(); layers.conflicts.clearLayers();
     $('stats').className = 'stats empty';
     $('stats').textContent = 'Enable at least one pass.';
     $('passList').innerHTML = '';
     $('autofit').hidden = true;
+    renderHazard();
+    renderFixBar();
     return;
   }
   state.mission = planMission(state.rect, p, cam);
+  // The obstacles near this plan, in its own local metres. They do two jobs:
+  // they are what the flight is measured against, and they block the camera --
+  // the coverage score stops counting a surface it can only see through one of
+  // them. They are never scored themselves.
+  const boxes = nearbyObstacles(state.rect).map((o) => localBox(o, state.mission.frame));
   // Cap the camera count so scoring stays interactive on big plans; the CLI
   // (tools/compare.mjs) scores every frame.
-  state.coverage = scoreCoverage(state.mission, { maxCameras: 220 });
+  state.coverage = scoreCoverage(state.mission, { maxCameras: 220, boxes });
+  state.hazard = checkObstacles(state.mission, boxes, { clearance: world.clearance() });
+  // The fix costs several trial plans, and a drag replans on every frame. It is
+  // not news you can act on mid-gesture anyway, so it waits for you to let go.
+  state.clearAlt = (state.hazard.strikes || state.hazard.near) && !boxDrag && !obsDrag
+    ? clearingFix(p, boxes)
+    : null;
+  world.setReport(state.hazard);
   renderPath(state.mission);
+  renderObstacles();
+  renderConflicts();
   if (state.onDevice) showRoute(null);
   renderStats(state.mission);
   view3d.setMission(state.mission, state.coverage);
+  view3d.setObstacles(graded(boxes), state.hazard.legs);
+}
+
+// The same boxes the check ran on, each carrying its verdict and whether it is
+// the one being worked on -- which is all either view needs to draw them.
+const graded = (boxes) => boxes.map((b) => ({
+  ...b, grade: gradeOf(b.id), selected: world.selected() === b.id,
+}));
+
+// Selecting a box changes how it is drawn in both views and nothing else, so it
+// needs neither a replan nor a re-measure. Without this the 3D view keeps the
+// old selection until something else happens to invalidate it.
+function showSelection() {
+  renderObstacles();
+  if (!state.mission) return;
+  const boxes = nearbyObstacles(state.rect).map((o) => localBox(o, state.mission.frame));
+  view3d.setObstacles(graded(boxes), state.hazard?.legs ?? []);
+}
+
+// An altitude at which this plan genuinely clears everything -- found by
+// planning it and measuring it, not by adding the clearance to the tallest box.
+//
+// Arithmetic gets it wrong in a way that matters. Raising the altitude lifts
+// the grids, but the orbit rings spread DOWNWARD from it, so the leg that
+// descends to the lowest ring still cuts across the site. Measured on a real
+// scene, the arithmetic floor was 31 m and the altitude that actually cleared
+// it was 65 -- so a march upward from the floor in fixed steps either stops
+// short or costs a dozen trial plans.
+//
+// Climbing helps monotonically in every case worth planning, so binary search
+// finds the lowest clean altitude in about eight trials over the whole slider.
+// It is a search, not a proof: what makes the answer safe is that only an
+// altitude whose own trial came back clean is ever returned.
+//
+// The local frame comes from the rectangle alone, so the boxes hold good across
+// every trial. Only ever run when there is already bad news to act on.
+function lowestClearing(base, boxes, from) {
+  const clearance = world.clearance();
+  const max = +controls.altitude.el.max;
+  if (from > max) return null;
+
+  const clears = (alt) => {
+    const trial = planMission(state.rect, { ...base, altitude: alt }, cam);
+    const check = checkObstacles(trial, boxes, { clearance });
+    return !check.strikes && !check.near;
+  };
+
+  // The ceiling is the one altitude worth testing first: if the highest the
+  // slider goes does not clear the site, nothing does, and the answer is to
+  // move the box rather than to climb. That is one trial, not a whole search.
+  if (!clears(max)) return null;
+  if (clears(from)) return from;
+
+  let lo = from;   // known not to clear
+  let hi = max;    // known to clear
+  while (hi - lo > 1) {
+    const mid = Math.round((lo + hi) / 2);
+    if (clears(mid)) hi = mid;
+    else lo = mid;
+  }
+  return hi;
+}
+
+// The floor below which no altitude can help: you cannot clear a box by flying
+// under it. Cheap, and it saves the search several trials.
+const clearingFloor = (boxes) =>
+  Math.ceil(clearingAltitude(state.mission, boxes, world.clearance()) ?? 0);
+
+// What the panel offers: raise the altitude, and nothing else.
+const clearingFix = (base, boxes) =>
+  lowestClearing(base, boxes, Math.max(clearingFloor(boxes), +controls.altitude.el.value + 1));
+
+// Everything the planner can change to get out of the way, tried in the order a
+// person would try them.
+//
+// Altitude first, always: it is one number, it is the number the resolution
+// hint is about, and it fixes anything the flight passes OVER. When it cannot,
+// the reason is almost always a thing standing BESIDE the orbit -- a mast, a
+// gable end -- which no amount of climbing clears, because the ring goes round
+// it at every height. That one is fixed by pushing the ring outwards, and it
+// costs only the orbit pass rather than the resolution of the whole flight.
+//
+// Both are searched the same way and neither is guessed: an answer is returned
+// only if a trial plan built with it came back with nothing hit and nothing
+// inside the clearance.
+const PAD_STEP = 5;
+
+function autoAdjust() {
+  if (!state.mission || !state.rect) return null;
+  const base = readParams();
+  const boxes = nearbyObstacles(state.rect).map((o) => localBox(o, state.mission.frame));
+  if (!boxes.length) return null;
+
+  const alt = clearingFix(base, boxes);
+  if (alt !== null) return { altitude: alt };
+
+  // Widening the ring changes the geometry the altitude search is working
+  // against, so each pad gets its own search rather than reusing the last
+  // answer. The current altitude is allowed here -- a wider orbit may clear the
+  // site without climbing at all, which is the better fix when it exists.
+  const padEl = controls.orbitPad.el;
+  const floor = Math.max(clearingFloor(boxes), +controls.altitude.el.min);
+  for (let pad = +padEl.value + PAD_STEP; pad <= +padEl.max; pad += PAD_STEP) {
+    const withPad = { ...base, orbitPad: pad };
+    const a = lowestClearing(withPad, boxes, Math.max(floor, +controls.altitude.el.value));
+    if (a !== null) return { altitude: a, orbitPad: pad };
+  }
+  return null;
 }
 
 const PLAN_GROUPS = () => ({ path: layers.path, dots: layers.dots, poses: layers.poses });
@@ -697,6 +1131,8 @@ function renderPath(m, { groups = PLAN_GROUPS(), dashed = false } = {}) {
     .addTo(groups.path).bindTooltip(dashed ? 'On the controller' : 'Start');
 }
 
+const fmtM = (v) => `${Number.isInteger(v) ? v : v.toFixed(1)} m`;
+
 // Round to whole seconds first, or 959.7 s renders as "15:60".
 const mmss = (s) => {
   const t = Math.round(s);
@@ -744,6 +1180,9 @@ function renderStats(m) {
   if (cs && cs.withDownAngle < 30 && (m.params.subjectHeight ?? 0) > 0.5) {
     warns.push(`Only ${cs.withDownAngle.toFixed(0)}% of surface is seen from above. Nothing reconstructs a top it never saw — add the nadir grid or a higher ring.`);
   }
+  if (m.params.photoMode === 'waypoint') {
+    warns.push(`Set the camera to Single shot in DJI Fly before launching. A Timed Interval left set there keeps firing through every hover, and this mission hovers at all ${s.waypoints} waypoints — a flight on 28 Aug 2026 came back 41% duplicates that way (docs/2026-08-28-duplicate-frames.md).`);
+  }
   if (m.params.altitude > 120) warns.push('Above 120 m AGL is outside EU/US open-category limits.');
   if (m.params.altitude < 12) warns.push('Below ~12 m the mission depends on GNSS that canopy degrades, and vision sensing misses thin branches. Set obstacle avoidance to Brake and keep line of sight.');
   if (s.batteries > 1) warns.push(`Plan needs about ${s.batteries} batteries at ${m.params.usableFlightMin} min usable each.`);
@@ -756,13 +1195,109 @@ function renderStats(m) {
   $('altnote').hidden = !state.autofitAlt;
   $('altnote').textContent = state.autofitAlt || '';
 
+  renderHazard();
+  renderFixBar();
+
   $('sizeHint').textContent = `${m.sizeX.toFixed(0)} × ${m.sizeY.toFixed(0)} m · ${s.areaHa.toFixed(2)} ha · lines ${s.sideSpacing.toFixed(1)} m apart, shots every ${s.fwdSpacing.toFixed(1)} m`;
 
-  // The hash makes the plan reloadable and linkable; it is the same string the
-  // copy button hands you.
-  const code = encodePlan(state.rect, uiValues());
-  if (code) history.replaceState(null, '', `#plan=${code}`);
+  // The plan is half of what the URL says; writeUrl composes it with the other
+  // half rather than each of them stamping on the other's part of the address.
+  writeUrl();
 }
+
+// What the flight hits, said where you are looking at the flight. The obstacles
+// view has the full list; this is the part you cannot be allowed to miss while
+// reading the stats, so it names the worst few and offers the one fix that is a
+// single number away.
+function renderHazard() {
+  const el = $('hazard');
+  const h = state.hazard;
+  el.innerHTML = '';
+  el.hidden = !h || (!h.strikes && !h.near);
+  if (el.hidden) return;
+
+  el.classList.toggle('strike', h.strikes > 0);
+  const head = document.createElement('b');
+  head.textContent = h.strikes
+    ? `The flight passes through ${h.strikes} obstacle${h.strikes === 1 ? '' : 's'}.`
+    : `${h.near} obstacle${h.near === 1 ? '' : 's'} within ${fmtM(h.clearance)} of the flight.`;
+  el.append(head);
+
+  for (const o of h.obstacles.filter((x) => x.grade).slice(0, 5)) {
+    const row = document.createElement('div');
+    row.className = `hazrow ${o.grade}`;
+    const what = o.name || `${fmtM(o.height)} box`;
+    row.textContent = o.grade === 'strike'
+      ? `${what} — ${o.legs} leg${o.legs === 1 ? '' : 's'} go through it`
+      : `${what} — ${fmtM(o.dist)} at the closest`;
+    el.append(row);
+  }
+
+  // Offered only when it has been checked. A mast beside the orbit is not
+  // solved by climbing, and there is no altitude to suggest for it -- saying
+  // nothing is much better than a button that does not do what it says.
+  if (state.clearAlt) {
+    const fix = document.createElement('button');
+    fix.type = 'button';
+    fix.className = 'linkish';
+    fix.textContent = `Raise the altitude to ${state.clearAlt} m — that clears everything by ${fmtM(h.clearance)}`;
+    fix.addEventListener('click', () => { controls.altitude.el.value = state.clearAlt; override(); });
+    el.append(fix);
+  }
+}
+
+// The same news as the panel, on the stage, because the stage is where you are
+// looking when it matters. Only ever appears when there is something to act on.
+function renderFixBar() {
+  const h = state.hazard;
+  const bar = $('fixbar');
+  const bad = Boolean(h && (h.strikes || h.near));
+  bar.hidden = !bad;
+  if (!bad) return;
+  bar.classList.toggle('near', !h.strikes);
+  $('fixnote').textContent = h.strikes
+    ? `Flight goes through ${h.strikes} obstacle${h.strikes === 1 ? '' : 's'}`
+    : `${h.near} within ${fmtM(h.clearance)} of the flight`;
+}
+
+// Search for something the planner can change, apply it, and say what it was.
+// The search costs a few dozen trial plans, which is why it happens on a click
+// rather than on every replan.
+function applyAdjust() {
+  const btn = $('fixgo');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = 'Looking…';
+  // A timer, not requestAnimationFrame: rAF does not fire while the tab is
+  // hidden, so switching away mid-click left the search unstarted and the
+  // button saying "Looking…" for ever. The delay exists only to let that label
+  // paint before the search blocks the thread; the try/finally is what
+  // guarantees the button comes back either way.
+  setTimeout(() => {
+    let fix = null;
+    try {
+      fix = autoAdjust();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Adjust';
+    }
+    if (!fix) {
+      toast('Nothing the altitude or the orbit offset can do clears this. '
+            + 'Move the box, or check the obstacle heights.');
+      return;
+    }
+    const said = [`altitude ${fix.altitude} m`];
+    if (fix.orbitPad !== undefined) {
+      controls.orbitPad.el.value = fix.orbitPad;
+      said.push(`orbit offset ${fix.orbitPad} m`);
+    }
+    controls.altitude.el.value = fix.altitude;
+    override();
+    history.commit();
+    toast(`Adjusted to ${said.join(' and ')} — clears everything by ${fmtM(world.clearance())}.`);
+  }, 16);
+}
+$('fixgo').addEventListener('click', applyAdjust);
 
 /* ---------- export ---------- */
 function uuid() {
@@ -808,11 +1343,25 @@ function showRoute(src) {
     : src.mission;
   if (!state.onDevice) {
     view3d.setMission(state.mission, state.coverage);
+    // Back to the plan's own verdict. With no plan there is no frame to put the
+    // boxes in, and nothing to draw them against either.
+    view3d.setObstacles(
+      state.mission ? graded(nearbyObstacles(state.rect).map((o) => localBox(o, state.mission.frame))) : [],
+      state.hazard?.legs ?? [],
+    );
     return;
   }
   renderPath(state.onDevice, { groups: DEVICE_GROUPS(), dashed: true });
   // 3D shows whichever route you asked to look at; replanning takes it back.
   view3d.setMission(state.onDevice, null);
+  // The obstacles stay -- a route you are about to install is exactly the thing
+  // to look at against them. Ungraded, though: every grade on screen belongs to
+  // the plan, and colouring someone else's route with the plan's verdict would
+  // be a lie in the most expensive possible place.
+  view3d.setObstacles(
+    nearbyObstacles(state.onDevice.rect ?? state.rect).map((o) => localBox(o, state.onDevice.frame)),
+    [],
+  );
   map.fitBounds(L.latLngBounds(state.onDevice.waypoints.map((w) => [w.lat, w.lon])),
     { padding: [50, 50], maxZoom: 19 });
 }
@@ -861,7 +1410,49 @@ function applyPlan(plan) {
   state.autofitNote = null;
   state.autofitAlt = null;
   replan();
+  history.commit();
 }
+
+// The world the plan flies through. It owns the obstacle list and the clearance;
+// the app owns what a plan makes of them, which is why every change here comes
+// back through replan rather than being drawn from inside the view.
+const world = initWorld({
+  // A live drag only needs re-measuring; letting go is what earns a full replan,
+  // because an obstacle also occludes the camera and that does change the score.
+  onChange: ({ live = false, remote = false } = {}) => {
+    if (live) { recheck(); return; }
+    renderObstacles();
+    replan();
+    // A box that arrived from the phone is not an action taken here, so it is
+    // not one to undo -- but the stack still has to know it exists.
+    if (remote) history.refresh();
+    else history.commit();
+  },
+  onSelect: () => showSelection(),
+  onFocus: (o) => {
+    if (menu.current() !== 'world') return;
+    const b = L.latLngBounds([o.south, o.west], [o.north, o.east]);
+    if (!map.getBounds().contains(b)) map.fitBounds(b, { padding: [80, 80], maxZoom: 20 });
+  },
+  onDraw: () => {
+    setDrawing(state.draw === 'obstacle' ? null : 'obstacle');
+    $('obsStatus').textContent = state.draw ? 'Drag a box over it on the map.' : '';
+  },
+  setCount: (n) => menu.badge('world', n || ''),
+});
+
+// Dragging the top of a box in the 3D view is the other way to say how tall it
+// is, and the better one: you are looking at the flight while you do it.
+view3d.onBoxHeight((id, height, opts) => world.setHeight(id, height, opts));
+
+// Clicking one selects it. Selection is one thing across all three views, so
+// the box lights up in 3D, grows handles on the map, and its row -- the only
+// place a name or a delete lives -- is put in front of you rather than left a
+// pane away.
+view3d.onBoxSelect((id) => {
+  menu.show('world');
+  world.select(id);
+});
 
 // Saved plans store the same code the link carries, so a saved plan and a
 // pasted link are the same thing arriving by different routes.
@@ -890,9 +1481,93 @@ const plans = initPlans({
     : null),
 });
 
+/* ---------- undo ---------- */
+// The rectangle, the control values and the obstacle list. Everything else --
+// the waypoints, the coverage, the collision verdict -- is derived from those,
+// so a snapshot of the three is a snapshot of the app.
+const history = createHistory({
+  snapshot: () => ({
+    rect: state.rect ? { ...state.rect } : null,
+    ui: uiValues(),
+    obstacles: world.list().map((o) => ({ ...o })),
+  }),
+  restore: (snap) => {
+    applyUiValues(snap.ui);
+    world.restore(snap.obstacles);
+    if (snap.rect) {
+      applyRect(L.latLngBounds([snap.rect.south, snap.rect.west], [snap.rect.north, snap.rect.east]));
+      drawHandles();
+    } else {
+      state.rect = null;
+      layers.rect.remove();
+      layers.handles.clearLayers();
+      layers.dims.clearLayers();
+    }
+    state.autofitNote = null;
+    state.autofitAlt = null;
+    replan();
+  },
+  // A box that arrived from the other device belongs in every snapshot on the
+  // stack, or undoing past its arrival would delete it. See js/history.js.
+  rebase: (snap, before, after) => {
+    const had = new Set(before.obstacles.map((o) => o.id));
+    const arrived = after.obstacles.filter((o) => !had.has(o.id));
+    if (!arrived.length) return snap;
+    const ids = new Set(snap.obstacles.map((o) => o.id));
+    return { ...snap, obstacles: [...snap.obstacles, ...arrived.filter((o) => !ids.has(o.id))] };
+  },
+});
+
+// What a person would call one action. A slider being dragged is one, not
+// forty, so sliders commit on `change` -- the release -- while `input` only
+// replans. Both events fire for the same drag, which is exactly why the two
+// jobs can be split across them.
+for (const c of Object.values(controls)) c.el.addEventListener('change', () => history.commit());
+for (const id of ['nadir', 'oblique', 'orbit', 'transect', 'photoMode', 'profile', 'shotsPerStop', 'orbitRings'])
+  $(id).addEventListener('change', () => history.commit());
+
+function stepHistory(back) {
+  const moved = back ? history.undo() : history.redo();
+  if (!moved) {
+    toast(back ? 'Nothing left to undo.' : 'Nothing to redo.');
+    return;
+  }
+  const d = history.depth();
+  toast(back
+    ? `Undone.${d.past ? ` ${d.past} more step${d.past === 1 ? '' : 's'} back.` : ' Back to the start.'}`
+    : `Redone.${d.future ? ` ${d.future} more forward.` : ''}`);
+}
+
+window.addEventListener('keydown', (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k !== 'z' && k !== 'y') return;
+  // A text box has its own undo, and it is the one you meant while the caret is
+  // in it. Same for a number field mid-edit.
+  const el = document.activeElement;
+  if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)
+             && !['range', 'checkbox', 'radio'].includes(el.type))) return;
+  e.preventDefault();
+  stepHistory(k === 'z' && !e.shiftKey);
+});
+
 const fromHash = decodePlan(location.hash);
 if (fromHash) applyPlan(fromHash);
 
+// After the plan, because a plan auto-fits the map and an explicit centre in
+// the link is the more specific instruction -- it was written by someone who
+// had already looked at that plan and moved somewhere.
+readUrl();
+
 readParams();
 $('gsdHint').textContent = `${gsdCm(cam, DEFAULTS.altitude).toFixed(2)} cm/px ground resolution`;
-window.__state = state; // handy when poking at it from the console
+ready = true;
+renderObstacles();   // they are context, so they are on the map before any plan is
+urlFrozen = false;
+writeUrl();          // a bare visit still ends up with an address worth copying
+// Handy when poking at it from the console, which is most of how the 3D view
+// gets debugged -- there is nothing in the DOM to inspect.
+window.__state = state;
+window.__view3d = view3d;
+window.__world = world;
+window.__map = map;

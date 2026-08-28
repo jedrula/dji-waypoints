@@ -11,3 +11,6 @@ backups/
 
 # compiled on demand by tools/bridge.mjs
 tools/mtptool
+
+# photos pulled off the aircraft, kept out of git
+captures/

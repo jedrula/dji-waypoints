@@ -51,6 +51,31 @@ body {
 #splitter[hidden] { display: none; }
 #splitter::after { content: ''; position: absolute; inset: 0 5px; background: var(--line); }
 #splitter:hover::after, #splitter.dragging::after { background: var(--accent); inset: 0 4px; }
+/* The one thing on the stage that is not a view control: what the flight hits,
+   and the button that gets it out of the way. Top centre, because it belongs to
+   neither the map nor the 3D view -- it is true of the plan, whichever you are
+   looking at. */
+#fixbar { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 550;
+          display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 12px;
+          background: rgba(43,26,26,0.95); border: 1px solid #6d3535; border-radius: 9px;
+          font-size: 12.5px; color: #ff9c9c; max-width: min(520px, calc(100% - 24px)); }
+#fixbar[hidden] { display: none; }
+#fixbar.near { background: rgba(43,31,26,0.95); border-color: #5c4230; color: var(--accent2); }
+#fixbar span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#fixbar button { background: rgba(255,255,255,0.12); border-color: transparent; color: #fff;
+                 padding: 5px 12px; font-size: 12.5px; font-weight: 600; flex: none; }
+#fixbar button:hover:not(:disabled) { background: rgba(255,255,255,0.2); border-color: transparent; }
+
+/* What just happened, for actions whose result is on the map rather than in the
+   panel -- an undo, an auto-adjust. Says it and gets out of the way. */
+#toast { position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%); z-index: 560;
+         background: rgba(16,20,24,0.95); border: 1px solid var(--line); border-radius: 8px;
+         padding: 8px 14px; font-size: 12.5px; color: var(--text); pointer-events: none;
+         max-width: min(560px, calc(100% - 24px)); text-align: center;
+         opacity: 1; transition: opacity 0.25s; }
+#toast[hidden] { display: none; }
+#toast.fading { opacity: 0; }
+
 #viewtabs { position: absolute; top: 12px; right: 12px; z-index: 500;
             display: flex; background: rgba(16,20,24,0.9); border: 1px solid var(--line);
             border-radius: 8px; overflow: hidden; }
@@ -73,12 +98,15 @@ body {
    view is long and the way out of it should not be a scroll away. */
 #menu {
   position: sticky; top: 0; z-index: 5; background: var(--panel);
-  display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px;
   margin: 0 calc(-1 * var(--pad)) 4px; padding: 4px var(--pad) 12px;
   border-bottom: 1px solid var(--line);
 }
-#menu button { display: flex; align-items: center; justify-content: center; gap: 5px;
-               padding: 8px 4px; font-size: 12.5px; color: var(--dim); }
+#menu button { display: flex; align-items: center; justify-content: center; gap: 4px;
+               padding: 8px 2px; font-size: 11.5px; color: var(--dim); white-space: nowrap; }
+/* Four labels across 340 px is tight, and the count badge is the first thing
+   that can go: the number is a nicety, the name of the view is not. */
+#menu .mlabel { overflow: hidden; text-overflow: ellipsis; }
 #menu button.on { background: var(--panel2); border-color: #3d4753; color: var(--text);
                   font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
 .mbadge:empty { display: none; }
@@ -239,6 +267,10 @@ details.adv .row:last-child { margin-bottom: 12px; }
   .stat b { font-size: 18px; }
 
   #viewtabs button { padding: 10px 14px; font-size: 13px; }
+  /* Top centre collides with the view tabs on a narrow stage; drop it under
+     them, where there is nothing but map. */
+  #fixbar { top: auto; bottom: 12px; left: 12px; right: 12px; transform: none; max-width: none; }
+  #toast { bottom: 64px; }
   #stage { order: 2; }
   #stage.split { height: 72vh; }
   #stage.split #map { inset: 0 0 calc(100% - var(--split)) 0; }
@@ -250,6 +282,9 @@ details.adv .row:last-child { margin-bottom: 12px; }
   #splitter::after { inset: 10px 0; }
   #splitter:hover::after, #splitter.dragging::after { inset: 9px 0; }
   .handle { width: 22px; height: 22px; margin: -11px 0 0 -11px; }
+  .obsh { min-height: 40px; width: 74px; font-size: 15px; }
+  .obsmain input { min-height: 32px; font-size: 15px; }
+  #menu button { font-size: 12px; padding: 8px 2px; }
 }
 
 @media (max-width: 420px) {
@@ -317,6 +352,49 @@ details.adv .row:last-child { margin-bottom: 12px; }
 .planx { background: none; border: 0; color: var(--dim); font-size: 16px; padding: 0 4px; }
 .planx:hover { color: var(--warn); }
 .syncrow { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+
+/* obstacles */
+/* Slate for a box the flight stays clear of, and the two grades of trouble.
+   Same three colours in the panel, on the map and in the 3D view -- the whole
+   point is that a red box is red wherever you happen to be looking. */
+.obslist { margin: 10px 0 8px; }
+.obsitem { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 7px;
+           background: var(--panel2); border: 1px solid var(--line); margin-bottom: 5px; }
+.obsitem.near { border-color: #6a5330; }
+.obsitem.strike { border-color: #5c2c2c; background: #241a1a; }
+/* After the grades, so the box you are working on still reads as the one you
+   are working on even when it is also the one being hit. */
+.obsitem.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.obsmain { flex: 1; min-width: 0; cursor: pointer; }
+.obsmain input { background: none; border: 0; padding: 0; font-size: 12.5px; font-weight: 600;
+                 width: 100%; border-radius: 0; }
+.obsmain input:focus { outline: none; border-bottom: 1px solid var(--accent); }
+.obsmain em { display: block; font-style: normal; color: var(--dim); font-size: 11px;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.obsitem.near .obsmain em { color: var(--accent2); }
+.obsitem.strike .obsmain em { color: #ff8080; }
+.obsh { width: 62px; flex: none; background: var(--panel); border: 1px solid var(--line);
+        color: var(--text); border-radius: 6px; padding: 5px 6px; font: inherit; font-size: 12px;
+        font-variant-numeric: tabular-nums; }
+.obsh:focus { outline: none; border-color: var(--accent); }
+.warn.bad { background: #2b1a1a; border-color: #5c2c2c; color: #ff8f8f; }
+
+/* the same news, in the plan view, where you are reading the stats */
+.hazard { background: #2b1f1a; border: 1px solid #4a3225; color: var(--accent2);
+          border-radius: 7px; padding: 9px 11px; font-size: 12.5px; margin-bottom: 10px; }
+.hazard.strike { background: #2b1a1a; border-color: #5c2c2c; color: #ff8f8f; }
+.hazard[hidden] { display: none; }
+.hazard b { display: block; margin-bottom: 5px; }
+.hazrow { color: var(--dim); font-size: 12px; padding: 1px 0; }
+.hazrow::before { content: '· '; }
+.hazard .linkish { color: inherit; }
+
+kbd { background: var(--panel2); border: 1px solid var(--line); border-bottom-width: 2px;
+      border-radius: 4px; padding: 0 4px; font: inherit; font-size: 11px; color: var(--text); }
+
+.obsbox { cursor: move; }
+#map.drawing .obsbox { cursor: crosshair; }
+.handle.obs { background: #9aa7b4; }
 
 /* basemap switcher, under the map/3d tabs */
 #basetabs { position: absolute; top: 48px; right: 12px; z-index: 500;

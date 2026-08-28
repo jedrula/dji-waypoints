@@ -13,7 +13,10 @@ import { encodePlan, decodePlan } from '../js/share.js';
 import { readKmz } from '../js/kmzread.js';
 import { routeFromRead, inferPass } from '../js/route.js';
 import { createPlanStore, merge as clientMerge, SYNC_KEY } from '../js/plans.js';
-import { merge as workerMerge, clean } from '../sync/worker.js';
+import worker, { merge as workerMerge, clean, cleanObstacle } from '../sync/worker.js';
+import { createObstacleStore, localBox, normalizeRect, overlaps } from '../js/obstacles.js';
+import { checkObstacles, clearingAltitude, segmentBoxDist, pointBoxDist } from '../js/collide.js';
+import { createHistory } from '../js/history.js';
 
 let fails = 0;
 const ok = (name, cond, extra = '') => {
@@ -699,6 +702,240 @@ console.log('\nsaved plans');
   ok('worker rejects a plan with no code', clean({ id: 'abcdef', updatedAt: 1, name: 'x' }) === null);
   ok('worker rejects a forged id', clean({ id: '../etc', updatedAt: 1, name: 'x', code: 'v1.a' }) === null);
   ok('worker accepts a well-formed plan', clean({ id: 'abcdef', updatedAt: 1, name: 'x', code: 'v1.a' }).code === 'v1.a');
+}
+
+console.log('\nobstacles');
+{
+  const box = { min: { x: -5, y: -5, z: 0 }, max: { x: 5, y: 5, z: 10 } };
+
+  // The geometry the whole feature stands on. A sampled segment test would miss
+  // a near approach that falls between two samples; this one cannot.
+  ok('a point above the roof is its height above it',
+     near(pointBoxDist({ x: 0, y: 0, z: 25 }, box), 15, 1e-9));
+  ok('a leg flying 5 m over the roof measures 5 m',
+     near(segmentBoxDist({ x: -30, y: 0, z: 15 }, { x: 30, y: 0, z: 15 }, box).dist, 5, 1e-3));
+  ok('a leg through the box measures zero',
+     near(segmentBoxDist({ x: -30, y: 0, z: 5 }, { x: 30, y: 0, z: 5 }, box).dist, 0, 1e-6));
+  ok('past a corner it is the diagonal, not the nearest face',
+     near(segmentBoxDist({ x: 9, y: 9, z: 5 }, { x: 9, y: 9, z: 6 }, box).dist, Math.hypot(4, 4), 1e-3));
+  // The closest approach can sit in the middle of a long leg, which is exactly
+  // what a per-waypoint check would walk straight past.
+  ok('the closest point can be mid-leg, not at either end',
+     near(segmentBoxDist({ x: -200, y: 0, z: 12 }, { x: 200, y: 0, z: 12 }, box).dist, 2, 1e-3));
+
+  ok('a rectangle dragged to nothing still has area',
+     normalizeRect({ north: 50, south: 50, east: 19, west: 19 }).north > 50);
+  ok('overlap is exclusive at the edges',
+     overlaps({ north: 1, south: 0, east: 1, west: 0 }, { north: 0.5, south: -1, east: 0.5, west: -1 })
+     && !overlaps({ north: 1, south: 0, east: 1, west: 0 }, { north: 3, south: 2, east: 1, west: 0 }));
+
+  // A mast in the middle of the site, taller than the flight.
+  const mast = { id: 'mast01', name: 'Mast', height: 60,
+                 south: 50.06060, north: 50.06075, west: 19.93130, east: 19.93150 };
+  const shed = { id: 'shed01', name: 'Shed', height: 3,
+                 south: 50.06060, north: 50.06075, west: 19.93130, east: 19.93150 };
+  const toBox = (o) => localBox(o, m.frame);
+
+  const hitMast = checkObstacles(m, [toBox(mast)], { clearance: 5 });
+  ok('a 60 m mast under a 40 m flight is a strike', hitMast.strikes === 1);
+  // Legs that go through it and legs that merely come close are both flagged,
+  // and they are not the same news, so they are not the same grade.
+  ok('the legs that go through it are named',
+     hitMast.legs.some((l) => l.grade === 'strike'));
+  ok('and the ones that only come close are graded differently',
+     hitMast.legs.some((l) => l.grade === 'near')
+     && hitMast.legs.every((l) => l.dist < hitMast.clearance));
+
+  const clearShed = checkObstacles(m, [toBox(shed)], { clearance: 5 });
+  ok('a 3 m shed under the same flight is clear', clearShed.strikes === 0 && clearShed.near === 0);
+  ok('and is still measured, so "clear by" has a number',
+     near(clearShed.obstacles[0].dist, 37, 1.5));
+
+  // The clearance is the whole judgement: the same geometry, a different answer.
+  const fussy = checkObstacles(m, [toBox(shed)], { clearance: 40 });
+  ok('raising the clearance turns the same shed into a warning', fussy.near === 1);
+
+  ok('the clearing altitude lifts the flight over the tallest thing under it',
+     near(clearingAltitude(m, [toBox(mast)], 5), 65, 0.01));
+  ok('nothing under the flight means no altitude to suggest',
+     clearingAltitude(m, [], 5) === null);
+
+  // An obstacle blocks the camera as well as the aircraft. A slab lying over the
+  // whole site is the extreme case, and it has to take the ground with it: what
+  // the plan can no longer see, it can no longer claim to have covered.
+  const { scoreCoverage } = await import('../js/coverage.js');
+  const lid = localBox({ id: 'lid01', name: 'Lid', height: 20,
+                         south: rect.south, north: rect.north, west: rect.west, east: rect.east }, m.frame);
+  const open = scoreCoverage(m, { maxCameras: 60 });
+  const covered = scoreCoverage(m, { maxCameras: 60, boxes: [lid] });
+  ok('an obstacle occludes the camera, not just the aircraft',
+     covered.summary.good < open.summary.good);
+  // Scoring the tree you drew as a surface you failed to photograph would turn
+  // a good plan into a bad number for no reason.
+  ok('and is never itself scored as surface to capture',
+     covered.samples.every((sm) => sm.kind !== 'wall' || Math.abs(sm.p.z) <= 20)
+     && covered.boxes.length === open.boxes.length);
+
+  // Store and Worker, same shape as plans and for the same reason.
+  const mem = new Map();
+  const storage = {
+    getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+    setItem: (k, v) => mem.set(k, v),
+    removeItem: (k) => mem.delete(k),
+  };
+  let sent = null;
+  const store = createObstacleStore({ storage, endpoint: 'https://sync.example',
+    fetchImpl: async (url, opt) => {
+      sent = { url, body: JSON.parse(opt.body) };
+      return { ok: true, json: async () => ({ obstacles: [] }) };
+    } });
+  const saved = store.put({ ...mast, id: undefined });
+  ok('an obstacle stores its height', store.list()[0].height === 60);
+  store.put({ ...saved, height: 12 });
+  ok('editing one replaces rather than duplicates',
+     store.list().length === 1 && store.list()[0].height === 12);
+  await store.sync();
+  ok('obstacles sync on their own route, not the plan one', sent.url.endsWith('/obstacles'));
+  ok('and under their own key on the wire', Array.isArray(sent.body.obstacles));
+
+  ok('worker rejects a box with no area',
+     cleanObstacle({ id: 'abcdef', updatedAt: 1, north: 50, south: 50, east: 19, west: 18, height: 5 }) === null);
+  ok('worker rejects a box the size of a country',
+     cleanObstacle({ id: 'abcdef', updatedAt: 1, north: 51, south: 50, east: 19, west: 18, height: 5 }) === null);
+  ok('worker accepts a well-formed obstacle',
+     cleanObstacle({ id: 'abcdef', updatedAt: 1, north: 50.001, south: 50, east: 19.001, west: 19,
+                     height: 5, name: 'Oak' }).height === 5);
+  ok('worker refuses a height it cannot use',
+     cleanObstacle({ id: 'abcdef', updatedAt: 1, north: 50.001, south: 50, east: 19.001, west: 19,
+                     height: 'tall' }) === null);
+  ok('a tombstone needs nothing but an id and a time',
+     cleanObstacle({ id: 'abcdef', updatedAt: 1, deleted: true }).deleted === true);
+}
+
+console.log('\nsync worker');
+{
+  // The Worker is a fetch handler and a KV namespace, both of which node can
+  // supply. Testing merge() and clean() in isolation says nothing about
+  // routing, about which KV entry a list lands in, or about one list being able
+  // to clobber the other -- which is the part that would cost real data.
+  const kv = new Map();
+  const env = { PLANS: { get: async (k) => kv.get(k) ?? null, put: async (k, v) => { kv.set(k, v); } } };
+  const KEY = 'andrzej-H5rGhCrCRmPXoRSFUA8etg';
+  const post = (path, body) => worker.fetch(new Request(`https://w.dev${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Sync-Key': KEY },
+    body: JSON.stringify(body),
+  }), env);
+
+  const plan = { id: 'planaa', name: 'Yard', code: 'v1.aaa', updatedAt: 1000 };
+  const box = { id: 'boxaaa', name: 'Shed', height: 4, updatedAt: 1000,
+                north: 50.001, south: 50, east: 19.001, west: 19 };
+
+  let res = await post('/sync', { plans: [plan] });
+  let body = await res.json();
+  ok('the plan route stores a plan', res.status === 200 && body.plans[0].code === 'v1.aaa');
+
+  res = await post('/obstacles', { obstacles: [box] });
+  body = await res.json();
+  ok('the obstacle route stores an obstacle', res.status === 200 && body.obstacles[0].height === 4);
+
+  // The two lists share one namespace and must never share an entry: an
+  // obstacle sync that wiped the plan library would be the worst bug in here.
+  res = await post('/sync', { plans: [] });
+  body = await res.json();
+  ok('storing obstacles leaves the plans alone', body.plans.length === 1 && body.plans[0].id === 'planaa');
+  ok('and the two lists live under different keys', kv.size === 2);
+
+  res = await post('/nope', { plans: [] });
+  ok('an unknown route is a 404, not a silent success', res.status === 404);
+
+  res = await worker.fetch(new Request('https://w.dev/obstacles', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"obstacles":[]}',
+  }), env);
+  ok('a request with no sync key is refused', res.status === 401);
+
+  res = await post('/obstacles', { obstacles: 'not an array' });
+  ok('a body of the wrong shape is refused', res.status === 400);
+
+  // Last write wins, across the wire, the way two devices actually meet.
+  await post('/obstacles', { obstacles: [{ ...box, height: 9, updatedAt: 2000 }] });
+  res = await post('/obstacles', { obstacles: [{ ...box, height: 2, updatedAt: 1500 }] });
+  body = await res.json();
+  ok('an older edit loses to a newer one already stored', body.obstacles[0].height === 9);
+
+  res = await post('/obstacles', { obstacles: [{ id: 'boxaaa', deleted: true, updatedAt: 3000 }] });
+  body = await res.json();
+  ok('and a tombstone travels like any other write', body.obstacles[0].deleted === true);
+
+  res = await worker.fetch(new Request('https://w.dev/obstacles', {
+    method: 'GET', headers: { 'X-Sync-Key': KEY },
+  }), env);
+  ok('GET reads a list back without writing', (await res.json()).obstacles.length === 1);
+}
+
+console.log('\nundo');
+{
+  let world = { alt: 40, boxes: [] };
+  const h = createHistory({
+    snapshot: () => structuredClone(world),
+    restore: (s) => { world = structuredClone(s); },
+  });
+
+  world.alt = 60; h.commit();
+  world.boxes.push({ id: 'a', height: 10 }); h.commit();
+  ok('nothing to undo before anything happened', h.depth().past === 2);
+
+  h.undo();
+  ok('undo takes back the last action only', world.alt === 60 && world.boxes.length === 0);
+  h.undo();
+  ok('and then the one before it', world.alt === 40);
+  ok('with nothing left, undo says so', h.canUndo() === false && h.undo() === false);
+
+  h.redo(); h.redo();
+  ok('redo walks back up the same path', world.alt === 60 && world.boxes.length === 1);
+  ok('and stops at the present', h.canRedo() === false && h.redo() === false);
+
+  // A slider clicked but not moved, a name retyped the same -- these fire the
+  // same events as a real edit, and an undo entry that undoes to where you
+  // already are reads as cmd+Z being broken.
+  ok('committing an unchanged state is not an action', h.commit() === false && h.depth().past === 2);
+
+  // Redo is what you were about to do; doing something else instead means you
+  // are not going to do it any more.
+  h.undo();
+  world.alt = 99; h.commit();
+  ok('a new action after an undo drops the redo branch', h.canRedo() === false);
+  h.undo();
+  ok('and the undo still goes back to where it was', world.alt === 60);
+
+  // A box arriving from the other device is not this person's action -- and
+  // undoing past it must not delete it, which is what a plain whole-state
+  // restore would do.
+  const rebased = createHistory({
+    snapshot: () => structuredClone(world),
+    restore: (s) => { world = structuredClone(s); },
+    rebase: (snap, before, after) => {
+      const had = new Set(before.boxes.map((b) => b.id));
+      const arrived = after.boxes.filter((b) => !had.has(b.id));
+      const ids = new Set(snap.boxes.map((b) => b.id));
+      return { ...snap, boxes: [...snap.boxes, ...arrived.filter((b) => !ids.has(b.id))] };
+    },
+  });
+  world.alt = 70; rebased.commit();
+  const before = rebased.depth().past;
+  world.boxes.push({ id: 'remote', height: 3 });
+  rebased.refresh();
+  ok('a remote change adds no undo step', rebased.depth().past === before);
+  rebased.undo();
+  ok('and undoing past it does not delete it',
+     world.alt === 60 && world.boxes.some((b) => b.id === 'remote'));
+
+  // Snapshots are the whole point: they must be copies, not views.
+  const snapshotHistory = createHistory({ snapshot: () => structuredClone(world), restore: () => {} });
+  const n = world.boxes.length;
+  world.boxes.push({ id: 'mutated', height: 1 });
+  snapshotHistory.undo();
+  ok('a snapshot cannot be mutated out from under the stack', world.boxes.length === n + 1);
 }
 
 console.log('\ncontroller bridge');

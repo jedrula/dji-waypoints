@@ -13,7 +13,7 @@ dragging.
 
 ```
 npm start          # http://localhost:8123
-npm test           # 175 assertions: geometry, poses, coverage, KMZ read+write, codes, plans, sync, bridge
+npm test           # 235 assertions: geometry, poses, coverage, collision, undo, KMZ read+write, codes, plans, sync worker, bridge
 npm run compare    # score capture configurations against each other
 npm run bridge     # what controller can this machine see?
 ```
@@ -216,6 +216,205 @@ sufficient — a well-covered surface still reconstructs badly if it is
 textureless or moving, and the box proxy does not model the thin structures
 (chains, bars, netting) where real captures usually fail.
 
+The proxy is a guess at the layout, but the **occluders are not**: any obstacle
+you have drawn blocks the camera as well as the aircraft, so a wall you told the
+app about is a wall the score knows it cannot see through.
+
+## What is already there
+
+The plan is geometry in the air. **Obstacles** are geometry on the ground, and
+the only question worth asking of the two together is whether they touch.
+
+Draw a box over a building, a tree or a mast, say how tall it is, and every plan
+gets measured against it.
+
+Click a box to work on it — in the list, on the map, or on any face of it in the
+3D view, and from whichever pane you happen to be in. There is one selection
+across all three: the box lights up in 3D with its name and height on a plate
+above it, grows corner handles on the map, and its row is brought into view in
+the panel, which is where the name and the delete live. Clicking one switches to
+the Obstacles pane for you, because being able to select a thing and not being
+shown its controls is not selection.
+
+The capture area is sent to the back of the map so that a box drawn inside it is
+still the thing you click — the area is the backdrop you place things on. That
+does mean a press on an obstacle drags the obstacle, not the area; grab the area
+somewhere no box covers, and if you get it wrong, `cmd+Z`. Arming either draw
+button makes every box inert for the duration, so a rubber band never begins by
+picking something up.
+
+Footprint is edited on the map — drag the box to move it, corners to resize.
+Height is edited in 3D — the top face of the live box wears a grip, and you drag
+it. That split is not arbitrary: the map is the view that knows where things
+are, and 3D is the view that knows how tall they are. Dragging a height while
+watching the flight path is the whole reason the 3D view is worth having here.
+
+The three gestures do not collide. On a box, a press that goes nowhere is a
+click; a press that moves on the roof resizes; a press that moves anywhere else
+orbits the camera, exactly as it does over empty space.
+
+There is no taxonomy. A tree and a chimney are both a rectangle and a height,
+they are both measured identically, and what the thing actually is, is already
+obvious from the imagery underneath it. Naming one is optional.
+
+Obstacles are **global**: they belong to the world, not to a plan, every plan
+sees all of them, and they are drawn on the map whichever view you are in.
+Nothing about them ever reaches the aircraft — the KMZ is untouched. This is for
+you, at the desk, before you fly.
+
+### What the check measures
+
+The flight is the polyline through the exported waypoints, including the long
+legs between one pass and the next — which is exactly where the surprises live,
+because a leg descending from the grid to the lowest orbit ring cuts diagonally
+across the site. For every leg and every box, `js/collide.js` computes the
+distance from the segment to the box and grades it:
+
+| | |
+|---|---|
+| **strike** | the leg passes through the box |
+| **near** | it comes within the clearance, default 5 m |
+| clear | neither, and the distance is still reported — "clear by 18 m" is the answer to the same question |
+
+Distance from a point to a box is convex, and a segment is affine, so the
+distance along a leg is convex in one variable with a single minimum. Ternary
+search walks straight to it. That matters: sampling a leg at its waypoints would
+walk right past a closest approach that falls in the middle of a long one, which
+is the case that kills aircraft. Each box is dismissed by a cheap bounding-box
+test first, so a realistic plan with thirty obstacles is measured in ~3 ms.
+
+Strikes and near misses are red and amber wherever they appear — the boxes on
+the map, the legs of the path, the rows in the list, the solids in the 3D view.
+
+### Adjust
+
+When something is hit, a bar appears over the map and the 3D view: what the
+flight goes through, and one **Adjust** button. It searches for something the
+planner can change that clears the site, applies it, and says what it did.
+
+It has two knobs, tried in the order a person would try them:
+
+1. **Altitude.** One number, the one the resolution hint is about, and it fixes
+   anything the flight passes *over*.
+2. **Orbit offset.** When climbing cannot work, the reason is almost always
+   something standing *beside* the ring — a mast, a gable end — which the orbit
+   goes around at every height. Pushing the ring outwards is the fix, and it
+   costs only the orbit pass rather than the resolution of the whole flight.
+
+Neither is guessed. Every candidate is a real trial plan, measured; a value is
+only applied if its own trial came back with nothing hit and nothing inside the
+clearance. When no combination works, it says so and tells you to move the box —
+because that is the honest answer, and a button that shrugs is better than one
+that lies.
+
+### Raising the altitude, honestly
+
+When something is hit, the panel offers a single fix: raise the altitude to a
+number that clears everything. That number is found by **replanning at it and
+measuring the result**, not by adding the clearance to the tallest box.
+
+The arithmetic answer is wrong in a way that matters. Raising the altitude lifts
+the grids, but the orbit rings spread *downward* from it, so the leg that
+descends to the lowest ring still crosses the site — and clears nothing. On one
+measured scene the arithmetic floor was 31 m and the altitude that actually
+cleared it was 61.
+
+Climbing helps monotonically in any scene worth planning, so the search is a
+binary one over the slider's range, to the metre, in about eight trial plans.
+The ceiling is tested first: if the highest the slider goes does not clear the
+site, nothing does, and that costs one trial rather than a march up the range.
+It is a search, not a proof — what makes the answer safe is that only an
+altitude whose own trial came back with no strikes and nothing inside the
+clearance is ever offered. When none does, nothing is offered, because the
+honest answer is to move the box.
+
+### What it does not know
+
+Every height in this app is above the takeoff point, obstacle heights included,
+so a box on a slope is only as right as the height you gave it. The check knows
+nothing about the climb out from home, the return leg, wind push, or GNSS error
+beyond whatever you put in the clearance. And a box is a box: it encloses the
+real thing, which errs on the safe side for a tree and badly misjudges a
+gable roof's ridge if you typed the eaves height.
+
+Obstacles also block the **camera**, not just the aircraft: the coverage score
+stops counting a surface it can only see through a box. They are never scored
+themselves — a tree next to the house is not a surface you failed to photograph.
+
+## The URL is the view
+
+Where you are looking lives in the address bar, so a reload lands where you left
+off and a link lands someone else there too:
+
+    ?v=split&b=topo&c=50.06140,19.93659&z=19#plan=v1.eyJyIjpbNTAu…
+
+| | |
+|---|---|
+| `v` | which pane — `map`, `split`, `3d` |
+| `b` | basemap — `satellite`, `streets`, `topo` |
+| `c` | map centre, `lat,lon` |
+| `z` | zoom |
+| `#plan=` | the plan itself, as before |
+
+One reader at startup, one writer, and nothing in between keeping a private
+copy. Every control that changes the view — the tabs, the basemap picker,
+panning, planning — goes through the writer; `moveend` fires once per gesture,
+so a drag is one write and not one per frame.
+
+**What is deliberately not in it.** The query is the camera; the hash is the
+content; and some things are neither. The split-divider position and your
+default basemap stay in `localStorage`, because they are preferences rather than
+places — a link that forces your divider position and your basemap on somebody
+is worse than one that does not. The basemap appears in both: the URL wins when
+it names one, and `localStorage` answers a bare visit, so opening someone's
+link does not permanently retune your own default.
+
+The obstacle list is not in the URL either. It is global and synced, and putting
+a few hundred boxes in a query string would trade a working store for a link
+nobody can paste.
+
+Restoring from a link does not animate. Partly because a link should land where
+it says rather than fly there from a default somewhere else — and partly because
+Leaflet's animated path waits on a CSS transition, which never completes in a
+tab the browser is not painting, leaving the map showing one zoom while
+believing it is at another.
+
+## Undo
+
+`cmd/ctrl+Z` steps back, `cmd/ctrl+shift+Z` (or `ctrl+Y`) forward, across
+everything that matters: the rectangle, every capture control, and every
+obstacle — added, moved, resized, renamed, deleted, or dragged taller in 3D.
+Deleting an obstacle has no confirmation dialog, on purpose: undo is the better
+answer to "are you sure", because it also works when you *were* sure and were
+wrong.
+
+The unit is a **snapshot**, not a command with an inverse. Commands are the
+usual design and the wrong one here, because actions in this app are not
+independent: dropping a box re-proposes the altitude, the ring count and the
+pass mix at once, and touching any slider discards heights pinned in the 3D
+view. Writing an inverse for each of those means writing the planner backwards,
+and any one of them being slightly wrong is an undo that lands somewhere you
+have never been. A snapshot of the rectangle, the control values and the
+obstacle list is a few kilobytes, determines everything else — the plan is a
+pure function of it — and cannot drift, because nothing is replayed.
+
+Two things the snapshot model has to get right, and does:
+
+- **A drag is one action, not forty.** Sliders replan on `input` and commit on
+  `change`, so the whole drag is a single step. Committing a state identical to
+  the present one is refused outright, or a slider clicked without moving would
+  fill the stack with steps that undo to where you already are.
+- **A box that arrived from the other device is not yours to undo.** Every
+  snapshot on the stack predates it, so a plain restore would delete it —
+  silently throwing away work done on the phone, the exact thing undo exists to
+  prevent. A sync pull is rebased into the stored snapshots instead: as far as
+  the stack is concerned, it was always there.
+
+Restoring an obstacle writes it back as a *fresh* edit rather than rolling its
+timestamp back. Sync merges by last-write-wins, so an undo carrying the old
+timestamp would lose to the very edit it was undoing, and the box would spring
+back on the next sync.
+
 ## Saved plans, and sync between devices
 
 Plans are saved by name in the browser, and a plan is only its code, so the
@@ -223,7 +422,7 @@ whole library is a few kilobytes. **Saved plans** at the top of the panel: name
 it, Save, Load it back later. That alone needs no server and no account.
 
 Sync adds the other device, and there is nothing to set up: no login, no key to
-copy. Every device runs under one **sync key** hardcoded in `js/plans.js`, and
+copy. Every device runs under one **sync key** hardcoded in `js/synced.js`, and
 saving syncs by itself — save on the phone, open the panel on the Mac, the plan
 is there. The Sync button is only for a page that was already open. Both devices
 push to `sync/worker.js` on Cloudflare, which namespaces storage by the key's
@@ -238,11 +437,25 @@ is the right trade against copying a key between devices. When there is more
 than one person, the key becomes the user id and a real login goes in front of
 the same storage; nothing about the shape has to change.
 
+Obstacles are the second list and ride the same machinery: same key, same
+last-write-wins merge, its own route (`POST /obstacles`) and its own KV entry, so
+the boxes you drew on the phone are on the Mac too. The local-first store, the
+merge and the round trip live once in `js/synced.js`; `js/plans.js` and
+`js/obstacles.js` only say what a record of theirs looks like. A client that
+merged differently from the server would make a plan flicker between devices,
+which is why both run the same rule on purpose.
+
+Adding a list means deploying the Worker again, and until that happens the new
+route 404s. The app says exactly that — *"the sync service has no obstacles
+route — deploy sync/worker.js"* — rather than the bare "not found" that would
+send you hunting for a wrong URL. Nothing is lost while it waits: the list is
+local-first, so the boxes are saved either way and the next sync sends them.
+
     cd sync && wrangler dev --local    # KV in a local emulator, no account
     wrangler kv namespace create PLANS # then put the id in wrangler.toml
     wrangler deploy
 
-Set `SYNC_URL` in `js/plans.js` to the deployed URL, or `dji.syncUrl` in
+Set `SYNC_URL` in `js/synced.js` to the deployed URL, or `dji.syncUrl` in
 localStorage to point one browser somewhere else. With neither, the app says so
 and stays local-only.
 
@@ -425,6 +638,11 @@ js/planner.js   pass generation, auto-fit search, 200-waypoint splitting
 js/wpml.js      template.kml + waylines.wpml + KMZ assembly
 js/zip.js       store-only ZIP writer (a KMZ is a zip)
 js/coverage.js  proxy site, surface sampling, visibility and occlusion scoring
+js/obstacles.js the boxes standing in the field: model, store, local-frame AABB
+js/collide.js   segment-to-box distance; what the flight hits and by how much
+js/history.js   snapshot undo/redo, with rebase for changes that were not yours
+js/worldui.js   the obstacles pane: the list, the clearance, the draw button
+js/synced.js    local-first list + last-write-wins sync, shared by plans and obstacles
 js/view3d.js    hand-rolled canvas 3D view with camera frustums + coverage heat map
 js/app.js       map, rectangle drawing, wiring
 tools/unzip.mjs minimal zip reader (store + deflate) so DJI's own files open

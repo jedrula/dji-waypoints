@@ -6,6 +6,12 @@ import { GRADE_COLOR } from './coverage.js';
 // ENU metres: x east, y north, z up.
 
 const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff' };
+// Obstacles are the world, not the plan, so they get their own family of
+// colours rather than borrowing a pass's: slate while the flight stays clear of
+// them, and the grade of the trouble once it does not.
+const CONFLICT_COLOR = { strike: '#ff5d5d', near: '#ffb84d' };
+const OBSTACLE_COLOR = { clear: '#9aa7b4', near: '#ffb84d', strike: '#ff5d5d' };
+const HOVER_COLOR = '#4da3ff';
 const DEG = Math.PI / 180;
 
 const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
@@ -27,11 +33,18 @@ export function createView3D(canvas) {
   let scene = null;
   let coverage = null;
   let showCoverage = true;
+  let obstacles = [];      // boxes already in the mission's local metres
+  let conflicts = [];      // legs the collision check flagged, in lat/lon
   const view = { az: 35, el: 28, dist: 400, target: { x: 0, y: 0, z: 0 } };
   const NEAR = 0.5;
   const VFOV = 28 * DEG;
 
   let onLevelChange = null;   // set by the app; enables dragging the levels
+  let onBoxHeight = null;     // ditto, for dragging the top of an obstacle
+  let onBoxSelect = null;     // ditto, for clicking one
+  let hits = [];              // every projected obstacle face, nearest first
+  let tags = [];              // name + height plates, drawn last so nothing hides them
+  let hoverBox = null;        // obstacle id under the pointer, or being dragged
   let scale = null;           // last drawn altitude scale, for hit testing
   let anchorIdx = -1;         // which outset corner currently carries the mast
   let hoverZ = null;          // level under the pointer, or being dragged
@@ -146,7 +159,15 @@ export function createView3D(canvas) {
       }))
       .sort((a, b) => a.z - b.z);
 
-    scene = { pts, box, span, maxAlt, frustumLen, step, levels };
+    // Flagged legs arrive as geography, like everything else that crosses a
+    // module boundary here; the frame turns them into the metres this view draws.
+    const legs = conflicts.map((c) => ({
+      a: { ...f.toLocal(c.a.lat, c.a.lon), z: c.a.alt },
+      b: { ...f.toLocal(c.b.lat, c.b.lon), z: c.b.alt },
+      grade: c.grade,
+    }));
+
+    scene = { pts, box, span, maxAlt, frustumLen, step, levels, legs };
 
     // Re-frame only when the ground box itself changed. Replanning -- which
     // happens on every slider tick and on every pixel of a level drag -- must
@@ -157,6 +178,131 @@ export function createView3D(canvas) {
       view.target = { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2, z: maxAlt / 2 };
       view.dist = span * 2.2 + maxAlt * 2;
     }
+  }
+
+  // The five faces of a box that can ever be seen from above the ground: four
+  // walls and a roof. Each carries its outward normal, which is what decides
+  // whether it is facing the camera at all.
+  function boxFaces(bx) {
+    const { min, max } = bx;
+    const q = (pts, n) => ({ pts, n });
+    return [
+      q([{ x: min.x, y: min.y, z: max.z }, { x: max.x, y: min.y, z: max.z },
+         { x: max.x, y: max.y, z: max.z }, { x: min.x, y: max.y, z: max.z }], { x: 0, y: 0, z: 1 }),
+      q([{ x: min.x, y: min.y, z: 0 }, { x: max.x, y: min.y, z: 0 },
+         { x: max.x, y: min.y, z: max.z }, { x: min.x, y: min.y, z: max.z }], { x: 0, y: -1, z: 0 }),
+      q([{ x: min.x, y: max.y, z: 0 }, { x: max.x, y: max.y, z: 0 },
+         { x: max.x, y: max.y, z: max.z }, { x: min.x, y: max.y, z: max.z }], { x: 0, y: 1, z: 0 }),
+      q([{ x: min.x, y: min.y, z: 0 }, { x: min.x, y: max.y, z: 0 },
+         { x: min.x, y: max.y, z: max.z }, { x: min.x, y: min.y, z: max.z }], { x: -1, y: 0, z: 0 }),
+      q([{ x: max.x, y: min.y, z: 0 }, { x: max.x, y: max.y, z: 0 },
+         { x: max.x, y: max.y, z: max.z }, { x: max.x, y: min.y, z: max.z }], { x: 1, y: 0, z: 0 }),
+    ];
+  }
+
+  function drawObstacles(b, w, h, f) {
+    hits = [];
+    tags = [];
+    if (!obstacles.length) return;
+    const faces = [];
+    for (const bx of obstacles) {
+      const grade = bx.grade ?? 'clear';
+      const centre = { x: (bx.min.x + bx.max.x) / 2, y: (bx.min.y + bx.max.y) / 2 };
+      for (const face of boxFaces(bx)) {
+        // Back-face cull against the eye, not against a fixed direction: this
+        // is a perspective view, and a wall can face away at one end of a big
+        // box and towards you at the other.
+        const mid = face.pts.reduce((a, p) => add(a, p, 0.25), { x: 0, y: 0, z: 0 });
+        if (dot(face.n, sub(mid, b.eye)) >= 0) continue;
+        const vs = face.pts.map((p) => toView(p, b));
+        if (vs.some((v) => v.z <= NEAR)) continue;   // straddling the eye plane
+        const poly = vs.map((v) => project(v, w, h, f));
+        const depth = toView(mid, b).z;
+        const roof = face.n.z > 0;
+        faces.push({ id: bx.id, grade, depth, s: poly, roof, on: Boolean(bx.selected) });
+        // Every face is clickable, because "click the box" has to mean the box
+        // and not one particular sliver of it -- a low box seen from a low
+        // angle has almost no roof on screen. The roof carries the extra job of
+        // being the height handle, which is why it is flagged.
+        hits.push({ id: bx.id, poly, depth, roof, z: bx.max.z, centre });
+      }
+    }
+    faces.sort((m, n) => n.depth - m.depth);
+    hits.sort((m, n) => m.depth - n.depth);   // nearest first, for hit testing
+
+    for (const face of faces) {
+      ctx.beginPath();
+      ctx.moveTo(face.s[0].x, face.s[0].y);
+      for (let k = 1; k < face.s.length; k++) ctx.lineTo(face.s[k].x, face.s[k].y);
+      ctx.closePath();
+      const hot = hoverBox === face.id;
+      const lit = hot || face.on;
+      const col = lit ? HOVER_COLOR : OBSTACLE_COLOR[face.grade];
+      // Translucent enough that the flight path behind a box still shows
+      // through -- an obstacle you cannot see past is worse than no obstacle.
+      // The roof of a live box is the exception: it is a handle, so it looks
+      // like one.
+      ctx.globalAlpha = lit && face.roof ? 0.4 : face.grade === 'clear' ? 0.16 : 0.24;
+      ctx.fillStyle = col;
+      ctx.fill();
+      ctx.globalAlpha = lit ? 1 : face.grade === 'clear' ? 0.55 : 0.9;
+      ctx.strokeStyle = col;
+      ctx.lineWidth = face.on ? 2 : lit && face.roof ? 2 : 1;
+      ctx.stroke();
+
+      // A grip drawn across the roof of the live box, for the same reason the
+      // altitude levels have one: it is how a thing that can be dragged says so.
+      if (lit && face.roof) {
+        const c = face.s.reduce((a, q) => ({ x: a.x + q.x / 4, y: a.y + q.y / 4 }), { x: 0, y: 0 });
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (let k = -1; k <= 1; k++) {
+          ctx.moveTo(c.x - 7, c.y + k * 4);
+          ctx.lineTo(c.x + 7, c.y + k * 4);
+        }
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // Which box this is and how tall, for the one you are working on. Collected
+    // here and drawn at the very end, so the flight path cannot cover the
+    // answer to the question you clicked the box to ask.
+    for (const bx of obstacles) {
+      if (!bx.selected && hoverBox !== bx.id) continue;
+      const top = toView({ x: (bx.min.x + bx.max.x) / 2, y: (bx.min.y + bx.max.y) / 2, z: bx.max.z }, b);
+      if (top.z <= NEAR) continue;
+      const sp = project(top, w, h, f);
+      const hM = bx.max.z;
+      tags.push({
+        x: sp.x, y: sp.y - 26,
+        text: `${bx.name ? `${bx.name} · ` : ''}${Number.isInteger(hM) ? hM : hM.toFixed(1)} m`,
+        on: Boolean(bx.selected),
+      });
+    }
+  }
+
+  function drawTags() {
+    if (!tags.length) return;
+    ctx.font = '12px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const t of tags) {
+      const wid = ctx.measureText(t.text).width + 18;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(t.x - wid / 2, t.y - 11, wid, 22, 6);
+      else ctx.rect(t.x - wid / 2, t.y - 11, wid, 22);
+      ctx.fillStyle = 'rgba(11,14,17,0.92)';
+      ctx.fill();
+      ctx.strokeStyle = t.on ? HOVER_COLOR : 'rgba(139,152,165,0.4)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = '#f0f6fc';
+      ctx.fillText(t.text, t.x, t.y);
+    }
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
   }
 
   function draw() {
@@ -203,6 +349,13 @@ export function createView3D(canvas) {
     ctx.stroke();
     ctx.setLineDash([]);
 
+    // What is already standing there. Faces rather than wireframe, because a
+    // wireframe box does not tell you which side of it the path is on -- and
+    // the whole reason these are here is to be looked at against the path.
+    // Painter's algorithm over the visible faces of every box at once: there is
+    // no depth buffer, so far faces have to be laid down before near ones.
+    drawObstacles(b, w, h, f);
+
     // flight path, one stroke per pass so colours stay separate
     let i = 0;
     while (i < pts.length) {
@@ -220,6 +373,19 @@ export function createView3D(canvas) {
       i = j + 1;
     }
     ctx.globalAlpha = 1;
+
+    // The legs that come too close, restruck over the path in the colour of the
+    // news. Thicker than the path so they read at a glance from any angle.
+    for (const grade of ['near', 'strike']) {
+      const set = scene.legs.filter((l) => l.grade === grade);
+      if (!set.length) continue;
+      ctx.strokeStyle = CONFLICT_COLOR[grade];
+      ctx.lineWidth = grade === 'strike' ? 3.5 : 2.5;
+      ctx.beginPath();
+      for (const l of set) line(l.a, l.b, b, w, h, f);
+      ctx.stroke();
+    }
+    ctx.lineWidth = 1;
 
     // camera frustums, far ones first so near ones sit on top
     const wedges = [];
@@ -420,6 +586,8 @@ export function createView3D(canvas) {
       }
     }
 
+    drawTags();
+
     // start marker
     const v0 = toView(pts[0], b);
     if (v0.z > NEAR) {
@@ -436,6 +604,8 @@ export function createView3D(canvas) {
     ctx.font = '11px -apple-system, sans-serif';
     const facts = `grid ${grid} m · top ${scene.maxAlt.toFixed(0)} m AGL`;
     for (const hint of [
+      obstacles.length
+        ? `${facts} · click a box to edit it, drag its top to set the height` : '',
       onLevelChange ? `${facts} · drag to orbit, scroll to zoom, drag a level to move it` : '',
       `${facts} · drag to orbit, scroll to zoom`,
       facts,
@@ -481,6 +651,23 @@ export function createView3D(canvas) {
     return null;
   }
 
+  // Which obstacle face, if any, the pointer is over. Faces are convex quads,
+  // so the usual crossing test is enough, and they are already sorted near
+  // first -- the one you can see is the one you meant.
+  function faceAt(x, y) {
+    if (!onBoxSelect && !onBoxHeight) return null;
+    for (const r of hits) {
+      let inside = false;
+      for (let i = 0, j = r.poly.length - 1; i < r.poly.length; j = i++) {
+        const a = r.poly[i];
+        const c = r.poly[j];
+        if ((a.y > y) !== (c.y > y) && x < ((c.x - a.x) * (y - a.y)) / (c.y - a.y) + a.x) inside = !inside;
+      }
+      if (inside) return r;
+    }
+    return null;
+  }
+
   // Height under the pointer, read off the mast the scale is currently drawn on.
   function dragZ(pt) {
     if (!scale) return null;
@@ -491,6 +678,26 @@ export function createView3D(canvas) {
   canvas.addEventListener('pointerdown', (e) => {
     const pt = local(e);
     const t = levelAt(pt.x, pt.y);
+    const face = t ? null : faceAt(pt.x, pt.y);
+    if (face) {
+      // One gesture, decided on release: let go without moving and you have
+      // clicked the box; move first and you were dragging. Same rule the map
+      // uses for the same boxes, so the two views do not need explaining
+      // separately.
+      hoverBox = face.id;
+      drag = { box: face.id, x: e.clientX, y: e.clientY, moved: false };
+      if (face.roof && onBoxHeight) {
+        // Grab offset, so the roof does not jump to the pointer on the first
+        // pixel of the drag.
+        const h = canvas.clientHeight;
+        const z = zAtScreenY(face.centre, pt.y, basis(), h, focal(h));
+        drag.roof = face;
+        drag.grab = z === null ? 0 : z - face.z;
+      }
+      canvas.setPointerCapture(e.pointerId);
+      draw();
+      return;
+    }
     if (t) {
       // Grab offset, so the level does not jump to the pointer on the first
       // pixel of the drag.
@@ -506,9 +713,32 @@ export function createView3D(canvas) {
     if (!drag) {
       const pt = local(e);
       const t = levelAt(pt.x, pt.y);
-      canvas.style.cursor = t ? 'ns-resize' : '';
+      const face = t ? null : faceAt(pt.x, pt.y);
+      // The roof says "drag me up and down"; any other face says "click me".
+      canvas.style.cursor = t || face?.roof ? 'ns-resize' : face ? 'pointer' : '';
       const z = t ? t.z : null;
-      if (z !== hoverZ) { hoverZ = z; draw(); }
+      const id = face ? face.id : null;
+      if (z !== hoverZ || id !== hoverBox) { hoverZ = z; hoverBox = id; draw(); }
+      return;
+    }
+    if (drag.box) {
+      // A few pixels of slop, so a click with a shaky hand is still a click.
+      if (Math.abs(e.clientX - drag.x) > 3 || Math.abs(e.clientY - drag.y) > 3) drag.moved = true;
+      if (!drag.moved) return;
+      if (drag.roof) {
+        const h = canvas.clientHeight;
+        const z = zAtScreenY(drag.roof.centre, local(e).y, basis(), h, focal(h));
+        if (z === null) return;
+        onBoxHeight(drag.box, z - drag.grab, { done: false });   // the app redraws
+        return;
+      }
+      // A side face has no drag of its own, so the gesture falls through to
+      // what a drag on empty space does: orbit.
+      view.az -= (e.clientX - drag.x) * 0.4;
+      view.el = Math.max(-5, Math.min(89, view.el + (e.clientY - drag.y) * 0.3));
+      drag.x = e.clientX;
+      drag.y = e.clientY;
+      draw();
       return;
     }
     if (drag.handles) {
@@ -524,12 +754,25 @@ export function createView3D(canvas) {
     drag = { x: e.clientX, y: e.clientY };
     draw();
   });
-  const stop = () => { drag = null; };
+  // A height dragged in the air is a draft until the mouse comes up; that is
+  // when it becomes an edit worth storing and sending. A box let go of without
+  // being dragged was never an edit at all -- it was a click.
+  const stop = () => {
+    if (drag?.box) {
+      if (!drag.moved) onBoxSelect?.(drag.box);
+      else if (drag.roof) {
+        const cur = obstacles.find((o) => o.id === drag.box);
+        onBoxHeight(drag.box, cur ? cur.max.z : drag.roof.z, { done: true });
+      }
+    }
+    drag = null;
+  };
   canvas.addEventListener('pointerup', stop);
   canvas.addEventListener('pointercancel', stop);
   canvas.addEventListener('pointerleave', () => {
-    if (drag || hoverZ === null) return;
+    if (drag || (hoverZ === null && hoverBox === null)) return;
     hoverZ = null;
+    hoverBox = null;
     draw();
   });
   canvas.addEventListener('wheel', (e) => {
@@ -540,9 +783,23 @@ export function createView3D(canvas) {
 
   return {
     setMission(m, cov) { mission = m; coverage = cov ?? null; build(); draw(); },
+    // Boxes in the mission's own local metres, each optionally graded by the
+    // collision check, plus the legs that earned the grade.
+    setObstacles(boxes, legs) {
+      obstacles = boxes ?? [];
+      conflicts = legs ?? [];
+      build();
+      draw();
+    },
     // Called with the planner handles owning the dragged level and its new
     // height; setting it is what makes the levels draggable at all.
     onLevelChange(fn) { onLevelChange = fn; },
+    // Called with an obstacle id and the height its roof was dragged to;
+    // setting it is what makes the boxes resizable at all. `done` marks the
+    // end of the gesture, which is the only part worth storing.
+    onBoxHeight(fn) { onBoxHeight = fn; },
+    // Called with the id of a box that was clicked rather than dragged.
+    onBoxSelect(fn) { onBoxSelect = fn; },
     setCoverage(c) { coverage = c; draw(); },
     toggleCoverage(on) { showCoverage = on; draw(); },
     draw,

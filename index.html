@@ -118,6 +118,7 @@
         <button id="autofit" class="block" type="button" hidden>Re-propose a flight that fits one mission</button>
         <div id="passList" class="passlist"></div>
         <div id="altnote" class="altnote" hidden></div>
+        <div id="hazard" class="hazard" hidden></div>
         <div id="warn" class="warn" hidden></div>
         <p class="hint" id="sizeHint"></p>
 
@@ -138,6 +139,49 @@
           <button id="syncNow" type="button">Sync</button>
           <span class="hint">Saving syncs to your other device by itself.</span>
         </div>
+      </section>
+    </div>
+
+    <div class="pane" id="pane-world" hidden>
+      <section class="step">
+        <h2>Obstacles</h2>
+        <p class="hint">Boxes standing in the field. Drag one out on the map, then click
+        it &mdash; here, on the map, or in the 3D view &mdash; to work on it. Set how tall it
+        is by typing it, or by dragging the top of the box in 3D. Nothing here ever
+        reaches the aircraft; they exist so a plan can be checked against them before
+        you fly it.</p>
+
+        <button id="obsDraw" class="primary block" type="button">Draw obstacle</button>
+        <p class="hint" id="obsStatus"></p>
+
+        <label class="row">
+          <span>Clearance</span>
+          <span class="ctl"><input id="clearance" type="range" min="0" max="30" step="0.5"><output id="clearanceOut"></output></span>
+        </label>
+
+        <div id="obsReport" class="warn" hidden></div>
+        <div id="obsList" class="obslist"></div>
+
+        <div class="syncrow">
+          <button id="obsSync" type="button">Sync</button>
+          <span class="hint">Global, and shared with your other device.</span>
+        </div>
+
+        <p class="hint">Deleting one is not permanent until you say so &mdash;
+        <kbd>&#8984;Z</kbd> puts it back, and takes back any other change too.</p>
+
+        <details class="help">
+          <summary>What the check does and does not know</summary>
+          <p>Every height in this app is above the takeoff point, obstacle heights
+          included &mdash; so a box on a slope is only as right as the height you gave it.
+          The check measures the planned path: the legs between waypoints, including
+          the long ones between one pass and the next. It knows nothing about the
+          climb out from home, the return leg, wind push, or GNSS error beyond
+          whatever you put in the clearance.</p>
+          <p>Obstacles also block the camera: the coverage score stops counting a
+          surface it can only see through a box. They are never scored themselves
+          &mdash; a tree next to the house is not a surface you failed to photograph.</p>
+        </details>
       </section>
     </div>
 
@@ -192,6 +236,11 @@
     <div id="map"></div>
     <canvas id="scene" hidden></canvas>
     <div id="splitter" hidden></div>
+    <div id="fixbar" hidden>
+      <span id="fixnote"></span>
+      <button id="fixgo" type="button">Adjust</button>
+    </div>
+    <div id="toast" hidden></div>
     <div id="viewtabs">
       <button type="button" class="on" data-view="map">Map</button>
       <button type="button" data-view="split">Split</button>

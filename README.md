@@ -13,7 +13,7 @@ dragging.
 
 ```
 npm start          # http://localhost:8123
-npm test           # 235 assertions: geometry, poses, coverage, collision, undo, KMZ read+write, codes, plans, sync worker, bridge
+npm test           # 253 assertions: geometry, poses, coverage, collision, tiles, undo, KMZ read+write, codes, plans, sync worker, bridge
 npm run compare    # score capture configurations against each other
 npm run bridge     # what controller can this machine see?
 ```
@@ -341,6 +341,53 @@ Obstacles also block the **camera**, not just the aircraft: the coverage score
 stops counting a surface it can only see through a box. They are never scored
 themselves — a tree next to the house is not a surface you failed to photograph.
 
+## Imagery on the ground
+
+The 3D view can paint the map's own tiles onto the ground plane, so the flight
+sits over the actual roofs rather than over a wireframe grid. It is **off by
+default** — the button is top-right whenever a 3D pane is on screen, and the
+choice rides in the URL, so once you turn it on it stays on.
+
+**Why off by default.** Satellite imagery is a photograph, not a model of the
+ground. Anything with height leans away from nadir, so a roof gets painted
+metres from the walls holding it up. That is fine for knowing where you are and
+misleading for judging clearance — which is the question the 3D view exists to
+answer. The boxes you draw are the truth; this is context.
+
+### Doing it in a 2D canvas
+
+Canvas 2D has only affine transforms, and a ground plane under a perspective
+camera is a homography, so no single transform maps a tile onto its footprint.
+The fix is what software renderers used before hardware did it for them: cut
+each tile into cells and use a per-cell affine, which converges on the right
+answer as the cells shrink. Cell count follows how much screen the tile covers
+and halves mid-drag. Measured on a real site, a full redraw with imagery is
+about 1.5 ms.
+
+Two details that are not obvious:
+
+- **The tiles taint the canvas and that is fine.** Esri sends no CORS headers,
+  so requesting them anonymously would fail the load outright. Left alone they
+  draw normally and merely block reading pixels back, which this view never does.
+- **Two triangles sharing an edge each round it their own way**, and the
+  half-pixel neither claims shows up as a grid of hairlines across the ground.
+  Each clip is nudged outwards about its centroid to close them.
+
+### Why not reuse Leaflet's tiles
+
+Tempting, and wrong twice over. Measured: a second `new Image()` for a URL the
+map already fetched costs **0.2 ms and zero bytes** — the tiles carry
+`max-age=86400`, so the browser's own cache already does the sharing, and
+reaching into Leaflet's internals would buy that back at the price of a second
+code path and images that vanish when it prunes.
+
+And in split view, where both are on screen at once and reuse looks free, the
+map at zoom 16 was holding twenty tiles **all at zoom 16**, for a site 48 m
+across — about 30 pixels of imagery stretched over the whole ground. The map
+picks its zoom for the map's viewport; the 3D ground is a much smaller patch
+needing far more detail. They coincide only by accident. So: one loader, its own
+zoom, and the browser cache makes the overlap free when it happens.
+
 ## The URL is the view
 
 Where you are looking lives in the address bar, so a reload lands where you left
@@ -354,6 +401,7 @@ off and a link lands someone else there too:
 | `b` | basemap — `satellite`, `streets`, `topo` |
 | `c` | map centre, `lat,lon` |
 | `z` | zoom |
+| `g` | `1` when the 3D ground shows imagery; absent means off |
 | `#plan=` | the plan itself, as before |
 
 One reader at startup, one writer, and nothing in between keeping a private
@@ -641,6 +689,7 @@ js/coverage.js  proxy site, surface sampling, visibility and occlusion scoring
 js/obstacles.js the boxes standing in the field: model, store, local-frame AABB
 js/collide.js   segment-to-box distance; what the flight hits and by how much
 js/history.js   snapshot undo/redo, with rebase for changes that were not yours
+js/tiles.js     slippy-map tile maths and an image cache, for the 3D ground
 js/worldui.js   the obstacles pane: the list, the clearance, the draw button
 js/synced.js    local-first list + last-write-wins sync, shared by plans and obstacles
 js/view3d.js    hand-rolled canvas 3D view with camera frustums + coverage heat map

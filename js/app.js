@@ -44,9 +44,15 @@ const state = {
 // pointed anywhere. A `let` declared further down is not merely undefined at
 // that point, it throws, which takes the whole module with it.
 //
-// `ready`: the panes and layers exist, so a view change can redraw them.
+// `ready`: the panes, layers and views exist, so a change can redraw them.
 // `urlFrozen`: startup is still deciding what the view is, so nothing should be
 // writing that decision back to the address bar yet.
+//
+// The rule, because this has bitten four times: anything setup calls -- and
+// setBasemap and createMenu both run before most of this file exists -- must
+// either use only what is declared above it, or bail on `ready`. Reaching
+// forward for a `const` further down does not read as undefined, it throws, and
+// it takes the whole module with it.
 let ready = false;
 let urlFrozen = true;
 // Leaving a view cancels any half-armed rubber band: it is as clear a "no" as
@@ -70,22 +76,36 @@ const map = L.map('map', { zoomControl: true, attributionControl: true }).setVie
 // or slab. Streets are for finding the place at all, and topo for knowing
 // whether the ground under a 40 m flight is flat. All three come from the same
 // provider, so no extra attribution and no API key.
+//
+// `maxNative` is the deepest zoom the service actually holds imagery for. Ask
+// past it and Esri answers 200 with a grey "Map data not yet available" tile --
+// a real image, so nothing errors and nothing looks broken until you see it
+// painted across the ground. Coverage varies by place (city centres go deeper
+// than a riverbank), so this is the conservative floor rather than the best
+// case, and it is ONE number: the map layer and the 3D ground both read it, or
+// they disagree and only one of them shows the grey.
 const BASEMAPS = {
-  satellite: { label: 'Satellite', url: 'World_Imagery', attribution: 'Imagery &copy; Esri' },
-  streets: { label: 'Streets', url: 'World_Street_Map', attribution: 'Map &copy; Esri' },
-  topo: { label: 'Topo', url: 'World_Topo_Map', attribution: 'Topo &copy; Esri' },
+  satellite: { label: 'Satellite', url: 'World_Imagery', maxNative: 19, attribution: 'Imagery &copy; Esri' },
+  streets: { label: 'Streets', url: 'World_Street_Map', maxNative: 19, attribution: 'Map &copy; Esri' },
+  topo: { label: 'Topo', url: 'World_Topo_Map', maxNative: 19, attribution: 'Topo &copy; Esri' },
 };
 const BASEMAP_KEY = 'dji.basemap';
 const tiles = {};
 let baseLayer = null;
 let activeBase = 'satellite';
 
+// The one place the tile service's URL shape is written down, so the map layer
+// and the 3D ground cannot end up pointed at different things. Note /{z}/{y}/{x}
+// -- Esri puts the row before the column, which is not the usual order.
+const tileUrl = (service) => (z, x, y) =>
+  `https://server.arcgisonline.com/ArcGIS/rest/services/${service}/MapServer/tile/${z}/${y}/${x}`;
+
 function setBasemap(name) {
   const spec = BASEMAPS[name] ?? BASEMAPS.satellite;
   activeBase = BASEMAPS[name] ? name : 'satellite';
   tiles[name] ??= L.tileLayer(
     `https://server.arcgisonline.com/ArcGIS/rest/services/${spec.url}/MapServer/tile/{z}/{y}/{x}`,
-    { maxZoom: 21, maxNativeZoom: 19, attribution: spec.attribution },
+    { maxZoom: 21, maxNativeZoom: spec.maxNative, attribution: spec.attribution },
   );
   if (baseLayer === tiles[name]) return;
   if (baseLayer) map.removeLayer(baseLayer);
@@ -98,6 +118,7 @@ function setBasemap(name) {
   // has something to say. Keeping both means opening someone's link does not
   // permanently retune your own default.
   try { localStorage.setItem(BASEMAP_KEY, name); } catch { /* private window */ }
+  pushGround();
   writeUrl();
 }
 
@@ -153,6 +174,10 @@ function setView(name) {
   $('scene').hidden = !show3d;
   $('splitter').hidden = name !== 'split';
   $('basetabs').hidden = !showMap;
+  // Only means anything where there is a 3D view to paint. With no basemap
+  // picker above it, it takes that slot rather than leaving a gap.
+  $('ground').hidden = !show3d;
+  $('ground').classList.toggle('solo', !showMap);
   if (showMap) map.invalidateSize();
   if (show3d) view3d.draw();
   writeUrl();
@@ -160,6 +185,36 @@ function setView(name) {
 for (const btn of document.querySelectorAll('#viewtabs button')) {
   btn.addEventListener('click', () => setView(btn.dataset.view));
 }
+
+/* ---------- imagery on the ground of the 3D view ---------- */
+// Off unless asked for. Satellite imagery is a photograph: anything with height
+// leans away from nadir, so a roof lands metres from the walls under it. That is
+// fine for knowing where you are and misleading for judging clearance, which is
+// the question the 3D view exists to answer -- so the boxes stay the truth and
+// this stays a thing you switch on.
+let groundOn = false;
+
+function pushGround() {
+  if (!ready) return;   // setBasemap runs before the 3D view exists
+  const spec = BASEMAPS[activeBase] ?? BASEMAPS.satellite;
+  // The attribution strings are written for Leaflet's control, which renders
+  // HTML. A canvas draws text, so the entity has to become the character.
+  view3d.setGround({
+    on: groundOn,
+    url: tileUrl(spec.url),
+    maxZoom: spec.maxNative,
+    attribution: spec.attribution.replace(/&copy;/g, '\u00a9'),
+  });
+  $('ground').classList.toggle('on', groundOn);
+}
+
+function setGroundImagery(on) {
+  if (groundOn === on) return;
+  groundOn = on;
+  pushGround();
+  writeUrl();
+}
+$('ground').addEventListener('click', () => setGroundImagery(!groundOn));
 
 /* ---------- the URL is where the view lives ---------- */
 // One reader at startup, one writer, and nothing in between keeping a private
@@ -182,6 +237,10 @@ function writeUrl() {
     c: `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`,
     z: String(map.getZoom()),
   });
+  // Only when on, so a bare link stays short and the default stays visible in
+  // its absence. Being in the URL is also what makes it survive a reload
+  // without needing a preference of its own.
+  if (groundOn) q.set('g', '1');
   const code = state.rect ? encodePlan(state.rect, uiValues()) : null;
   window.history.replaceState(null, '', `?${q}${code ? `#plan=${code}` : ''}`);
 }
@@ -190,6 +249,7 @@ function readUrl() {
   const q = new URLSearchParams(location.search);
   if (BASEMAPS[q.get('b')]) setBasemap(q.get('b'));
   if (['map', 'split', '3d'].includes(q.get('v'))) setView(q.get('v'));
+  if (q.get('g') === '1') setGroundImagery(true);
   const [lat, lon] = (q.get('c') ?? '').split(',').map(Number);
   const zoom = Number(q.get('z'));
   // A centre without a zoom, or either of them nonsense, leaves the map where
@@ -1563,6 +1623,7 @@ readParams();
 $('gsdHint').textContent = `${gsdCm(cam, DEFAULTS.altitude).toFixed(2)} cm/px ground resolution`;
 ready = true;
 renderObstacles();   // they are context, so they are on the map before any plan is
+pushGround();        // hands the 3D view its tile source, on or off
 urlFrozen = false;
 writeUrl();          // a bare visit still ends up with an address worth copying
 // Handy when poking at it from the console, which is most of how the 3D view

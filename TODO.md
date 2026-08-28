@@ -143,6 +143,15 @@ What it cannot tell you:
       box" rather than pretending otherwise. Searching over pass selection is
       the obvious next one, but it changes what the capture IS, which is a
       different kind of suggestion from changing a number.
+- [ ] **Ground imagery is flat, and the world is not.** Tiles are painted on
+      z = 0. Roofs lean away from nadir so they land beside their own walls, and
+      on a slope the imagery is level while the ground is not. It is context,
+      never a clearance check -- which is why it is off by default. Draping over
+      a terrain mesh would fix the slope half; nothing cheap fixes the lean.
+- [ ] **One zoom for the whole ground.** A single zoom is chosen for the whole
+      patch, so a plan spanning a large area gets coarser imagery everywhere
+      rather than finer tiles near the camera. Per-tile zoom by screen size is
+      the usual answer if it ever matters.
 - [ ] **The URL carries the view, not the whole app state.** Pane, basemap,
       centre, zoom and the plan are in the address bar; the selected obstacle,
       the split-divider position and the obstacle list are not. Going further --

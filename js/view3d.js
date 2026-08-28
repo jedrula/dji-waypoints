@@ -1,5 +1,6 @@
 import { fov, orientation } from './camera.js';
 import { GRADE_COLOR } from './coverage.js';
+import { createTileCache, pickZoom, tileRange, tileBounds, TILE_PX } from './tiles.js';
 
 // A small hand-rolled 3D view. The scene is a few thousand line segments, so a
 // WebGL library would be more dependency than drawing. Coordinates are local
@@ -35,6 +36,9 @@ export function createView3D(canvas) {
   let showCoverage = true;
   let obstacles = [];      // boxes already in the mission's local metres
   let conflicts = [];      // legs the collision check flagged, in lat/lon
+  let ground = null;       // { on, url, attribution } -- imagery under the plan
+  let tiles = null;        // the cache for whichever basemap `ground` names
+  let redrawTimer = null;
   const view = { az: 35, el: 28, dist: 400, target: { x: 0, y: 0, z: 0 } };
   const NEAR = 0.5;
   const VFOV = 28 * DEG;
@@ -167,7 +171,21 @@ export function createView3D(canvas) {
       grade: c.grade,
     }));
 
-    scene = { pts, box, span, maxAlt, frustumLen, step, levels, legs };
+    // How much ground to draw. The rectangle is not it: an orbit ring stands
+    // well outside the box it circles, and a flight path hanging over the edge
+    // of the world looks like a bug rather than like a wide orbit.
+    const area = { x0: box.x0, x1: box.x1, y0: box.y0, y1: box.y1 };
+    for (const p of pts) {
+      if (p.x < area.x0) area.x0 = p.x;
+      if (p.x > area.x1) area.x1 = p.x;
+      if (p.y < area.y0) area.y0 = p.y;
+      if (p.y > area.y1) area.y1 = p.y;
+    }
+    const margin = Math.max(area.x1 - area.x0, area.y1 - area.y0) * 0.12;
+    area.x0 -= margin; area.x1 += margin;
+    area.y0 -= margin; area.y1 += margin;
+
+    scene = { pts, box, span, maxAlt, frustumLen, step, levels, legs, area };
 
     // Re-frame only when the ground box itself changed. Replanning -- which
     // happens on every slider tick and on every pixel of a level drag -- must
@@ -305,6 +323,109 @@ export function createView3D(canvas) {
     ctx.textBaseline = 'alphabetic';
   }
 
+  // Canvas 2D can only do affine transforms, and a ground plane under a
+  // perspective camera is a homography -- so no single transform maps a tile
+  // onto its footprint. The fix is the one software renderers used before
+  // hardware did it for them: cut the tile into cells and use a per-cell
+  // affine, which converges on the right answer as the cells get smaller.
+  //
+  // The imagery is a PHOTOGRAPH, not a model of the ground. Anything with
+  // height leans away from nadir, so a roof is painted metres from the walls
+  // holding it up. That is why this is off unless asked for, and why the boxes
+  // are the thing to judge clearance against.
+  function drawGround(b, w, h, f, dpr) {
+    if (!ground?.on || !tiles || !mission || !scene) return;
+    const fr = mission.frame;
+    const { area } = scene;
+    const sw = fr.toLatLon(area.x0, area.y0);
+    const ne = fr.toLatLon(area.x1, area.y1);
+    // Never past what the service holds: beyond that it answers with a grey
+    // placeholder tile rather than an error, which would paint "Map data not
+    // yet available" across the ground and look like our bug.
+    const z = pickZoom({ south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon },
+                       { maxZoom: ground.maxZoom ?? 19 });
+    const r = tileRange({ south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon }, z);
+
+    for (let tx = r.x0; tx <= r.x1; tx++) {
+      for (let ty = r.y0; ty <= r.y1; ty++) {
+        const img = tiles.get(z, tx, ty);
+        if (!img) continue;                       // still loading; it will redraw
+        const tb = tileBounds(z, tx, ty);
+        // A tile is axis-aligned in Mercator and the local frame is affine in
+        // lat/lon, so its footprint is a rectangle in metres. Within one tile
+        // the Mercator stretch is far under a centimetre, so interpolating
+        // across it linearly is exact enough to ignore.
+        const nw = fr.toLocal(tb.north, tb.west);
+        const se = fr.toLocal(tb.south, tb.east);
+
+        const corner = (u, v) => {
+          const p = toView({ x: nw.x + (se.x - nw.x) * u, y: nw.y + (se.y - nw.y) * v, z: 0 }, b);
+          return p.z <= NEAR ? null : project(p, w, h, f);
+        };
+        // How finely to cut it: by how much of the screen the tile covers, so a
+        // tile in the distance costs almost nothing and one under your nose is
+        // smooth. Halved mid-drag, where a frame matters more than a pixel.
+        const outline = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([u, v]) => corner(u, v));
+        if (outline.every((p) => !p)) continue;
+        const seen = outline.filter(Boolean);
+        const extent = Math.max(
+          ...seen.map((p) => Math.max(...seen.map((q) => Math.hypot(p.x - q.x, p.y - q.y)))),
+        );
+        let n = Math.min(6, Math.max(1, Math.round(extent / 140)));
+        if (drag) n = Math.max(1, n >> 1);
+
+        for (let i = 0; i < n; i++) {
+          for (let j = 0; j < n; j++) {
+            const P = [[i, j], [i + 1, j], [i + 1, j + 1], [i, j + 1]]
+              .map(([a, c]) => corner(a / n, c / n));
+            if (P.some((p) => !p)) continue;      // straddles the eye plane
+            const su = TILE_PX / n;
+            const U = [[i * su, j * su], [(i + 1) * su, j * su],
+                       [(i + 1) * su, (j + 1) * su], [i * su, (j + 1) * su]];
+            for (const [m, q, o] of [[0, 1, 2], [0, 2, 3]]) {
+              paintTriangle(img, [P[m], P[q], P[o]], [U[m], U[q], U[o]], dpr);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // One triangle of a tile: solve the affine that carries its three source
+  // pixels onto its three screen points, clip to it, and let drawImage do the
+  // rest. The clip is nudged outwards about the centroid because two triangles
+  // sharing an edge each round it their own way, and the half-pixel nobody
+  // claims shows up as a grid of hairlines across the ground.
+  const SEAM = 0.4;
+  function paintTriangle(img, P, U, dpr) {
+    const [[u0, v0], [u1, v1], [u2, v2]] = U;
+    const den = (u1 - u0) * (v2 - v0) - (u2 - u0) * (v1 - v0);
+    if (!den) return;
+    const a = ((P[1].x - P[0].x) * (v2 - v0) - (P[2].x - P[0].x) * (v1 - v0)) / den;
+    const bb = ((P[1].y - P[0].y) * (v2 - v0) - (P[2].y - P[0].y) * (v1 - v0)) / den;
+    const c = ((P[2].x - P[0].x) * (u1 - u0) - (P[1].x - P[0].x) * (u2 - u0)) / den;
+    const d = ((P[2].y - P[0].y) * (u1 - u0) - (P[1].y - P[0].y) * (u2 - u0)) / den;
+
+    const cx = (P[0].x + P[1].x + P[2].x) / 3;
+    const cy = (P[0].y + P[1].y + P[2].y) / 3;
+    ctx.save();
+    ctx.beginPath();
+    for (let k = 0; k < 3; k++) {
+      const dx = P[k].x - cx;
+      const dy = P[k].y - cy;
+      const len = Math.hypot(dx, dy) || 1;
+      const x = P[k].x + (dx / len) * SEAM;
+      const y = P[k].y + (dy / len) * SEAM;
+      if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.clip();
+    ctx.setTransform(dpr * a, dpr * bb, dpr * c, dpr * d,
+                     dpr * (P[0].x - a * u0 - c * v0), dpr * (P[0].y - bb * u0 - d * v0));
+    ctx.drawImage(img, 0, 0);
+    ctx.restore();
+  }
+
   function draw() {
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth;
@@ -323,13 +444,17 @@ export function createView3D(canvas) {
     const f = focal(h);
     const { box, span, pts, frustumLen, step } = scene;
 
-    // ground grid
+    drawGround(b, w, h, f, dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // ground grid -- fainter over imagery, where it is a scale reference rather
+    // than the only thing telling you where the ground is
     const grid = span > 300 ? 50 : span > 120 ? 20 : span > 40 ? 10 : 5;
-    const gx0 = Math.floor((box.x0 - span * 0.3) / grid) * grid;
-    const gx1 = Math.ceil((box.x1 + span * 0.3) / grid) * grid;
-    const gy0 = Math.floor((box.y0 - span * 0.3) / grid) * grid;
-    const gy1 = Math.ceil((box.y1 + span * 0.3) / grid) * grid;
-    ctx.strokeStyle = '#1b222b';
+    const gx0 = Math.floor(scene.area.x0 / grid) * grid;
+    const gx1 = Math.ceil(scene.area.x1 / grid) * grid;
+    const gy0 = Math.floor(scene.area.y0 / grid) * grid;
+    const gy1 = Math.ceil(scene.area.y1 / grid) * grid;
+    ctx.strokeStyle = ground?.on && tiles ? 'rgba(255,255,255,0.13)' : '#1b222b';
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let x = gx0; x <= gx1; x += grid) line({ x, y: gy0, z: 0 }, { x, y: gy1, z: 0 }, b, w, h, f);
@@ -598,8 +723,28 @@ export function createView3D(canvas) {
       ctx.fill();
     }
 
+    // Over a dark grid, grey text on the background reads fine. Over a sunlit
+    // roof it does not, so the imagery gets a scrim to sit the readouts on.
+    if (ground?.on && tiles) {
+      const g = ctx.createLinearGradient(0, h - 52, 0, h);
+      g.addColorStop(0, 'rgba(11,14,17,0)');
+      g.addColorStop(1, 'rgba(11,14,17,0.82)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, h - 52, w, 52);
+    }
+
     // Scale + altitude readout. A split pane can be half the width of the full
     // view, so the hint sheds its tail rather than running off the edge.
+    // Imagery is licensed, and the 3D view has no Leaflet attribution control to
+    // carry that for it. Drawn with the rest of the readouts, on the scrim.
+    if (ground?.on && tiles && ground.attribution) {
+      ctx.fillStyle = 'rgba(160,172,185,0.9)';
+      ctx.font = '11px -apple-system, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(ground.attribution, w - 10, h - 10);
+      ctx.textAlign = 'left';
+    }
+
     ctx.fillStyle = '#8b98a5';
     ctx.font = '11px -apple-system, sans-serif';
     const facts = `grid ${grid} m · top ${scene.maxAlt.toFixed(0)} m AGL`;
@@ -785,6 +930,28 @@ export function createView3D(canvas) {
     setMission(m, cov) { mission = m; coverage = cov ?? null; build(); draw(); },
     // Boxes in the mission's own local metres, each optionally graded by the
     // collision check, plus the legs that earned the grade.
+    // `spec` is { on, url(z,x,y), attribution }. Changing the basemap swaps the
+    // cache rather than mixing two services' tiles in one texture.
+    setGround(spec) {
+      const changed = spec?.url !== ground?.url;
+      ground = spec ?? null;
+      if (changed) tiles = null;
+      if (ground?.on && !tiles) {
+        tiles = createTileCache({
+          url: ground.url,
+          // A tile that arrives after the frame that wanted it is invisible
+          // until something else forces a redraw. Coalesced with a timer rather
+          // than requestAnimationFrame, which does not run in a hidden tab --
+          // and tiles land in bursts, so one redraw per burst is the point.
+          onLoad: () => {
+            clearTimeout(redrawTimer);
+            redrawTimer = setTimeout(draw, 30);
+          },
+        });
+      }
+      draw();
+    },
+
     setObstacles(boxes, legs) {
       obstacles = boxes ?? [];
       conflicts = legs ?? [];

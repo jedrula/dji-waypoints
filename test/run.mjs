@@ -17,6 +17,7 @@ import worker, { merge as workerMerge, clean, cleanObstacle } from '../sync/work
 import { createObstacleStore, localBox, normalizeRect, overlaps } from '../js/obstacles.js';
 import { checkObstacles, clearingAltitude, segmentBoxDist, pointBoxDist } from '../js/collide.js';
 import { createHistory } from '../js/history.js';
+import { lonToX, latToY, xToLon, yToLat, mPerPx, pickZoom, tileRange, tileCount, tileBounds, createTileCache } from '../js/tiles.js';
 
 let fails = 0;
 const ok = (name, cond, extra = '') => {
@@ -810,6 +811,80 @@ console.log('\nobstacles');
                      height: 'tall' }) === null);
   ok('a tombstone needs nothing but an id and a time',
      cleanObstacle({ id: 'abcdef', updatedAt: 1, deleted: true }).deleted === true);
+}
+
+console.log('\nground imagery');
+{
+  const lat = 50.0614;
+  const lon = 19.9366;
+  for (const z of [12, 16, 19]) {
+    ok(`tile x round-trips at z${z}`, near(xToLon(lonToX(lon, z), z), lon, 1e-9));
+    ok(`tile y round-trips at z${z}`, near(yToLat(latToY(lat, z), z), lat, 1e-9));
+  }
+
+  // A tile's own corners must land back on the tile's own edges, or every
+  // texture is offset by a fraction of a tile and the seams never line up.
+  const b = tileBounds(19, 290086, 177262);
+  ok('a tile reports the bounds its own index implies',
+     near(lonToX(b.west, 19), 290086, 1e-9) && near(latToY(b.north, 19), 177262, 1e-9));
+  ok('and north is above south, east right of west',
+     b.north > b.south && b.east > b.west);
+
+  // The reason for not borrowing the map's tiles: over a small site the map's
+  // zoom is the wrong zoom by several levels, so the imagery it holds would be
+  // a smear rather than a picture.
+  const pxAcross = (z) => 50 / mPerPx(lat, z);          // a 50 m site, in tile pixels
+  ok('a 50 m site is a smudge at the zoom a map sits at', pxAcross(16) < 40);
+  ok('and a picture close in', pxAcross(20) > 400);
+
+  const area = { north: lat + 0.0004, south: lat - 0.0004, east: lon + 0.0006, west: lon - 0.0006 };
+  const z = pickZoom(area, { maxTiles: 24 });
+  ok('zoom is the most detailed one inside the tile budget',
+     tileCount(tileRange(area, z)) <= 24 && tileCount(tileRange(area, z + 1)) > 24);
+
+  const wide = { north: lat + 0.05, south: lat - 0.05, east: lon + 0.08, west: lon - 0.08 };
+  ok('a big area drops zoom rather than asking for hundreds of tiles',
+     pickZoom(wide, { maxTiles: 24 }) < z);
+
+  // Past its coverage a tile service answers 200 with a grey "Map data not yet
+  // available" image -- a real tile, so nothing errors and it just gets painted
+  // across the ground. The ceiling is the only defence, so it has to hold even
+  // for an area small enough that any zoom would fit the tile budget.
+  const tiny = { north: lat + 0.00002, south: lat - 0.00002, east: lon + 0.00002, west: lon - 0.00002 };
+  ok('zoom never goes past the service ceiling', pickZoom(tiny, { maxZoom: 19 }) === 19);
+  ok('and the default ceiling is the one the basemaps declare', pickZoom(tiny) <= 19);
+
+  // The cache is fire-and-forget: the first ask starts the load and returns
+  // nothing, and the view is told when to draw itself again.
+  const made = [];
+  let told = 0;
+  class FakeImage { set src(v) { made.push(v); this._src = v; } get src() { return this._src; } }
+  const cache = createTileCache({
+    url: (zz, xx, yy) => `t/${zz}/${xx}/${yy}`,
+    onLoad: () => { told++; },
+    Image: FakeImage,
+    limit: 3,
+  });
+  ok('the first ask returns nothing and starts a load',
+     cache.get(19, 1, 1) === null && made.length === 1);
+  ok('asking again does not start a second one',
+     cache.get(19, 1, 1) === null && made.length === 1);
+  ok('the url template is used verbatim', made[0] === 't/19/1/1');
+
+  // A tile arriving late has to reach the view, or it stays invisible until
+  // something else happens to force a redraw.
+  const pending = [];
+  const cache2 = createTileCache({
+    url: () => 'x', onLoad: () => { told++; },
+    Image: class { set src(v) { pending.push(this); } },
+  });
+  cache2.get(19, 2, 2);
+  pending[0].onload();
+  ok('a tile that lands late asks for a redraw', told === 1);
+  ok('and is there the next time it is wanted', cache2.get(19, 2, 2) !== null);
+
+  for (let i = 0; i < 8; i++) cache.get(19, i, 9);
+  ok('the cache does not grow without bound', cache.size() <= 4);
 }
 
 console.log('\nsync worker');

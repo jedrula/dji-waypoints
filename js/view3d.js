@@ -430,13 +430,25 @@ export function createView3D(canvas) {
       ctx.fill();
     }
 
-    // scale + altitude readout
+    // Scale + altitude readout. A split pane can be half the width of the full
+    // view, so the hint sheds its tail rather than running off the edge.
     ctx.fillStyle = '#8b98a5';
     ctx.font = '11px -apple-system, sans-serif';
-    ctx.fillText(`grid ${grid} m · top ${scene.maxAlt.toFixed(0)} m AGL · drag to orbit, scroll to zoom${onLevelChange ? ', drag a level to move it' : ''}`, 10, h - 10);
+    const facts = `grid ${grid} m · top ${scene.maxAlt.toFixed(0)} m AGL`;
+    for (const hint of [
+      onLevelChange ? `${facts} · drag to orbit, scroll to zoom, drag a level to move it` : '',
+      `${facts} · drag to orbit, scroll to zoom`,
+      facts,
+    ]) {
+      if (!hint) continue;
+      if (ctx.measureText(hint).width <= w - 20 || hint === facts) { ctx.fillText(hint, 10, h - 10); break; }
+    }
     if (showCoverage && coverage) {
       let lx = 10;
-      const legend = [['good', 'good'], ['flat', 'no parallax'], ['thin', '<3 views'], ['unseen', 'unseen']];
+      const full = [['good', 'good'], ['flat', 'no parallax'], ['thin', '<3 views'], ['unseen', 'unseen']];
+      const short = [['good', 'good'], ['flat', 'flat'], ['thin', 'thin'], ['unseen', 'unseen']];
+      const width = (rows) => rows.reduce((n, [, l]) => n + 16 + ctx.measureText(l).width, 10);
+      const legend = width(full) <= w - 10 ? full : short;
       for (const [g, label] of legend) {
         ctx.fillStyle = GRADE_COLOR[g];
         ctx.beginPath();

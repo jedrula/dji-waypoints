@@ -114,8 +114,11 @@ ground grid, the box, the path coloured by pass, and a frustum wedge per camera
 so you can see what each shot actually frames. Drag to orbit, scroll to zoom.
 **Split** puts the map and the 3D side by side — "where" and "at what height"
 come up together often enough that switching tabs between them is the annoying
-part. On a phone the two stack instead of splitting, because half a phone screen
-is not a map.
+part. Drag the divider to give either side more room (double-click to even it
+up); where you leave it is remembered. Squeeze the map past the width of its own
+floating controls and the basemap picker hides rather than landing on the zoom
+buttons. On a phone the two stack instead of splitting, because half a phone
+screen is not a map, and the divider moves up and down.
 
 An **altitude scale** stands at whichever box corner currently projects furthest
 left, ticked at every height the mission flies and labelled with what is up

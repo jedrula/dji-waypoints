@@ -107,6 +107,7 @@ function setView(name) {
   $('stage').classList.toggle('split', name === 'split');
   $('map').hidden = !showMap;
   $('scene').hidden = !show3d;
+  $('splitter').hidden = name !== 'split';
   $('basetabs').hidden = !showMap;
   if (showMap) map.invalidateSize();
   if (show3d) view3d.draw();
@@ -115,9 +116,59 @@ for (const btn of document.querySelectorAll('#viewtabs button')) {
   btn.addEventListener('click', () => setView(btn.dataset.view));
 }
 window.addEventListener('resize', () => {
-  if (activeView !== 'map') view3d.draw();
-  if (activeView === 'split') map.invalidateSize();
+  if (activeView === 'split') setSplit(splitPct, { store: false });
+  else if (activeView !== 'map') view3d.draw();
 });
+
+// Where the divider sits. Which axis it moves along is the stylesheet's
+// business -- the same percentage drives a left/right split on a desktop and a
+// top/bottom one on a phone -- so the drag just asks which way the panes are
+// stacked and measures accordingly.
+const SPLIT_KEY = 'dji.split';
+const stacked = () => window.matchMedia('(max-width: 780px)').matches;
+
+// Clamped in pixels rather than percent: a pane narrower than its own floating
+// controls puts the basemap picker on top of the zoom buttons, and a pane that
+// thin is not showing you anything anyway.
+function splitPercent(pct) {
+  const r = $('stage').getBoundingClientRect();
+  const total = (stacked() ? r.height : r.width) || 1;
+  const min = Math.min(stacked() ? 140 : 260, total * 0.25);
+  return (Math.max(min, Math.min(total - min, (pct / 100) * total)) / total) * 100;
+}
+
+function setSplit(pct, { store = true } = {}) {
+  const v = splitPercent(pct);
+  $('stage').style.setProperty('--split', `${v.toFixed(2)}%`);
+  const mapWidth = ($('stage').getBoundingClientRect().width * v) / 100;
+  $('stage').classList.toggle('tight', !stacked() && mapWidth < 250);
+  if (store) { try { localStorage.setItem(SPLIT_KEY, String(v)); } catch { /* private window */ } }
+  map.invalidateSize();
+  view3d.draw();
+}
+
+let splitPct = 50;
+try { splitPct = +localStorage.getItem(SPLIT_KEY) || 50; } catch { /* private window */ }
+setSplit(splitPct, { store: false });
+
+$('splitter').addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  $('splitter').setPointerCapture(e.pointerId);
+  $('splitter').classList.add('dragging');
+});
+$('splitter').addEventListener('pointermove', (e) => {
+  if (!$('splitter').hasPointerCapture(e.pointerId)) return;
+  const r = $('stage').getBoundingClientRect();
+  splitPct = stacked()
+    ? ((e.clientY - r.top) / r.height) * 100
+    : ((e.clientX - r.left) / r.width) * 100;
+  setSplit(splitPct);
+});
+const endSplit = () => $('splitter').classList.remove('dragging');
+$('splitter').addEventListener('pointerup', endSplit);
+$('splitter').addEventListener('pointercancel', endSplit);
+// Double-click puts it back to even, which is easier than nudging it there.
+$('splitter').addEventListener('dblclick', () => { splitPct = 50; setSplit(50); });
 
 /* ---------- draw a rectangle by dragging ---------- */
 let dragStart = null;

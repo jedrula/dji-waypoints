@@ -25,13 +25,14 @@ just moves.
 ## What it plans
 
 Gaussian splatting wants many views of each surface from many angles, which a
-plain nadir mapping grid does not give you. The proposal is three passes:
+plain nadir mapping grid does not give you. The proposal is four passes:
 
 | Pass | Camera | Why |
 |---|---|---|
 | Nadir grid | −90° | metric backbone, consistent scale, and the down-angle data |
 | Oblique cross-grid | −45° | lines run perpendicular to the nadir grid, so the two together cover four azimuths |
 | Perimeter orbit | aims at subject | rings form a dome around the site; catches facades and edges the grids miss |
+| Surround ring | faces **outward** | the same ring flown backwards to the subject: the horizon, and the landscape the site sits in |
 | Cross passes | side-on | lines flown *through* the site, camera 90° off travel — the only pass that sees into gaps |
 
 Published capture guidance the pass set follows: every visible surface should
@@ -39,6 +40,31 @@ appear in **at least three** overlapping frames; orbit at **three or more
 elevations**, not one; vary the **distance** as well as the height; and do not
 under-cover the **down angle** — a surface never photographed from above has no
 data for that direction and the splat breaks under a low camera.
+
+### Why the surround ring exists
+
+Every other pass photographs the middle of the box, so a splat trained on them
+is a subject floating in a void — no horizon, nothing behind it at any distance,
+and therefore no sense of perspective when you fly a camera through the result.
+The surround ring is the orbit ring flown with the camera pointing **out**,
+tilted so the top of the frame sits just above the horizon. That tilt comes from
+the lens, not the altitude: the horizon is at eye level from 5 m and from 100 m
+alike, which makes it the one pitch in the planner that does not move when the
+altitude slider does.
+
+Where the depth out there comes from is worth being clear about. Two stations on
+opposite sides of the ring look along opposite azimuths and share no view, so
+this pass **on its own triangulates almost nothing far away** — it is a wide
+panorama with a little parallax between neighbours. The long baseline comes from
+the inward orbit: an orbit frame looks over the box at the landscape beyond it,
+from the far side of the same ring. That pairing is also what keeps the two
+image sets connected in SfM, so the ring is worth much more with the orbit on
+than without it.
+
+It costs a fixed number of stations — a full 360° whatever the box is — but the
+ring itself is as long as the orbit's, which on a large site is a quarter of a
+battery spent on something other than the subject. Auto-fit drops it before it
+drops anything else, and says so.
 
 ### Why cross passes exist
 

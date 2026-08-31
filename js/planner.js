@@ -7,6 +7,8 @@ import { footprint, gsdCm, fov } from './camera.js';
 //                           together give obliques from four azimuths
 //   3. perimeter orbit    - heading locked on the box centre, catches facades
 //                           and the sky-facing sides the grids miss
+//   4. surround ring      - the same ring flown with the camera pointing OUT,
+//                           so the capture has a horizon and a world around it
 // Gaussian splatting wants view diversity per surface point far more than it
 // wants a perfect nadir block, which is why the oblique pass is on by default.
 
@@ -22,6 +24,8 @@ export const DEFAULTS = {
   orbit: true,
   orbitPad: 15,          // metres outside the box corners
   orbitRings: 1,         // concentric rings; >1 forms a dome around the subject
+  surround: true,        // outward-facing ring: the landscape, not the subject
+  surroundRings: 1,      // >1 adds vertical parallax on whatever stands nearby
   transect: false,       // crossing lines THROUGH the site, camera side-on
   // Cross passes default to ONE height. Multi-level was built and measured:
   // on its own it helps (45 -> 54% coverage over three levels), but alongside a
@@ -59,7 +63,10 @@ export function fanPitches(pitch, n, spread, cam) {
   const hi = cam.maxGimbalPitch;
   const out = [];
   const push = (v) => {
-    const c = Math.max(lo, Math.min(hi, v));
+    // Rounded to 0.1 for the same reason the orbit's own pitch is: the XML
+    // writes one decimal, so an unrounded angle means the planner, the UI and
+    // the file disagree about what was shot.
+    const c = Math.round(Math.max(lo, Math.min(hi, v)) * 10) / 10;
     if (!out.some((x) => Math.abs(x - c) < 0.5)) out.push(c);
   };
   const half = (n - 1) / 2;
@@ -191,6 +198,76 @@ function orbitPass(g) {
     radii: [...new Set(pts.map((p) => Math.round(Math.hypot(f.toLocal(p.lat, p.lon).x, f.toLocal(p.lat, p.lon).y))))],
     pitch: pts.length ? pts[0].pitch : 0,
   };
+}
+
+// The same ring, flown with the camera pointing AWAY from the middle. Every
+// other pass here photographs the box; nothing photographs what is around it,
+// so a splat trained on them is a subject floating in a void -- no horizon, no
+// depth behind it, and nothing at any distance to place it against. Which is
+// also why the result has no sense of perspective: perspective is what the
+// background gives you.
+//
+// Where the depth out here comes from is worth being clear about. Two stations
+// on opposite sides of the ring look outward along opposite azimuths and share
+// no view at all, so this pass alone triangulates almost nothing far away -- it
+// is a wide panorama with a little parallax between neighbours. The long
+// baseline comes from the INWARD orbit: an orbit frame looks over the box at
+// the landscape beyond it, from the far side of the same ring, which both
+// triangulates that landscape and keeps the two image sets connected in SfM.
+// The pass is worth much more with the orbit on than without it.
+function surroundPass(g) {
+  const { halfX, halfY, pad, f, alt, rings, cam, frontOverlap } = g;
+  const r = Math.max(3, Math.hypot(halfX, halfY) + pad);
+
+  // Facing outward, a frame covers an ANGLE rather than a patch of ground, so
+  // the spacing that matters is the yaw step between stations and nothing about
+  // the range. Bounded either side: below 12 stations consecutive frames stop
+  // overlapping enough to match, above 36 they are near-duplicates costing
+  // waypoints the subject passes spend better.
+  const stepDeg = ((fov(cam).h * 180) / Math.PI) * (1 - frontOverlap);
+  const n = Math.max(12, Math.min(36, Math.ceil(360 / Math.max(2, stepDeg))));
+
+  // Tilt so the top of the frame sits just above the horizon: everything below
+  // it is landscape, and the horizon line -- the strongest feature anywhere out
+  // here -- stays in shot. This is a camera angle, not a geometry problem: the
+  // horizon is at eye level from 5 m and from 100 m alike, so unlike every
+  // other pitch in this file it does not depend on the altitude. What it does
+  // depend on is the lens, and a wider one would tilt further down.
+  const SKY_MARGIN = 4;
+  const pitch = Math.round(Math.max(cam.minGimbalPitch, Math.min(cam.maxGimbalPitch,
+    -((fov(cam).v * 90) / Math.PI - SKY_MARGIN))) * 10) / 10;
+
+  // Extra rings sit BELOW the set altitude, same spread as the orbit. Height
+  // buys much less here than it does on the subject -- the far field looks the
+  // same from either -- but it does give vertical parallax on what stands just
+  // outside the ring, which is exactly the mid-distance stuff a splat renders
+  // worst.
+  const heights = rings <= 1
+    ? [alt]
+    : Array.from({ length: rings }, (_, k) => alt * (0.5 + (0.5 * k) / (rings - 1)));
+
+  const pts = [];
+  for (let ri = 0; ri < heights.length; ri++) {
+    for (let i = 0; i < n; i++) {
+      // Half-step offset between rings, so a second ring is not the first one
+      // photographed twice.
+      const angDeg = (360 * (i + (ri % 2) * 0.5)) / n;
+      const ang = (angDeg * Math.PI) / 180;
+      pts.push({
+        ...f.toLatLon(r * Math.sin(ang), r * Math.cos(ang)),
+        alt: heights[ri],
+        pitch,
+        // No POI to aim at -- towardPOI only ever points inward -- so the
+        // outward azimuth is written as an explicit compass yaw, the same way
+        // the cross passes hold a side-on camera.
+        heading: { mode: 'smoothTransition', angle: ((angDeg + 540) % 360) - 180 },
+        photo: true,
+        pass: 'surround',
+        lineStart: i === 0,
+      });
+    }
+  }
+  return { pts, n, r, pitch, heights };
 }
 
 // Lines flown THROUGH the site with the camera side-on. An orbit only ever
@@ -357,6 +434,23 @@ export function planMission(rect, opts, cam) {
       detail: ringTxt,
     });
   }
+  if (p.surround) {
+    const r = surroundPass({
+      halfX, halfY, pad: p.orbitPad, f, cam, frontOverlap: p.frontOverlap,
+      alt: p.altitude, rings: Math.max(1, p.surroundRings),
+    });
+    add(r.pts);
+    // Rings below the top one get a label on the altitude scale but no grip:
+    // nothing here is derived from a height the way the orbit's aim is, so
+    // there is nothing for a drag to write back to.
+    passes.push({
+      name: `Surround ${r.pitch.toFixed(0)}°`,
+      count: r.pts.length,
+      detail: r.heights.length > 1
+        ? `${r.heights.length} rings, 360° in ${r.n}`
+        : `360° in ${r.n}, r = ${r.r.toFixed(0)} m`,
+    });
+  }
 
   // Where each camera actually points. followWayline aims along the leg to the
   // next waypoint; towardPOI aims at the box centre. Needed by both the map
@@ -384,13 +478,13 @@ export function planMission(rect, opts, cam) {
   });
 
   // In interval mode only the turns of the grid legs are waypoints; the photos
-  // come from a distance-triggered action group. Orbit points are all kept --
+  // come from a distance-triggered action group. Ring points are all kept --
   // a circle reduced to its endpoints is a straight line.
   let exported = waypoints;
   let photos = waypoints.reduce((n, w) => n + w.shots.length, 0);
   if (p.photoMode === 'interval') {
     exported = waypoints.filter((w, i) => {
-      if (w.pass === 'orbit') return true;
+      if (w.pass === 'orbit' || w.pass === 'surround') return true;
       return w.lineStart || i === waypoints.length - 1 || waypoints[i + 1]?.lineStart;
     });
   }
@@ -484,9 +578,9 @@ export function proposePlan(rect, base, cam, budget = {}) {
   const step = hasHeight ? 1 : 5;
 
   // Lowest altitude (best GSD) that fits, for one shutter mode and ring count.
-  const lowestFit = (photoMode, orbitRings) => {
+  const lowestFit = (photoMode, orbitRings, surround) => {
     for (let alt = floorAlt; alt <= 120; alt += step) {
-      const m = planMission(rect, { ...base, altitude: alt, photoMode, orbitRings }, cam);
+      const m = planMission(rect, { ...base, altitude: alt, photoMode, orbitRings, surround }, cam);
       if (fits(m)) return m;
     }
     return null;
@@ -495,9 +589,9 @@ export function proposePlan(rect, base, cam, budget = {}) {
   // Waypoint-per-photo is the only shutter mode every DJI Fly build is known to
   // honour, so exhaust it before considering the distance trigger -- a worse
   // GSD that definitely flies beats a better one that might not.
-  const pick = (photoMode) => {
+  const pick = (photoMode, surround) => {
     const options = ringChoices
-      .map((r) => ({ rings: r, mission: lowestFit(photoMode, r) }))
+      .map((r) => ({ rings: r, mission: lowestFit(photoMode, r, surround) }))
       .filter((o) => o.mission);
     if (!options.length) return null;
     // Rings cost waypoints, which pushes altitude up. Never trade a lot of
@@ -514,15 +608,27 @@ export function proposePlan(rect, base, cam, budget = {}) {
   // high ring, most of the budget unspent) and it cannot know about a canopy
   // overhead. The scorer's job is to tell the pilot what a plan is missing,
   // which the Coverage and Down-angle readouts and their warnings already do.
-  const primary = pick('waypoint');
-  const fallback = pick('interval');
+  // The surround ring is the first thing to go when a battery will not stretch
+  // to everything, and it goes before the shutter mode changes. It is the only
+  // pass pointed at something other than the subject, so a capture without it
+  // is still the capture that was asked for -- where a capture flown on a
+  // trigger no one has seen work might be no capture at all. Over a big site
+  // that is the usual outcome: the ring is 900 m of flying at 140 m radius, a
+  // quarter of the battery, and none of it spent on the subject.
+  const wantSurround = base.surround ?? DEFAULTS.surround;
+  const full = pick('waypoint', wantSurround);
+  const trimmed = !full && wantSurround ? pick('waypoint', false) : null;
+  const primary = full ?? trimmed;
+  const fallback = pick('interval', wantSurround);
 
   if (primary) {
     const better = fallback && fallback.params.altitude < primary.params.altitude - 5;
     return {
       mission: primary,
       fits: true,
-      note: null,
+      note: trimmed
+        ? `One battery does not cover the surround ring as well, so it is off — the subject passes come first. Turn it back on and accept a longer flight, or a split.`
+        : null,
       alternative: better
         ? `Distance-interval shutter would fit at ${fallback.params.altitude} m (${fallback.stats.gsdCm.toFixed(2)} cm/px vs ${primary.stats.gsdCm.toFixed(2)}), but that trigger is unverified on this airframe.`
         : null,

@@ -17,7 +17,7 @@ import { createHistory } from './history.js';
 const cam = CAMERAS.mini5pro;
 const $ = (id) => document.getElementById(id);
 
-const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff' };
+const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff', surround: '#ff6fb5' };
 
 // What an obstacle looks like once the flight has been measured against it.
 // Slate is "the plan stays clear of this"; the other two are the two kinds of
@@ -832,11 +832,12 @@ controls.subjectHeight.el.value = DEFAULTS.subjectHeight;
 function uiValues() {
   const v = {};
   for (const k of Object.keys(controls)) v[k] = +controls[k].el.value;
-  for (const id of ['nadir', 'oblique', 'orbit', 'transect']) v[id] = $(id).checked;
+  for (const id of ['nadir', 'oblique', 'orbit', 'transect', 'surround']) v[id] = $(id).checked;
   v.photoMode = $('photoMode').value;
   v.profile = $('profile').value;
   v.shotsPerStop = +$('shotsPerStop').value;
   v.orbitRings = +$('orbitRings').value;
+  v.surroundRings = +$('surroundRings').value;
   v.orbitHeights = state.orbitHeights;
   v.transectHeights = state.transectHeights;
   return v;
@@ -846,8 +847,8 @@ function applyUiValues(v) {
   state.orbitHeights = v.orbitHeights ?? null;
   state.transectHeights = v.transectHeights ?? null;
   for (const k of Object.keys(controls)) if (v[k] !== undefined) controls[k].el.value = v[k];
-  for (const id of ['nadir', 'oblique', 'orbit', 'transect']) if (v[id] !== undefined) $(id).checked = v[id];
-  for (const id of ['photoMode', 'profile', 'shotsPerStop', 'orbitRings'])
+  for (const id of ['nadir', 'oblique', 'orbit', 'transect', 'surround']) if (v[id] !== undefined) $(id).checked = v[id];
+  for (const id of ['photoMode', 'profile', 'shotsPerStop', 'orbitRings', 'surroundRings'])
     if (v[id] !== undefined) $(id).value = String(v[id]);
 }
 
@@ -857,10 +858,11 @@ function applyUiValues(v) {
 function paramsFromUi(v) {
   const p = {};
   for (const [k, c] of Object.entries(controls)) p[k] = c.val(v[k]);
-  for (const id of ['nadir', 'oblique', 'orbit', 'transect']) p[id] = v[id];
+  for (const id of ['nadir', 'oblique', 'orbit', 'transect', 'surround']) p[id] = v[id];
   p.photoMode = v.photoMode;
   p.shotsPerStop = v.shotsPerStop;
   p.orbitRings = v.orbitRings;
+  p.surroundRings = v.surroundRings;
   p.orbitHeights = v.orbitHeights ?? null;
   p.transectHeights = v.transectHeights ?? null;
   return p;
@@ -881,7 +883,7 @@ const override = () => {
   replan();
 };
 for (const c of Object.values(controls)) c.el.addEventListener('input', override);
-for (const id of ['nadir', 'oblique', 'orbit', 'transect', 'photoMode', 'profile', 'shotsPerStop', 'orbitRings'])
+for (const id of ['nadir', 'oblique', 'orbit', 'transect', 'surround', 'photoMode', 'profile', 'shotsPerStop', 'orbitRings', 'surroundRings'])
   $(id).addEventListener('change', override);
 
 /* ---------- plan + render ---------- */
@@ -896,6 +898,9 @@ function autofit() {
   $('photoMode').value = mission.params.photoMode;
   $('shotsPerStop').value = String(mission.stats.shotsPerStop);
   $('orbitRings').value = String(mission.params.orbitRings ?? 1);
+  // Auto-fit may have dropped the surround ring to stay inside one battery.
+  // The checkbox has to say so, or the replan below quietly puts it back.
+  $('surround').checked = Boolean(mission.params.surround);
   state.autofitNote = fits ? note : note;
   state.autofitAlt = alternative;
   // An auto-fit re-derives the whole plan, including how many rings there are,
@@ -983,7 +988,7 @@ function replan() {
     writeUrl();   // no plan left to name in the address bar either
     return;
   }
-  if (!p.nadir && !p.oblique && !p.orbit && !p.transect) {
+  if (!p.nadir && !p.oblique && !p.orbit && !p.transect && !p.surround) {
     state.mission = null;
     state.hazard = null;
     state.clearAlt = null;
@@ -1221,7 +1226,8 @@ function renderStats(m) {
     const n = p.name.toLowerCase();
     const key = n.includes('nadir') ? 'nadir'
       : n.includes('oblique') ? 'oblique'
-      : n.includes('cross') ? 'transect' : 'orbit';
+      : n.includes('cross') ? 'transect'
+      : n.includes('surround') ? 'surround' : 'orbit';
     return `<div class="passrow"><i style="background:${PASS_COLOR[key]}"></i>
       <b>${p.name}</b> <span>${p.detail}</span><span class="c">${p.count}</span></div>`;
   }).join('');
@@ -1583,7 +1589,7 @@ const history = createHistory({
 // replans. Both events fire for the same drag, which is exactly why the two
 // jobs can be split across them.
 for (const c of Object.values(controls)) c.el.addEventListener('change', () => history.commit());
-for (const id of ['nadir', 'oblique', 'orbit', 'transect', 'photoMode', 'profile', 'shotsPerStop', 'orbitRings'])
+for (const id of ['nadir', 'oblique', 'orbit', 'transect', 'surround', 'photoMode', 'profile', 'shotsPerStop', 'orbitRings', 'surroundRings'])
   $(id).addEventListener('change', () => history.commit());
 
 function stepHistory(back) {

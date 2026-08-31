@@ -6,7 +6,7 @@ import { createTileCache, pickZoom, tileRange, tileBounds, TILE_PX } from './til
 // WebGL library would be more dependency than drawing. Coordinates are local
 // ENU metres: x east, y north, z up.
 
-const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff' };
+const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff', surround: '#ff6fb5' };
 // Obstacles are the world, not the plan, so they get their own family of
 // colours rather than borrowing a pass's: slate while the flight stays clear of
 // them, and the grade of the trouble once it does not.
@@ -135,7 +135,7 @@ export function createView3D(canvas) {
 
     // What actually flies at each height, so the scale can name it rather than
     // just marking a number.
-    const NAME = { nadir: 'nadir', oblique: 'oblique', orbit: 'orbit', transect: 'cross' };
+    const NAME = { nadir: 'nadir', oblique: 'oblique', orbit: 'orbit', transect: 'cross', surround: 'surround' };
     const byHeight = new Map();
     for (const p of pts) {
       const key = Math.round(p.z * 10) / 10;

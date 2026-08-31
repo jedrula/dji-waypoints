@@ -21,13 +21,17 @@ const FIELDS = [
   ['photoMode', 'm'],
   ['shotsPerStop', 'n'],
   ['orbitRings', 'g'],
+  ['surroundRings', 's'],
   ['profile', 'x'],
   // Heights pinned by dragging a level in the 3D view. Lists, not numbers,
   // and usually absent -- a code only carries them once you have dragged.
   ['orbitHeights', 'H'],
   ['transectHeights', 'L'],
 ];
-const PASSES = ['nadir', 'oblique', 'orbit', 'transect'];
+// Append only: the mask is positional, so a code written before a pass existed
+// decodes with that pass OFF. That is the right answer -- a restored plan has to
+// be the plan that was saved, not today's defaults applied to yesterday's box.
+const PASSES = ['nadir', 'oblique', 'orbit', 'transect', 'surround'];
 
 function b64url(s) {
   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');

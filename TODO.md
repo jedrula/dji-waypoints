@@ -99,6 +99,51 @@ What it cannot tell you:
       passes, or lines aligned to the gaps rather than to the box axes, are the
       obvious next thing to measure.
 
+## Surround ring
+
+The outward-facing pass. On by default, and the first thing auto-fit drops.
+
+- [ ] **The far field is a panorama, not measured geometry.** Two stations on
+      opposite sides of the ring look along opposite azimuths and share no view,
+      so nothing distant is triangulated by this pass alone. What gives it depth
+      is the inward orbit looking over the box at the same landscape from the
+      far side of the ring — which means the ring is worth much less with the
+      orbit switched off, and nothing in the app says so. Whether the background
+      gaussians actually land at a sensible depth is a question for the render
+      loop, not for the geometric scorer.
+- [ ] **The connection to the rest of the capture is indirect, and conditional.**
+      A surround frame contains none of the subject — the camera points away from
+      it — so nothing ties this image set to the others directly. What ties it is
+      the inward orbit looking *over* the box at the same distant landscape from
+      the far side of the ring, which only happens while the orbit's tilt is
+      shallow enough to put the horizon inside its frame (top edge = orbit pitch
+      + 28.4°). Measured on what the planner actually proposes: a playground at
+      12 m clears it by 6–19°, a house at 28 m by 15° on the top ring, and a
+      200 x 150 m site at 116 m misses it by 11°. The last of those is also where
+      auto-fit drops the ring for flight time, so the two coincide today — but
+      that is luck, not design. Nothing warns you if you force the ring on under
+      a steep orbit, where it may reconstruct as a disconnected component.
+- [ ] **The ground just outside the ring is only ever seen edge-on.** The frame
+      is tilted so its top edge is at the horizon, which puts its bottom edge on
+      the ground roughly `altitude / tan(53°)` metres *beyond* the drone — 30 m
+      out at 40 m altitude. The grids stop at the box. The annulus between them
+      falls to the orbit frames looking across from the opposite side of the
+      ring, at more than twice the range and at a grazing incidence the coverage
+      scorer would reject on a wall. A second, steeper fan angle would fill it
+      properly, at double the frames; whether that ground matters depends on the
+      site.
+- [ ] **The coverage score cannot see the point of it.** The scorer measures the
+      proxy subject, and this pass is aimed away from it, so switching the ring
+      on moves Coverage by exactly zero while the waypoint and time counts climb.
+      That is honest but it reads like a bug. Scoring the surroundings needs a
+      model of the surroundings, which is the same missing piece as
+      "the real site" under the coverage scorer above.
+- [ ] **A mission read back off the controller does not know the ring is a
+      ring.** `inferPass` in `js/route.js` guesses from pitch and heading mode;
+      a surround waypoint looks exactly like an oblique one, so a read-back
+      route draws it in the wrong colour. Outward yaw relative to the route
+      centroid would identify it.
+
 ## Known limitations
 
 - [ ] **3D view shows only the world you drew.** Obstacles now appear as solids

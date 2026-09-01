@@ -195,6 +195,51 @@
       </section>
     </div>
 
+    <div class="pane" id="pane-walk" hidden>
+      <section class="step">
+        <h2>Walk the site</h2>
+        <p class="hint">Survey on foot. Stop next to a thing, say how tall it is, tap
+        <b>Here</b>. One stop is one obstacle, and its box is grown to match the accuracy
+        your phone reports &mdash; so it encloses the thing wherever inside that circle you
+        actually stood. When you are done, the area you walked becomes the area to capture,
+        and the lowest orbit ring is set just over the tallest thing you found.</p>
+
+        <div class="walkset">
+          <label class="row">
+            <span>How tall</span>
+            <span class="ctl">
+              <button id="walkDown" class="step2" type="button" aria-label="Lower">&minus;</button>
+              <input id="walkHeight" type="text" inputmode="decimal" autocomplete="off" aria-label="Height in metres">
+              <button id="walkUp" class="step2" type="button" aria-label="Higher">+</button>
+              <span class="unit">m</span>
+            </span>
+          </label>
+          <div class="sizes" id="walkSizes"></div>
+        </div>
+
+        <button id="walkHere" class="primary block big" type="button">Here</button>
+        <p class="hint" id="walkStatus">Stand next to the first thing and tap Here.</p>
+
+        <div id="walkList" class="walklist"></div>
+
+        <div class="walkfoot" hidden id="walkFoot">
+          <button id="walkUndo" type="button">Undo last stop</button>
+          <button id="walkPlan" class="primary" type="button">Plan it</button>
+        </div>
+
+        <details class="help">
+          <summary>What a walk can and cannot tell you</summary>
+          <p>A phone fix is metres, not centimetres, and it is worst under exactly the
+          canopy that makes walking worth doing. A stop is refused past &plusmn;25 m, and
+          anything looser than &plusmn;8 m says so &mdash; but a box that encloses the tree
+          is still only a box, and the height is whatever you judged standing under it.</p>
+          <p>Every height here is above your takeoff point, not above the ground you are
+          standing on. On a slope those are different numbers, and nothing in this app
+          knows the difference.</p>
+        </details>
+      </section>
+    </div>
+
     <div class="pane" id="pane-device" hidden>
       <section class="step">
         <h2>Controller</h2>

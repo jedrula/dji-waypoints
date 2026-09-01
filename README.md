@@ -66,6 +66,40 @@ ring itself is as long as the orbit's, which on a large site is a quarter of a
 battery spent on something other than the subject. Auto-fit drops it before it
 drops anything else, and says so.
 
+### Walking the site
+
+The desk workflow draws boxes over satellite imagery, which works until the
+thing you need is not visible from above: what is under the canopy, how tall the
+climbing frame is, the wire nobody can see. **Walk** surveys on foot instead —
+stop next to a thing, say how tall it is, tap **Here**. One stop is one obstacle.
+
+Two things make it honest rather than a toy:
+
+- **The box is grown by the accuracy the phone reported**, so it encloses the
+  thing wherever inside that circle you actually stood. A ±6 m fix on a
+  medium-sized thing gives a 20 m box, not an 8 m one. Erring outward is the
+  safe direction for an obstacle — the cost is an altitude a few metres higher
+  than it needed to be.
+- **A fix looser than ±25 m is refused.** A 60 m square dropped because the
+  phone was unsure reads exactly like a real obstacle, vetoes altitudes that
+  were fine, and says nothing about why.
+
+What you walked becomes the area to capture, and the lowest orbit ring is set
+just over the tallest thing you found.
+
+### Where the lowest ring sits
+
+Rings spread from a floor up to the set altitude. Without obstacles that floor
+is half the altitude — a shape, not a measurement. With them it is the tallest
+thing on the site plus your clearance, so the first orbit skims the tops
+instead of guessing.
+
+A floor at or above the altitude is **ignored rather than clamped**. That is the
+under-canopy case: you have deliberately set an altitude below the things around
+you, and collapsing every ring onto the ceiling would be a silent answer to a
+question you meant to ask. The collision check is what tells you about that, and
+it already does.
+
 ### Why cross passes exist
 
 An orbit only ever sees a site's outside. Anything tucked between structures, or

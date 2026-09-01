@@ -10,9 +10,10 @@ import { initPlans } from './plansui.js';
 import { routeFromRead } from './route.js';
 import { createMenu } from './menu.js';
 import { initWorld } from './worldui.js';
-import { localBox, overlaps, describe } from './obstacles.js';
-import { checkObstacles, clearingAltitude } from './collide.js';
+import { localBox, overlaps, describe, DEFAULT_HEIGHT } from './obstacles.js';
+import { checkObstacles, clearingAltitude, ringFloor } from './collide.js';
 import { createHistory } from './history.js';
+import { SIZES, DEFAULT_SIZE, spanOf, sampleRect, walkRect, judgeFix, parseHeight } from './walk.js';
 
 const cam = CAMERAS.mini5pro;
 const $ = (id) => document.getElementById(id);
@@ -66,6 +67,7 @@ const menu = createMenu([
   { id: 'plan', label: 'Plan', onShow: () => paneChanged() },
   { id: 'saved', label: 'Saved', onShow: () => paneChanged() },
   { id: 'world', label: 'Obstacles', onShow: () => paneChanged() },
+  { id: 'walk', label: 'Walk', onShow: () => paneChanged() },
   { id: 'device', label: 'Controller', onShow: () => { paneChanged(); bridge.refresh(); } },
 ]);
 
@@ -540,6 +542,26 @@ function nearbyObstacles(rect) {
   return world.list().filter((o) => overlaps(o, pad));
 }
 
+// The obstacles that are ON the site, rather than merely near it. `nearby` pads
+// by a kilometre so a plan is checked against everything it could conceivably
+// reach; the ring floor is a different question -- how high the tallest thing
+// you are photographing stands -- and a mast a kilometre away must not answer
+// it. Twenty metres of margin so a tree sampled from one step outside the box
+// still counts as part of the site.
+const SITE_PAD_M = 20;
+
+function onSiteObstacles(rect) {
+  if (!rect) return [];
+  const lat0 = (rect.north + rect.south) / 2;
+  const pad = {
+    north: rect.north + SITE_PAD_M / mPerDegLat(lat0),
+    south: rect.south - SITE_PAD_M / mPerDegLat(lat0),
+    east: rect.east + SITE_PAD_M / mPerDegLon(lat0),
+    west: rect.west - SITE_PAD_M / mPerDegLon(lat0),
+  };
+  return world.list().filter((o) => overlaps(o, pad));
+}
+
 const gradeOf = (id) => state.hazard?.obstacles.find((o) => o.id === id)?.grade ?? 'clear';
 
 let obsDrag = null;
@@ -870,7 +892,19 @@ function paramsFromUi(v) {
 
 function readParams() {
   for (const [k, c] of Object.entries(controls)) $(k + 'Out').textContent = c.fmt(c.el.value);
-  return paramsFromUi(uiValues());
+  const p = paramsFromUi(uiValues());
+  // The lowest orbit ring answers to the site the moment there is anything on
+  // the site to answer to: it flies over the tallest thing you found, by the
+  // clearance, instead of at an arbitrary half of the altitude. It belongs here
+  // rather than in replan() so that every trial plan -- the altitude search
+  // behind Adjust, the auto-fit ladder -- is measuring the flight that will
+  // actually be flown, and not one whose rings sit somewhere else.
+  //
+  // It is not a UI value and never enters a plan code: it is derived from the
+  // world, so a plan restored beside a different set of obstacles gets the
+  // floor those obstacles imply rather than the one they had that day.
+  p.orbitFloor = ringFloor(onSiteObstacles(state.rect).map((o) => o.height), world.clearance());
+  return p;
 }
 
 const override = () => {
@@ -1545,6 +1579,141 @@ const plans = initPlans({
   describe: () => (state.mission
     ? `${state.mission.sizeX.toFixed(0)}×${state.mission.sizeY.toFixed(0)} m at ${state.rect.north.toFixed(4)}, ${state.rect.west.toFixed(4)}`
     : null),
+});
+
+/* ---------- walking the site ---------- */
+// Surveying on foot. Every stop does the same four things: get the best fix the
+// phone can manage, turn it into a box, put that box in the world, and let the
+// area you have walked so far stand in as the area to capture. Nothing here is
+// its own store -- a stop is an ordinary obstacle, so it syncs, undoes, draws
+// in 3D and blocks the camera like any other, and the walk is only a way of
+// making them without a mouse.
+const walk = { size: DEFAULT_SIZE, stops: [], busy: false };
+
+function walkStatus(text, kind = '') {
+  $('walkStatus').textContent = text;
+  $('walkStatus').className = `hint ${kind}`;
+}
+
+function renderWalk() {
+  const list = $('walkList');
+  list.innerHTML = '';
+  // Newest first: the stop you might have got wrong is the one you just made.
+  for (let i = walk.stops.length - 1; i >= 0; i--) {
+    const st = walk.stops[i];
+    const row = document.createElement('div');
+    row.className = 'walkitem';
+    row.innerHTML = `<span class="n">${i + 1}</span><b>${fmtM(st.height)}</b>`
+      + `<span>${st.size}</span><span class="acc">±${st.accuracy.toFixed(0)} m</span>`;
+    list.append(row);
+  }
+  $('walkFoot').hidden = !walk.stops.length;
+}
+
+for (const sz of SIZES) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.dataset.size = sz.id;
+  b.innerHTML = `${sz.label}<span>${sz.hint}</span>`;
+  b.addEventListener('click', () => {
+    walk.size = sz.id;
+    for (const other of $('walkSizes').children) other.classList.toggle('on', other.dataset.size === sz.id);
+  });
+  $('walkSizes').append(b);
+}
+$('walkSizes').firstElementChild.parentElement
+  .querySelector(`[data-size="${DEFAULT_SIZE}"]`).classList.add('on');
+
+$('walkHeight').value = String(DEFAULT_HEIGHT);
+const nudge = (by) => {
+  const el = $('walkHeight');
+  el.value = String(Math.max(0, Math.min(120, (parseHeight(el.value) ?? 0) + by)));
+};
+$('walkUp').addEventListener('click', () => nudge(0.5));
+$('walkDown').addEventListener('click', () => nudge(-0.5));
+
+$('walkHere').addEventListener('click', async () => {
+  if (walk.busy) return;
+  if (!navigator.geolocation) {
+    walkStatus('This browser has no location support, so there is nothing to walk with.', 'bad');
+    return;
+  }
+  const height = parseHeight($('walkHeight').value);
+  if (height === null) {
+    walkStatus('Type how tall it is first — a number of metres, up to 120.', 'bad');
+    $('walkHeight').focus();
+    return;
+  }
+  const btn = $('walkHere');
+  walk.busy = true;
+  btn.disabled = true;
+  btn.textContent = 'Holding still…';
+  walkStatus('Asking your phone where you are — stand still.');
+
+  let fix;
+  try {
+    fix = await bestFix({
+      onProgress: (f) => walkStatus(`±${f.accuracy.toFixed(0)} m so far — still trying…`),
+    });
+  } catch (err) {
+    walk.busy = false;
+    btn.disabled = false;
+    btn.textContent = 'Here';
+    walkStatus(GPS_ERRORS[err.code] ?? `Could not locate you: ${err.message}`, 'bad');
+    return;
+  }
+  walk.busy = false;
+  btn.disabled = false;
+  btn.textContent = 'Here';
+
+  // A fix too vague to place a box is refused rather than rounded off. A 60 m
+  // square dropped because the phone was unsure reads exactly like a real
+  // obstacle, vetoes altitudes that were fine, and says nothing about why.
+  const verdict = judgeFix(fix);
+  if (!verdict.ok) { walkStatus(verdict.why, 'bad'); return; }
+
+  const rect = sampleRect(fix, spanOf(walk.size));
+  const o = world.add(rect, { height, quiet: true });
+  walk.stops.push({ id: o.id, rect, height, size: walk.size, accuracy: fix.accuracy ?? 0 });
+  renderWalk();
+
+  // Where you have walked is what you are capturing. This walk's stops only:
+  // obstacles from a previous session or the other phone are real, and they
+  // still block the camera and veto altitudes, but they are not where you are
+  // standing today and must not stretch the box across town.
+  applyWalkRect(walkRect(walk.stops.map((st) => st.rect)));
+
+  const low = state.mission?.heights?.orbit?.[0];
+  walkStatus(`Stop ${walk.stops.length} — ${fmtM(height)} tall.`
+    + `${verdict.note ? ` ${verdict.note}` : ''}`
+    + `${low ? ` Lowest ring now ${fmtM(Math.round(low * 10) / 10)}.` : ''}`, 'ok');
+  history.commit();
+});
+
+// The walk owns the box while you are walking, so each stop re-derives it from
+// every stop so far -- including the ones that came from a previous walk or the
+// other phone, since an obstacle is an obstacle.
+function applyWalkRect(walked) {
+  if (!walked) return;
+  applyRect(L.latLngBounds([walked.south, walked.west], [walked.north, walked.east]));
+  drawHandles();
+  map.fitBounds(L.latLngBounds([walked.south, walked.west], [walked.north, walked.east]),
+    { padding: [40, 40], animate: false });
+  autofit();
+}
+
+$('walkUndo').addEventListener('click', () => {
+  if (!walk.stops.length) { toast('No stops to take back.'); return; }
+  walk.stops.pop();
+  renderWalk();
+  stepHistory(true);
+});
+
+$('walkPlan').addEventListener('click', () => {
+  if (!state.rect) { toast('Nothing walked yet.'); return; }
+  menu.show('plan');
+  autofit();
+  history.commit();
 });
 
 /* ---------- undo ---------- */

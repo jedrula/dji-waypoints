@@ -801,6 +801,29 @@ console.log('\nsaved plans');
   ok('sync sends tombstones too, so a delete propagates',
      lastRequest.body.plans.some((p) => p.deleted));
   ok('sync pulls the other device\'s plans in', store.list().some((p) => p.name === 'From the phone'));
+
+  // A write that lands mid-flight must survive the response. Walking a site is
+  // where this matters: every stop writes, and each write starts a sync the
+  // next stop can outrun.
+  {
+    const racy = {};
+    const rstore = createPlanStore({
+      storage: { getItem: (k) => racy[k] ?? null, setItem: (k, v) => { racy[k] = v; } },
+      endpoint: 'https://sync.example',
+      fetchImpl: async () => {
+        // The user's next save, while the request is still out.
+        rstore.save({ name: 'Saved mid-flight', code: 'v1.zzz' });
+        return { ok: true, status: 200, json: async () => ({ plans: [] }) };
+      },
+    });
+    rstore.save({ name: 'Saved before', code: 'v1.yyy' });
+    await rstore.sync();
+    ok('a save made during a sync survives the response',
+       rstore.list().some((p) => p.name === 'Saved mid-flight'),
+       JSON.stringify(rstore.list().map((p) => p.name)));
+    ok('and the one before it is still there',
+       rstore.list().some((p) => p.name === 'Saved before'));
+  }
   ok('and reports what arrived', res.pulled === 1);
 
   // The client and the Worker have to agree, or a plan flickers between devices.
@@ -922,6 +945,88 @@ console.log('\nobstacles');
                      height: 'tall' }) === null);
   ok('a tombstone needs nothing but an id and a time',
      cleanObstacle({ id: 'abcdef', updatedAt: 1, deleted: true }).deleted === true);
+}
+
+console.log('\nwalking the site');
+{
+  const { sampleRect, walkRect, judgeFix, spanOf, SIZES, MAX_ACCURACY } = await import('../js/walk.js');
+  const { ringFloor } = await import('../js/collide.js');
+  const { mPerDegLat: mLat, mPerDegLon: mLon } = await import('../js/geo.js');
+  const spanM = (r) => ({
+    x: mLon((r.north + r.south) / 2) * (r.east - r.west),
+    y: mLat((r.north + r.south) / 2) * (r.north - r.south),
+  });
+
+  const exact = sampleRect({ lat: 50.06, lon: 19.93, accuracy: 0 }, spanOf('medium'));
+  const sp = spanM(exact);
+  ok(`a perfect fix gives the size you asked for (${sp.x.toFixed(1)} x ${sp.y.toFixed(1)} m)`,
+     near(sp.x, 8, 0.05) && near(sp.y, 8, 0.05));
+
+  // The whole point of the inflation: the box has to enclose the thing wherever
+  // inside the accuracy circle you actually stood.
+  const rough = spanM(sampleRect({ lat: 50.06, lon: 19.93, accuracy: 6 }, spanOf('medium')));
+  ok(`a ±6 m fix grows the box by 6 m on every side (${rough.x.toFixed(1)} m)`,
+     near(rough.x, 8 + 12, 0.05) && near(rough.y, 8 + 12, 0.05));
+  ok('a bigger size makes a bigger box',
+     spanM(sampleRect({ lat: 50.06, lon: 19.93, accuracy: 3 }, spanOf('large'))).x
+     > spanM(sampleRect({ lat: 50.06, lon: 19.93, accuracy: 3 }, spanOf('small'))).x);
+  ok('every size is a real number of metres', SIZES.every((z) => z.span > 0 && z.hint));
+  ok('a box never collapses to nothing',
+     spanM(sampleRect({ lat: 50.06, lon: 19.93, accuracy: 0 }, 0)).x > 0.9);
+
+  // A comma is what a Polish keyboard puts there, and `type=number` reads that
+  // back as the empty string -- which coerced with + is 0, a silently wrong
+  // height and a ring floor to match.
+  const { parseHeight } = await import('../js/walk.js');
+  ok('a comma decimal is a number', parseHeight('2,5') === 2.5);
+  ok('so is a point', parseHeight('2.5') === 2.5);
+  ok('an empty field is nothing, not zero', parseHeight('') === null && parseHeight('  ') === null);
+  ok('so is junk', parseHeight('tall') === null && parseHeight('12x') === null);
+  ok('and so is a height no drone will fly', parseHeight('-3') === null && parseHeight('900') === null);
+  ok('zero is a real answer', parseHeight('0') === 0);
+
+  ok('a vague fix is refused, not rounded off', judgeFix({ accuracy: MAX_ACCURACY + 1 }).ok === false);
+  ok('a good one is accepted silently', judgeFix({ accuracy: 4 }).ok && !judgeFix({ accuracy: 4 }).note);
+  ok('a loose but usable one says so', judgeFix({ accuracy: 15 }).ok && judgeFix({ accuracy: 15 }).note);
+  ok('no fix at all is refused', judgeFix(null).ok === false);
+
+  // The walk defines the capture area.
+  const stops = [
+    sampleRect({ lat: 50.0600, lon: 19.9300, accuracy: 2 }, 3),
+    sampleRect({ lat: 50.0604, lon: 19.9306, accuracy: 2 }, 3),
+  ];
+  const wr = walkRect(stops, 5);
+  ok('the box covers every stop', stops.every((r) =>
+     wr.north > r.north && wr.south < r.south && wr.east > r.east && wr.west < r.west));
+  const inner = walkRect(stops, 0);
+  ok('the margin is real and outward',
+     mLat(50.06) * (wr.north - inner.north) > 4.9);
+  ok('one stop still makes a box', walkRect([stops[0]], 5) !== null);
+  ok('no stops makes no box', walkRect([], 5) === null);
+
+  // The floor, and what the planner does with it.
+  ok('the floor clears the tallest thing by the clearance', ringFloor([3, 11, 8], 5) === 16);
+  ok('nothing on site sets no floor', ringFloor([], 5) === null);
+
+  const floorRect = { south: 50.06, north: 50.0605, west: 19.93, east: 19.9307 };
+  const ringsOf = (o) => planMission(floorRect,
+    { altitude: 40, orbitRings: 3, nadir: false, oblique: false, surround: false, ...o },
+    cam).heights.orbit;
+  const plain = ringsOf({});
+  const floored = ringsOf({ orbitFloor: 16 });
+  ok(`without a floor the low ring is half the altitude (${plain[0]} m)`, plain[0] === 20);
+  ok(`with one it is the floor (${floored[0]} m)`, floored[0] === 16);
+  ok('the top ring is the altitude either way',
+     plain[plain.length - 1] === 40 && floored[floored.length - 1] === 40);
+  ok('rings still rise from the floor to the ceiling',
+     floored.every((z, i) => i === 0 || z > floored[i - 1]));
+
+  // The under-canopy case: an altitude deliberately BELOW the things around you.
+  // Collapsing every ring onto the ceiling would answer a question nobody asked.
+  const under = ringsOf({ altitude: 5, orbitFloor: 16 });
+  ok('a floor above the altitude is ignored, not clamped',
+     new Set(under).size === 3 && under[0] < 5);
+  ok('so is a nonsense floor', ringsOf({ orbitFloor: 0 })[0] === 20);
 }
 
 console.log('\nground imagery');

@@ -228,12 +228,16 @@ export function initWorld({
     },
 
     // A box just dragged out on the map. It arrives with no name and the
-    // the default height, both of which the row lets you fix.
-    add(rect) {
-      const o = store.put({ ...normalizeRect(rect), name: '', height: DEFAULT_HEIGHT });
+    // the default height, both of which the row lets you fix -- unless it came
+    // from a walk, where you gave the height standing next to the thing and
+    // there is nothing left to correct.
+    add(rect, { height = DEFAULT_HEIGHT, quiet = false } = {}) {
+      const o = store.put({ ...normalizeRect(rect), name: '', height });
       selected = o.id;
-      status(`Added a box, ${DEFAULT_HEIGHT} m tall — set its real height by typing it, `
+      if (!quiet) {
+        status(`Added a box, ${height} m tall — set its real height by typing it, `
              + 'or by dragging the top of it in the 3D view.', 'ok');
+      }
       render();
       onSelect(o.id);
       onChange();

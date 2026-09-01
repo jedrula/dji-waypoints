@@ -112,7 +112,13 @@ export function createSyncedStore({
       }
       if (!res.ok) throw new Error(body.error ?? `sync failed (${res.status})`);
       const incoming = Array.isArray(body[collection]) ? body[collection] : [];
-      const merged = merge(before, incoming);
+      // Merge against storage as it is NOW, not the copy taken before the round
+      // trip. A write that landed while this request was in flight is in storage
+      // and in neither `before` nor `incoming`, so merging the stale copy erases
+      // it -- silently, and only sometimes, which is the worst way to lose a
+      // record. Walking a site is where this bites: every stop is a write, and
+      // each one starts a sync that the next stop can outrun.
+      const merged = merge(readAll(), incoming);
       writeAll(merged);
       // Count only what a person can see: a tombstone arriving from the other
       // device is a real change, but reporting it as "1 new" is a lie.

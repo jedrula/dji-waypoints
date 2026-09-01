@@ -144,6 +144,26 @@ The outward-facing pass. On by default, and the first thing auto-fit drops.
       route draws it in the wrong colour. Outward yaw relative to the route
       centroid would identify it.
 
+## Walking the site
+
+- [ ] **A phone fix is the whole ballgame, and it is worst where this matters.**
+      Under the canopy that makes walking worth doing, a phone routinely reports
+      ±15 m and worse. The box is grown to match and a fix past ±25 m is refused,
+      but a grown box is a blunter instrument than a drawn one, and enough of
+      them will push the altitude up for no reason. Nothing yet averages several
+      seconds of fixes at one stop, which is the obvious next lever.
+- [ ] **A stop is a square, and the thing is not.** Same limitation as every
+      other obstacle here, but felt harder: you are standing beside a hedge or a
+      row of trees and there is no way to say "this, for thirty metres that
+      way". Two stops at either end of a line obstacle would model it, and that
+      is the same two-point-with-sag primitive the obstacle notes already want.
+- [ ] **Heights are above the takeoff point, not above where you are standing.**
+      On a slope those are different numbers and nothing in the app knows the
+      difference. Walking a sloped site is exactly when you would not notice.
+- [ ] **The walk cannot correct itself.** Undo takes back the last stop; there
+      is no way to fix the height of stop 2 from the Walk pane. The Obstacles
+      list can do it, which means switching panes mid-walk.
+
 ## Known limitations
 
 - [ ] **3D view shows only the world you drew.** Obstacles now appear as solids

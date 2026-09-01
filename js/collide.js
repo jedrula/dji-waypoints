@@ -177,3 +177,22 @@ export function clearingAltitude(mission, boxes, clearance = 5) {
   }
   return need || null;
 }
+
+// Where the LOWEST orbit ring should fly: just over the tallest thing on the
+// site, by the clearance you are willing to fly at. It is a framing number as
+// much as a safety one -- the first ring is the one that looks along the tops
+// of things, and half the set altitude, which is what the planner uses without
+// it, is a shape rather than a measurement.
+//
+// The tallest thing anywhere on the site, not just under the ring: the ring
+// flies OUTSIDE the site, so nothing it passes over sets this. What sets it is
+// what you are photographing.
+//
+// Heights rather than boxes, unlike everything else here, because this is the
+// one question in the file that footprints have no bearing on -- and asking for
+// heights means it can be answered before there is a plan to build a local
+// frame from, which is where it is needed.
+export function ringFloor(heights, clearance = 5) {
+  if (!heights?.length) return null;
+  return Math.max(...heights) + clearance;
+}

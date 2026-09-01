@@ -24,6 +24,12 @@ export const DEFAULTS = {
   orbit: true,
   orbitPad: 15,          // metres outside the box corners
   orbitRings: 1,         // concentric rings; >1 forms a dome around the subject
+  // Where the LOWEST ring sits, in metres AGL. null spreads from half the set
+  // altitude, which is an arbitrary anchor that happens to look reasonable. A
+  // number here is the honest version: the height of the tallest thing under
+  // the ring plus the clearance you are willing to fly at, so the low ring
+  // skims the site rather than guessing at it.
+  orbitFloor: null,
   surround: true,        // outward-facing ring: the landscape, not the subject
   surroundRings: 1,      // >1 adds vertical parallax on whatever stands nearby
   transect: false,       // crossing lines THROUGH the site, camera side-on
@@ -113,7 +119,7 @@ function gridPass(g) {
 }
 
 function orbitPass(g) {
-  const { halfX, halfY, pad, f, alt, pitchOverride, rings, cam, frontOverlap, heightOverride } = g;
+  const { halfX, halfY, pad, f, alt, pitchOverride, rings, cam, frontOverlap, heightOverride, floor } = g;
   const aimZ = (g.subjectHeight ?? 0) / 2;
   // A negative offset pulls the ring inside the box corners, which is what a
   // small subject at low altitude needs -- orbiting a playground from 50 m out
@@ -142,13 +148,25 @@ function orbitPass(g) {
   const centre = f.toLatLon(0, 0);
   const pts = [];
 
-  // Ring heights spread from half the set altitude up to it. Standard capture
+  // Ring heights spread from a floor up to the set altitude. Standard capture
   // guidance is three or more orbits at different elevations -- one looking
   // level, one down, one up -- because a subject only ever seen from one
   // elevation has no data for the others.
+  //
+  // The floor defaults to half the altitude, which is a shape rather than a
+  // measurement. Given one, the low ring means something: it is the tallest
+  // thing under the ring plus the clearance, so the first orbit skims the site.
+  //
+  // A floor at or above the altitude is ignored rather than clamped. That is
+  // the under-canopy case -- you have deliberately set an altitude BELOW the
+  // things around you, and collapsing every ring onto the ceiling would be a
+  // silent answer to a question you meant to ask. The collision check is what
+  // tells you about it, and it already does.
+  const usableFloor = floor != null && floor > 0 && floor < alt ? floor : alt * 0.5;
   const derivedHeights = rings <= 1
     ? [alt]
-    : Array.from({ length: rings }, (_, k) => alt * (0.5 + (0.5 * k) / (rings - 1)));
+    : Array.from({ length: rings },
+        (_, k) => usableFloor + ((alt - usableFloor) * k) / (rings - 1));
   // The TOP ring is the set altitude, always. Rings spread up TO the altitude,
   // which is the same height the grids fly, so those two are one level and stay
   // tied -- an override governs the rings below it, and cannot lift one through
@@ -413,7 +431,7 @@ export function planMission(rect, opts, cam) {
       halfX, halfY, pad: p.orbitPad, f, cam, frontOverlap: p.frontOverlap,
       subjectHeight: p.subjectHeight,
       alt: p.altitude, pitchOverride: p.orbitPitch, rings: Math.max(1, p.orbitRings),
-      heightOverride: p.orbitHeights,
+      heightOverride: p.orbitHeights, floor: p.orbitFloor,
     });
     add(r.pts);
     orbitHeightsUsed = r.heights;
@@ -426,7 +444,7 @@ export function planMission(rect, opts, cam) {
       }
     });
     const ringTxt = r.heights.length > 1
-      ? `${r.heights.length} rings, r = ${r.r.toFixed(0)} m`
+      ? `${r.heights.length} rings, ${r.heights[0].toFixed(0)}–${r.heights[r.heights.length - 1].toFixed(0)} m, r = ${r.r.toFixed(0)} m`
       : `r = ${r.r.toFixed(0)} m`;
     passes.push({
       name: `Orbit ${r.pitch.toFixed(0)}°`,

@@ -419,3 +419,40 @@ kbd { background: var(--panel2); border: 1px solid var(--line); border-bottom-wi
             padding: 3px 7px; font-size: 11px; border-radius: 6px; }
 .slotview:hover { color: var(--text); border-color: var(--accent); }
 .slotview.on { color: var(--text); border-color: var(--accent); background: #1b2735; }
+
+/* ---------- walking the site ---------- */
+/* Sized for a phone held at arm's length outdoors: the one control that matters
+   is enormous, and everything else is out of the way of a thumb. */
+.block.big { font-size: 20px; padding: 22px 16px; margin: 14px 0 8px; letter-spacing: 0.02em; }
+.walkset { display: grid; gap: 10px; margin-top: 10px; }
+.walkset .ctl { display: flex; align-items: center; gap: 8px; }
+.walkset input[type=number] {
+  width: 84px; text-align: center; font-size: 17px; padding: 8px 6px;
+  background: #10161d; color: #e8eef5; border: 1px solid #2a3541; border-radius: 8px;
+}
+.walkset .unit { color: #8fa0b2; font-size: 13px; }
+.step2 {
+  width: 40px; height: 40px; font-size: 20px; line-height: 1; padding: 0;
+  border-radius: 8px; flex: none;
+}
+.sizes { display: flex; gap: 6px; }
+.sizes button { flex: 1; padding: 9px 4px; font-size: 12.5px; }
+.sizes button.on { background: #1d4f7c; border-color: #3d7fb8; color: #eaf3fb; }
+.sizes button span { display: block; font-size: 10.5px; color: #8fa0b2; margin-top: 2px; }
+.sizes button.on span { color: #b9d4ea; }
+.walklist { margin-top: 12px; display: grid; gap: 4px; }
+.walkitem {
+  display: flex; gap: 8px; align-items: baseline; padding: 7px 10px;
+  background: #131a22; border: 1px solid #222c37; border-radius: 8px; font-size: 12.5px;
+}
+.walkitem b { font-size: 14px; }
+.walkitem .n { color: #6f8296; min-width: 20px; }
+.walkitem .acc { margin-left: auto; color: #8fa0b2; font-size: 11.5px; }
+.walkfoot { display: flex; gap: 8px; margin-top: 12px; }
+.walkfoot button { flex: 1; }
+
+@media (max-width: 780px) {
+  .block.big { font-size: 24px; padding: 30px 16px; }
+  .step2 { width: 48px; height: 48px; }
+  .walkset input[type=number] { width: 96px; height: 48px; font-size: 19px; }
+}

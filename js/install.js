@@ -9,6 +9,7 @@
 // the view hides itself, and what is left is the by-hand recipe.
 
 import { readKmz } from './kmzread.js';
+import { DJI_FLY_MAX_WAYPOINTS } from './planner.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -59,6 +60,12 @@ let hasApi = false;
 
 function shortId(id) {
   return id.length > 17 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+}
+
+// Round to whole seconds first, or 959.7 s renders as "15:60".
+function mmss(sec) {
+  const t = Math.round(sec);
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
 }
 
 function when(iso) {
@@ -172,6 +179,27 @@ function pickRow({ key, group, title, sub, meta, selected, disabled, onPick, vie
 // file. Not "whatever is on the map": a flight worth putting on the aircraft is
 // a flight worth being able to find again, and one that cannot be picked by
 // accident from another view.
+// What a saved plan comes to, for the list. Building the mission costs well
+// under a millisecond, but the panel re-renders on every pick and every scan,
+// so it is remembered against the code -- and a code IS the plan, so an edited
+// plan gets a new entry rather than a stale answer.
+const planMeta = new Map();
+
+function metaFor(saved) {
+  if (!planMeta.has(saved.code)) {
+    const route = planRoute(saved);
+    planMeta.set(saved.code, route
+      ? {
+        waypoints: route.stats.waypoints,
+        altitude: route.params.altitude,
+        minutes: route.stats.minutes,
+        parts: Math.ceil(route.stats.waypoints / DJI_FLY_MAX_WAYPOINTS),
+      }
+      : null);
+  }
+  return planMeta.get(saved.code);
+}
+
 function renderPlans() {
   const box = $('instPlans');
   const plans = savedPlans();
@@ -183,11 +211,22 @@ function renderPlans() {
   }
   if (!plans.some((p) => p.id === state.planId)) state.planId = null;
   for (const p of plans) {
+    const info = metaFor(p);
+    // The waypoint count is the number that matters in THIS panel: DJI Fly caps
+    // a mission at 200, so a plan past that needs a mission folder per part and
+    // you have to know before you go looking for slots.
+    const meta = info
+      ? {
+        text: info.parts > 1 ? `${info.waypoints} wp · ${info.parts} parts` : `${info.waypoints} wp`,
+        bad: info.parts > 1,
+      }
+      : { text: 'will not decode', bad: true };
     box.append(pickRow({
       key: `plan:${p.id}`,
       group: 'instPlanPick',
       title: p.name,
-      sub: when(p.updatedAt),
+      sub: info ? `${when(p.updatedAt)} · ${info.altitude} m · ${mmss(info.minutes * 60)}` : when(p.updatedAt),
+      meta,
       selected: state.planId === p.id,
       disabled: Boolean(state.file),   // a file from disk wins
       onPick: () => { state.planId = p.id; renderAll(); },
@@ -216,7 +255,7 @@ function renderSlots() {
   }
   const usable = state.slots.filter((s) => s.exists);
   for (const s of state.slots) {
-    const meta = { text: s.exists ? `${s.waypoints ?? '?'} wp` : 'empty', bad: false };
+    const meta = { text: s.exists ? `${s.waypoints ?? '?'} wp` : 'empty', bad: !s.exists };
     if (s.exists && s.valid === false) { meta.text += ' · invalid'; meta.bad = true; }
     box.append(pickRow({
       key: `slot:${s.id}`,
@@ -466,7 +505,7 @@ export function initInstall(opts) {
   // is as good a moment as any to look again.
   return {
     // Saving, deleting or syncing a plan changes what step 2 can offer.
-    plansChanged: () => { if (hasApi) renderAll(); },
+    plansChanged: () => { planMeta.clear(); if (hasApi) renderAll(); },
     refresh: () => { if (hasApi) scan(); },
 
     // Has this plan been installed somewhere, and is that somewhere on the

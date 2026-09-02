@@ -68,3 +68,25 @@ export function bestFix({ onProgress } = {}) {
     const timer = setTimeout(finish, WATCH_MS);
   });
 }
+
+// A running accuracy readout for someone walking a site.
+//
+// bestFix answers one question and stops; this one keeps answering, because
+// standing under a canopy the number moves and the useful thing is knowing
+// when it has come good. Deliberately its own watch rather than a shared one:
+// it is cheap to stop, and it must stop -- a geolocation watch left running is
+// the fastest way to flatten the phone you are surveying with.
+export function watchAccuracy(onFix, onFail = () => {}) {
+  if (!navigator.geolocation) { onFail({ code: 2 }); return () => {}; }
+  const id = navigator.geolocation.watchPosition(
+    (p) => onFix({
+      lat: p.coords.latitude,
+      lon: p.coords.longitude,
+      accuracy: p.coords.accuracy,
+      age: Date.now() - p.timestamp,
+    }),
+    (err) => onFail(err),
+    { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 },
+  );
+  return () => navigator.geolocation.clearWatch(id);
+}

@@ -84,6 +84,19 @@ Two things make it honest rather than a toy:
   phone was unsure reads exactly like a real obstacle, vetoes altitudes that
   were fine, and says nothing about why.
 
+**How sure the phone is, live.** The number that decides everything out there is
+the accuracy the receiver admits to: a stop is refused past 25 m, and a loose
+one grows the box it leaves behind. So it sits over the Here button and updates
+as you walk, in the same three answers Here itself gives -- good, usable but the
+box will be grown, or too vague and it will refuse. You can wait for it to come
+good instead of pressing Here and being told no. The watch starts only once
+location is in use and stops when the page goes away; one left running is the
+fastest way to flatten the phone you are surveying with.
+
+For scale: a phone in open sky reports single-digit metres, and 3 to 5 m is a
+good day. Sub-metre is not something a phone browser does -- that needs RTK
+corrections and a receiver to apply them.
+
 A crosshair under the zoom control centres the map on you and leaves a dot with
 the accuracy circle around it, so you can see yourself against the footprint you
 are growing. On a phone the app does that by itself on arrival -- a phone is
@@ -478,6 +491,35 @@ across — about 30 pixels of imagery stretched over the whole ground. The map
 picks its zoom for the map's viewport; the 3D ground is a much smaller patch
 needing far more detail. They coincide only by accident. So: one loader, its own
 zoom, and the browser cache makes the overlap free when it happens.
+
+## How deep the imagery goes
+
+`maxNative` in `js/basemap.js` is the deepest zoom Esri actually holds tiles
+for. Ask past it and the service answers 200 with a grey "Map data not yet
+available" tile -- a real image, so nothing errors and nothing looks broken
+until you see it painted across the ground.
+
+It sat at 19 as a conservative guess and that guess was costing real detail.
+Measured against `World_Imagery`, z20 and z21 return distinct imagery
+everywhere tried, open countryside included, and towns have real tiles at z22.
+Only z23 is the placeholder everywhere -- and it is identifiable, because every
+location on earth returns the identical 2521-byte tile:
+
+    z19  krakow:942b58bf  wroclaw:524987fb  field:6730e54d   real
+    z20  krakow:653118d1  wroclaw:869be651  field:880576fa   real
+    z21  krakow:19ff8490  wroclaw:7f1273e7  field:f27d9de7   real in towns
+    z23  every location:  f27d9de7                          placeholder
+
+So satellite sits at 21 now, which is four times the detail you place points
+on. Street and topo stay at 19: they are drawn maps and stop being useful long
+before they stop being served.
+
+Past `maxNativeZoom`, Leaflet upscales the deepest real tile rather than
+requesting one that does not exist. The map allows 23, so there are two blurry
+levels beyond the imagery -- worth having, because placing a point by eye
+sometimes wants to be closer than the photograph goes. The library was never
+the constraint here, and swapping it for a vector renderer would not add a
+single pixel of aerial detail.
 
 ## The URL is the view
 

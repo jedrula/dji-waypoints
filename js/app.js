@@ -35,8 +35,8 @@ import { createSite, pointOf, spanMOf, DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS 
 import { localBox, overlaps } from './obstacles.js';
 import { checkObstacles, clearingAltitude } from './collide.js';
 import { createHistory } from './history.js';
-import { judgeFix, parseHeight } from './walk.js';
-import { bestFix, GPS_ERRORS, STALE_MS } from './gps.js';
+import { judgeFix, parseHeight, MAX_ACCURACY } from './walk.js';
+import { bestFix, watchAccuracy, GPS_ERRORS, STALE_MS } from './gps.js';
 
 const cam = CAMERAS.mini5pro;
 const $ = (id) => document.getElementById(id);
@@ -830,7 +830,7 @@ function showDeviceRoute(src) {
   // possible place.
   view3d.setObstacles(nearbyObstacles().map((o) => localBox(o, state.onDevice.frame)), []);
   map.fitBounds(L.latLngBounds(state.onDevice.waypoints.map((w) => [w.lat, w.lon])),
-    { padding: [40, 40], maxZoom: 19 });
+    { padding: [40, 40], maxZoom: 21 });
 }
 
 /* ---------- export ---------- */
@@ -937,7 +937,7 @@ function showFix({ lat, lon, accuracy, age }) {
 
 // Keep however far in you are already looking, unless that is further out than
 // a person is worth drawing at. Never animated -- see readUrl.
-const goToFix = ({ lat, lon }) => map.setView([lat, lon], Math.max(map.getZoom(), 19), { animate: false });
+const goToFix = ({ lat, lon }) => map.setView([lat, lon], Math.max(map.getZoom(), 20), { animate: false });
 
 let finding = false;
 async function findMe({ quiet = false, then = null } = {}) {
@@ -968,10 +968,45 @@ async function findMe({ quiet = false, then = null } = {}) {
     $('hereBtn').disabled = false;
   }
 }
-$('findme').addEventListener('click', () => findMe());
+$('findme').addEventListener('click', () => { watchFix(); findMe(); });
+
+// Walking a site, the number that decides everything is how sure the phone is:
+// a stop is refused past MAX_ACCURACY, and a loose one grows the box it leaves
+// behind. Showing it live means you can wait for it to come good rather than
+// pressing Here and being told no.
+//
+// The watch is not started until location is in use, and it stops itself when
+// the page goes away -- one left running is the fastest way to flatten the
+// phone you are surveying with.
+let stopWatch = null;
+function watchFix() {
+  if (stopWatch || !navigator.geolocation) return;
+  $('fix').hidden = false;
+  stopWatch = watchAccuracy(
+    (f) => {
+      const a = f.accuracy;
+      const grade = a > MAX_ACCURACY ? 'bad' : a > 8 ? 'rough' : 'good';
+      $('fix').className = `fix ${grade}`;
+      $('fixAcc').textContent = `±${a.toFixed(0)} m`;
+      $('fixNote').textContent = grade === 'bad' ? 'too vague — Here will refuse'
+        : grade === 'rough' ? 'usable, box will be grown'
+        : 'good';
+      showFix(f);
+    },
+    (err) => {
+      $('fix').className = 'fix bad';
+      $('fixAcc').textContent = '—';
+      $('fixNote').textContent = GPS_ERRORS[err.code] ? 'no position' : 'no position';
+    },
+  );
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && stopWatch) { stopWatch(); stopWatch = null; $('fix').hidden = true; }
+});
 
 // Standing next to the thing rather than looking at it on a map. Same two kinds
 // of point, placed where the phone says you are and grown by how unsure it is.
+$('hereBtn').addEventListener('click', () => { watchFix(); } );
 $('hereBtn').addEventListener('click', () => findMe({
   then: (fix) => {
     const verdict = judgeFix(fix);
@@ -1027,7 +1062,7 @@ function applyPlan(plan) {
   computePlan();
   if (state.mission) {
     map.fitBounds(L.latLngBounds(plan.points.map((p) => [p.lat, p.lon])).pad(0.6),
-      { animate: false, maxZoom: 19 });
+      { animate: false, maxZoom: 21 });
   }
   history.commit();
 }
@@ -1205,6 +1240,8 @@ writeUrl();
 // has not already named somewhere more specific.
 const onPhone = window.matchMedia('(max-width: 720px)').matches;
 if (onPhone && !fromHash && !urlNamedAPlace) findMe({ quiet: true });
+// A phone is being carried round the site, so the fix matters the whole time.
+if (onPhone) watchFix();
 
 // Not part of the app: a pretend receiver so the walk can be worked on indoors.
 // Nothing fetches this file unless the address bar asks for it.

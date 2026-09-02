@@ -10,8 +10,22 @@
 
 const $ = (id) => document.getElementById(id);
 
+// `maxNative` is the deepest zoom the service actually holds imagery for. Ask
+// past it and Esri answers 200 with a grey "Map data not yet available" tile --
+// a real image, so nothing errors and nothing looks broken until you see it
+// painted across the ground.
+//
+// It sat at 19 as a conservative guess, which threw away real detail: measured
+// against World_Imagery, z20 and z21 return distinct imagery everywhere tried,
+// including open countryside, and towns have real tiles to z22. Only z23 is the
+// placeholder everywhere (it has a recognisable fingerprint -- every location
+// returns the identical 2521-byte tile). So 21 is the floor now rather than 19,
+// which is four times the detail you were tapping points on.
+//
+// Aerial photography goes deeper than the street and topo renderings, which are
+// drawn maps and stop being useful long before they stop being served.
 export const BASEMAPS = {
-  satellite: { label: 'Satellite', url: 'World_Imagery', maxNative: 19, attribution: 'Imagery &copy; Esri' },
+  satellite: { label: 'Satellite', url: 'World_Imagery', maxNative: 21, attribution: 'Imagery &copy; Esri' },
   streets: { label: 'Streets', url: 'World_Street_Map', maxNative: 19, attribution: 'Map &copy; Esri' },
   topo: { label: 'Topo', url: 'World_Topo_Map', maxNative: 19, attribution: 'Topo &copy; Esri' },
 };
@@ -32,7 +46,10 @@ export function createBasemaps({ map, onChange = () => {} }) {
     active = BASEMAPS[name] ? name : 'satellite';
     layers[active] ??= L.tileLayer(
       `https://server.arcgisonline.com/ArcGIS/rest/services/${spec.url}/MapServer/tile/{z}/{y}/{x}`,
-      { maxZoom: 21, maxNativeZoom: spec.maxNative, attribution: spec.attribution },
+      // Past maxNativeZoom Leaflet upscales the deepest real tile rather than
+      // asking for one that does not exist -- blurry, but it is the only way to
+      // get closer than the imagery goes, and placing a point by eye needs it.
+      { maxZoom: 23, maxNativeZoom: spec.maxNative, attribution: spec.attribution },
     );
     if (current !== layers[active]) {
       if (current) map.removeLayer(current);

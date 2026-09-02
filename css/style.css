@@ -253,6 +253,23 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 #stage.editing #toast { bottom: 124px; }
 .here.obstacle { background: var(--obstacle); border-color: var(--obstacle); }
 
+/* How good the fix is, right now, sitting on the Here button that will use it.
+   The colours are the same three answers Here itself gives: it will take this
+   stop, it will take it and say the box is loose, or it will refuse. */
+.fix { position: absolute; left: 50%; bottom: 74px; transform: translateX(-50%); z-index: 521;
+       display: flex; align-items: baseline; gap: 7px;
+       background: rgba(16,20,24,0.94); border: 1px solid var(--line);
+       border-radius: 999px; padding: 4px 12px; transition: bottom 0.12s ease; }
+.fix[hidden] { display: none; }
+.fix b { font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.fix span { font-size: 11px; color: var(--dim); }
+.fix.good b { color: var(--ok); }
+.fix.rough b { color: var(--accent2); }
+.fix.bad b { color: var(--warn); }
+#stage.editing .fix { bottom: 126px; }
+@media (max-width: 720px) { #stage.split .fix { bottom: calc(100% - var(--split) + 66px); } }
+#stage.split .fix { left: calc(var(--split) / 2); }
+
 /* The point you last touched, over the map because the point is on the map. */
 .pointbar { position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 530;
             display: flex; align-items: center; gap: 9px;

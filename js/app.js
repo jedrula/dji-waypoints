@@ -38,6 +38,7 @@ import { checkObstacles, clearingAltitude } from './collide.js';
 import { createHistory } from './history.js';
 import { judgeFix, parseHeight, MAX_ACCURACY } from './walk.js';
 import { bestFix, watchAccuracy, GPS_ERRORS, STALE_MS } from './gps.js';
+import { sampleTerrain, verdict as terrainVerdict } from './terrain.js';
 
 const cam = CAMERAS.mini5pro;
 const $ = (id) => document.getElementById(id);
@@ -63,6 +64,7 @@ const state = {
   coverage: null,
   hazard: null,
   clearAlt: null,
+  terrain: null,              // what the ground under the site does
   onDevice: null,             // a route being looked at next to yours
 };
 
@@ -698,6 +700,7 @@ function settleSoon() {
     if (!state.mission) return;
     if (!tuned) autoFit();
     if (!state.mission) return;
+    readTerrain();
     const boxes = nearbyObstacles().map((o) => localBox(o, state.mission.frame));
     state.coverage = scoreCoverage(state.mission, { maxCameras: 220, boxes });
     // Tagged so a later replan can tell whether this score is still about the
@@ -706,6 +709,35 @@ function settleSoon() {
     renderReadout();
     view3d.setMission(state.mission, state.coverage);
   }, 260);
+}
+
+// What the ground itself does under the site.
+//
+// A DJI mission holds one height above the point it took off from -- it knows
+// nothing about the hill it is crossing. Flat ground makes that the same as
+// height above the ground, and a slope makes it a lie: take off at the bottom
+// of a Zakopane hillside, fly at "40 m", and you are ninety metres below the
+// top of your own site.
+//
+// Sampled only when the site actually moves, because the answer is about the
+// ground and the ground does not care that you changed the overlap.
+let terrainKey = null;
+async function readTerrain() {
+  const pts = site.capture();
+  if (!pts.length) { state.terrain = null; return; }
+  const b = {
+    north: Math.max(...pts.map((q) => q.lat)), south: Math.min(...pts.map((q) => q.lat)),
+    east: Math.max(...pts.map((q) => q.lon)), west: Math.min(...pts.map((q) => q.lon)),
+  };
+  const key = [b.north, b.south, b.east, b.west].map((n) => n.toFixed(4)).join();
+  if (key === terrainKey) return;
+  terrainKey = key;
+  try {
+    state.terrain = await sampleTerrain(b);
+  } catch {
+    state.terrain = null;
+  }
+  renderReadout();
 }
 
 // The lowest altitude that fits a battery and DJI Fly's 200 waypoints, with the
@@ -919,6 +951,39 @@ function renderAlert(over) {
   el.hidden = !bits.length;
   el.className = `alert ${kind}`;
   el.textContent = bits.join(' ');
+  // The ground first, because it is the one that puts the aircraft into a hill
+  // rather than into something standing on it.
+  const t = state.terrain && state.mission
+    ? terrainVerdict(state.terrain, {
+      takeoffAt: state.terrain.samples[0]?.h,
+      altitude: state.mission.params.altitude,
+      clearance: clearance(),
+    })
+    : null;
+  if (t && t.shortfall > 0) {
+    el.hidden = false;
+    el.className = 'alert';
+    el.textContent = `The ground rises ${t.relief.toFixed(0)} m across this site. `
+      + `At ${state.mission.params.altitude} m above your takeoff point the flight is `
+      + `${Math.abs(t.aboveHighestGround).toFixed(0)} m BELOW the highest ground. `;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = `Raise to ${t.needed} m`;
+    b.addEventListener('click', () => {
+      tuned = true;
+      $('altitude').value = Math.min(120, t.needed);
+      computePlan();
+      history.commit();
+    });
+    el.append(b);
+  } else if (t && t.relief > 5) {
+    if (el.hidden) { el.hidden = false; el.className = 'alert warn'; el.textContent = ''; }
+    const g = document.createElement('span');
+    g.textContent = ` Ground rises ${t.relief.toFixed(0)} m across the site; `
+      + `${t.aboveHighestGround.toFixed(0)} m clear of the highest of it.`;
+    el.append(g);
+  }
+
   const guessed = nearbyObstacles().filter(isEstimated).length;
   if (guessed) {
     if (el.hidden) { el.hidden = false; el.className = 'alert warn'; el.textContent = ''; }

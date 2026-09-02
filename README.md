@@ -252,6 +252,50 @@ Two shutter modes:
   `multipleDistance` trigger for the whole route. ~10× fewer waypoints. Fewer
   DJI Fly builds are confirmed to honour this, so check the first flight.
 
+## The ground moves too
+
+Every height in this app is above the TAKEOFF POINT, because that is what a DJI
+mission means by altitude: the aircraft holds one barometric height for the
+whole flight and knows nothing about the hill it is crossing. On flat ground
+that is the same as height above the ground. On a slope it is not, and the app
+used to have no way of saying so -- it was listed under what the check does not
+know, which is a poor place for something this dangerous.
+
+Poland's mapping agency answers it point by point, free, with CORS open, so the
+browser asks directly. `x` is the NORTHING and `y` the EASTING -- the Polish
+convention, and the opposite of the guess. Checked against Kasprowy Wierch,
+which comes back at 1980.7 m one way round and 0 the other, and against Gdansk
+at 7.8 m.
+
+Twenty-five samples over the footprint, in well under half a second, measured
+over 200 m sites:
+
+    Wroclaw, flat city block        relief    3.4 m
+    Kazimierz Dolny, river bluff    relief   29.8 m
+    Zakopane, mountain slope        relief  137.5 m
+
+That last one is a crash. Take off at the bottom, fly at "93 m", and the
+aircraft is ten metres BELOW the top of its own site. The band says exactly
+that now, and offers the altitude that clears it.
+
+It is Poland only, and it says nothing rather than guessing elsewhere -- the
+service answers 0 for "off the edge of my data" as readily as for sea level, and
+a false zero on a hillside is the dangerous direction.
+
+### Why the point cloud is not the answer, and what is
+
+The same agency publishes the raw LiDAR free and unrestricted, 4-20 points per
+square metre, flown 2010-2019 and again 2018-2026. It is extraordinary data --
+individual tree crowns, wires, every roof -- and it contains every height this
+app currently guesses at.
+
+It is also LAZ tiles of hundreds of megabytes each, several per site. Decoding
+them in a browser is possible and downloading them in a field is not. The right
+target is the DERIVED raster -- a 1 m NMPT grid is a few megabytes for a whole
+site rather than hundreds -- or a one-off preprocess into a compact height
+model for the areas you actually fly. Neither is wired up; what is wired up is
+the terrain, which needed no preprocessing at all.
+
 ## What is already standing here
 
 Tapping every tree round a site is work a person gives up on halfway, and the

@@ -62,9 +62,16 @@ const state = {
   coverage: null,
   hazard: null,
   clearAlt: null,
-  planned: false,             // is the route on screen the one the taps describe?
   onDevice: null,             // a route being looked at next to yours
 };
+
+// Whether the flight is drawn on the map. Not whether it exists -- it always
+// exists and the numbers are always live -- just whether you want several
+// hundred waypoints on top of the thing you are tapping. Remembered, because
+// it is a preference about how you work rather than about this plan.
+const ROUTE_KEY = 'dji.showroute';
+let showRoute = true;
+try { showRoute = localStorage.getItem(ROUTE_KEY) !== '0'; } catch { /* private window */ }
 
 /* ---------- map ---------- */
 const map = L.map('map', { zoomControl: true, attributionControl: true }).setView([50.0614, 19.9366], 16);
@@ -93,15 +100,70 @@ let groundOn = false;
 
 function setView(name) {
   activeView = name;
+  const showMap = name !== '3d';
+  const show3d = name !== 'map';
   for (const b of document.querySelectorAll('#viewtabs button')) b.classList.toggle('on', b.dataset.view === name);
-  $('map').hidden = name === '3d';
-  $('scene').hidden = name !== '3d';
-  $('basetabs').hidden = name === '3d';
-  $('findme').hidden = name === '3d';
-  if (name !== '3d') map.invalidateSize();
-  else view3d.draw();
+  $('stage').classList.toggle('split', name === 'split');
+  $('map').hidden = !showMap;
+  $('scene').hidden = !show3d;
+  $('splitter').hidden = name !== 'split';
+  $('basetabs').hidden = !showMap;
+  $('findme').hidden = !showMap;
+  if (name === 'split') setSplit(splitPct, { store: false });
+  if (showMap) map.invalidateSize();
+  if (show3d) view3d.draw();
   writeUrl();
 }
+
+// Which axis the divider moves along is the stylesheet's business -- the same
+// percentage drives a left/right split on a laptop and a top/bottom one on a
+// phone -- so the drag only has to ask which way the panes are stacked.
+const SPLIT_KEY = 'dji.split';
+const stacked = () => window.matchMedia('(max-width: 720px)').matches;
+
+// Clamped in pixels rather than percent: a pane narrower than its own floating
+// controls puts the basemap picker on the zoom buttons, and a pane that thin is
+// not showing you anything anyway.
+function splitPercent(pct) {
+  const r = $('stage').getBoundingClientRect();
+  const total = (stacked() ? r.height : r.width) || 1;
+  const min = Math.min(stacked() ? 130 : 240, total * 0.25);
+  return (Math.max(min, Math.min(total - min, (pct / 100) * total)) / total) * 100;
+}
+
+function setSplit(pct, { store = true } = {}) {
+  const v = splitPercent(pct);
+  $('stage').style.setProperty('--split', `${v.toFixed(2)}%`);
+  const mapWidth = ($('stage').getBoundingClientRect().width * v) / 100;
+  $('stage').classList.toggle('tight', !stacked() && mapWidth < 240);
+  if (store) { try { localStorage.setItem(SPLIT_KEY, String(v)); } catch { /* private window */ } }
+  map.invalidateSize();
+  view3d.draw();
+}
+
+let splitPct = 50;
+try { splitPct = +localStorage.getItem(SPLIT_KEY) || 50; } catch { /* private window */ }
+
+$('splitter').addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  $('splitter').setPointerCapture(e.pointerId);
+  $('splitter').classList.add('dragging');
+});
+$('splitter').addEventListener('pointermove', (e) => {
+  if (!$('splitter').hasPointerCapture(e.pointerId)) return;
+  const r = $('stage').getBoundingClientRect();
+  splitPct = stacked() ? ((e.clientY - r.top) / r.height) * 100 : ((e.clientX - r.left) / r.width) * 100;
+  setSplit(splitPct);
+});
+const endSplit = () => $('splitter').classList.remove('dragging');
+$('splitter').addEventListener('pointerup', endSplit);
+$('splitter').addEventListener('pointercancel', endSplit);
+// Double-click puts it back to even, which is easier than nudging it there.
+$('splitter').addEventListener('dblclick', () => { splitPct = 50; setSplit(50); });
+window.addEventListener('resize', () => {
+  if (activeView === 'split') setSplit(splitPct, { store: false });
+  else if (activeView !== 'map') view3d.draw();
+});
 for (const btn of document.querySelectorAll('#viewtabs button')) {
   btn.addEventListener('click', () => setView(btn.dataset.view));
 }
@@ -129,7 +191,7 @@ function writeUrl() {
 function readUrl() {
   const q = new URLSearchParams(location.search);
   basemaps.set(q.get('b') ?? basemaps.name());
-  if (['map', '3d'].includes(q.get('v'))) setView(q.get('v'));
+  if (['map', 'split', '3d'].includes(q.get('v'))) setView(q.get('v'));
   if (q.get('g') === '1') { groundOn = true; pushGround(); }
   const [lat, lon] = (q.get('c') ?? '').split(',').map(Number);
   const zoom = Number(q.get('z'));
@@ -215,7 +277,7 @@ const site = createSite({
   onChange: ({ replaced = false } = {}) => {
     if (!ready) return;
     renderPoints();
-    invalidate();
+    computePlan();
     renderIdentity();
     if (!replaced) history.commit();
   },
@@ -255,6 +317,7 @@ function setMode(mode) {
   state.selected = null;
   for (const b of document.querySelectorAll('#modes button')) b.classList.toggle('on', b.dataset.mode === mode);
   $('tip').textContent = MODES[mode].tip;
+  showTip();
   $('hereBtn').classList.toggle('obstacle', mode === 'obstacle');
   $('clearMode').textContent = mode === 'capture' ? 'Clear points' : 'Clear obstacles';
   renderPoints();
@@ -393,21 +456,24 @@ $('clearMode').addEventListener('click', () => {
 });
 
 /* ---------- planning ---------- */
-// Anything that changes what would be flown takes the flight back off the map.
-// Cheap, and it keeps the screen honest: what you are looking at is always
-// either the plan for these taps or no plan at all, never a stale one.
-function invalidate() {
-  state.planned = false;
-  state.mission = null;
-  state.hazard = null;
-  state.clearAlt = null;
-  state.coverage = null;
-  for (const g of [layers.path, layers.dots, layers.poses, layers.conflicts]) g.clearLayers();
-  view3d.setMission(null);
-  view3d.setObstacles([], []);
-  renderPoints();
-  renderReadout();
-  writeUrl();
+// Two very different costs hide behind "replan". Building the flight and
+// measuring it against the obstacles is under a millisecond on a site of a few
+// hundred waypoints; scoring the coverage is seventy, which is the difference
+// between a tap that lands instantly and one that stutters. So the flight is
+// rebuilt on every change and the score catches up a moment after you stop.
+let scoreTimer = null;
+function scoreSoon() {
+  clearTimeout(scoreTimer);
+  scoreTimer = setTimeout(() => {
+    if (!state.mission) return;
+    const boxes = site.obstacles().map((o) => localBox(o, state.mission.frame));
+    state.coverage = scoreCoverage(state.mission, { maxCameras: 220, boxes });
+    // Tagged so a later replan can tell whether this score is still about the
+    // flight on screen, rather than leaving yesterday's number sitting there.
+    state.coverage.forWaypoints = state.mission.stats.waypoints;
+    renderReadout();
+    view3d.setMission(state.mission, state.coverage);
+  }, 250);
 }
 
 // The footprint, without planning anything. This is what the map draws while
@@ -427,8 +493,21 @@ function measure() {
 
 function computePlan() {
   readOuts();
+  clearTimeout(scoreTimer);
   const points = site.capture();
-  if (!points.length) { invalidate(); return; }
+  if (!points.length) {
+    state.mission = null;
+    state.hazard = null;
+    state.clearAlt = null;
+    state.coverage = null;
+    for (const g of [layers.path, layers.dots, layers.poses, layers.conflicts]) g.clearLayers();
+    view3d.setMission(null);
+    view3d.setObstacles([], []);
+    renderPoints();
+    renderReadout();
+    writeUrl();
+    return;
+  }
 
   const p = paramsFromUi(uiValues());
   const boxes0 = site.obstacles();
@@ -438,29 +517,47 @@ function computePlan() {
     state.mission = planMission(siteForPlanner(), p, cam);
   } catch {
     state.mission = null;
-    state.planned = false;
     renderReadout();
     return;
   }
-  state.planned = true;
 
   const boxes = boxes0.map((o) => localBox(o, state.mission.frame));
-  state.coverage = scoreCoverage(state.mission, { maxCameras: 220, boxes });
+  // Last score stays on screen only if it belongs to this many waypoints;
+  // otherwise the tile says so until the new one lands.
+  if (state.coverage?.forWaypoints !== state.mission.stats.waypoints) state.coverage = null;
   state.hazard = checkObstacles(state.mission, boxes, { clearance: clearance() });
   state.clearAlt = (state.hazard.strikes || state.hazard.near)
     ? clearingAltitude(state.mission, boxes, { clearance: clearance() })
     : null;
 
-  renderPath(state.mission);
+  drawRoute();
   renderPoints();
   renderConflicts();
   renderReadout();
   renderIdentity();
-  if (state.onDevice) showRoute(null);
+  if (state.onDevice) showDeviceRoute(null);
   view3d.setMission(state.mission, state.coverage);
   view3d.setObstacles(graded(boxes), state.hazard.legs);
   writeUrl();
+  scoreSoon();
 }
+
+// The route on the map, or not. The 3D view always gets it -- looking at the
+// flight is the whole of that view's job -- so this is only about the map,
+// where the flight sits on top of the thing you are tapping.
+function drawRoute() {
+  if (showRoute && state.mission) { renderPath(state.mission); return; }
+  for (const g of [layers.path, layers.dots, layers.poses]) g.clearLayers();
+}
+
+function setShowRoute(on) {
+  showRoute = on;
+  try { localStorage.setItem(ROUTE_KEY, on ? '1' : '0'); } catch { /* private window */ }
+  $('routeToggle').classList.toggle('on', on);
+  $('routeToggle').title = on ? 'Hide the flight on the map' : 'Show the flight on the map';
+  drawRoute();
+}
+$('routeToggle').addEventListener('click', () => setShowRoute(!showRoute));
 
 const graded = (boxes) => boxes.map((b) => ({
   ...b,
@@ -488,21 +585,11 @@ function renderReadout() {
   const box = $('readout');
   const m = state.mission;
   if (!m) {
-    const n = site.capture().length;
-    const size = measure();
     box.className = 'readout empty';
     box.innerHTML = '';
-    if (!n) {
-      box.textContent = 'Tap the map on what you want captured.';
-    } else {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'planit';
-      b.innerHTML = `<b>Plan the flight</b><em>${n} point${n === 1 ? '' : 's'}`
-        + `${size ? ` · ${size.areaHa.toFixed(2)} ha` : ''}${site.obstacles().length ? ` · ${site.obstacles().length} obstacles` : ''}</em>`;
-      b.addEventListener('click', () => computePlan());
-      box.append(b);
-    }
+    box.textContent = site.capture().length
+      ? 'Enable at least one pass in Advanced.'
+      : 'Tap the map on what you want captured.';
     $('alert').hidden = true;
     renderPasses();
     return;
@@ -514,12 +601,13 @@ function renderReadout() {
   // the thinly-seen have been taken off.
   const sum = state.coverage?.summary;
   const cov = sum ? Math.round(sum.good + sum.flat) : null;
+  const covText = cov === null ? '…' : `${cov}%`;
   box.className = 'readout';
   box.innerHTML = `
     <div><b>${s.photos}</b><span>photos</span></div>
     <div><b class="${over ? 'bad' : ''}">${s.waypoints}</b><span>waypoints</span></div>
     <div><b>${mmss(s.seconds)}</b><span>${s.batteries > 1 ? `${s.batteries} batteries` : 'flight'}</span></div>
-    <div><b class="${cov !== null && cov < 90 ? 'bad' : 'ok'}">${cov === null ? '—' : `${cov}%`}</b><span>coverage</span></div>`;
+    <div><b class="${cov === null ? 'dim' : cov < 90 ? 'bad' : 'ok'}">${covText}</b><span>coverage</span></div>`;
   renderPasses();
   renderAlert(over);
 }
@@ -632,7 +720,7 @@ function renderPath(m, { groups = PLAN_GROUPS(), dashed = false } = {}) {
 // The one "other route" channel: a mission read off the controller, or a saved
 // plan being looked at before it is installed. Dashed, next to yours, one at a
 // time, and any replan takes it back down.
-function showRoute(src) {
+function showDeviceRoute(src) {
   for (const g of Object.values(DEVICE_GROUPS())) g.clearLayers();
   state.onDevice = !src ? null : src.kind === 'device' ? routeFromRead(src.read, cam) : src.mission;
   if (!state.onDevice) {
@@ -808,7 +896,7 @@ $('hereBtn').addEventListener('click', () => findMe({
 /* ---------- the controller ---------- */
 const bridge = initInstall({
   badge: (text, kind) => { $('deviceTag').textContent = text; $('deviceTag').className = `tag ${kind}`; },
-  showRoute,
+  showRoute: showDeviceRoute,
   planRoute: (saved) => missionFromCode(saved.code)?.mission ?? null,
   savedPlans: () => plans.list(),
   partsForPlan: (saved) => {
@@ -824,7 +912,15 @@ let session = { id: null, name: null, code: null };
 const planCode = () => (site.capture().length ? encodePlan(siteForPlanner(), uiValues()) : null);
 const dirty = () => Boolean(planCode()) && planCode() !== session.code;
 
+// The tip teaches the one gesture there is, and stops once you have used it:
+// the band is a third of a phone screen, and a sentence you have already read
+// is the first thing that should give its rows back to the map.
+function showTip() {
+  $('tip').hidden = MODES[state.mode].list().length > 0;
+}
+
 function renderIdentity() {
+  showTip();
   $('planTitle').textContent = session.name ?? 'New plan';
   $('planTitle').classList.toggle('dirty', dirty());
   $('nCapture').textContent = String(site.capture().length);
@@ -907,7 +1003,7 @@ const history = createHistory({
     state.selected = null;
     renderPoints();
     renderPointBar();
-    invalidate();
+    computePlan();
     renderIdentity();
   },
   // A box that arrived from the other device belongs in every snapshot on the
@@ -944,17 +1040,17 @@ window.addEventListener('keydown', (e) => {
 /* ---------- control wiring ---------- */
 // A slider being dragged is one action, not forty: `input` replans, `change`
 // -- the release -- is what earns an undo step.
-// A control that changes what would be flown takes the flight down rather than
-// quietly redrawing it: the numbers on screen must never belong to a plan that
-// is no longer the one these settings describe.
+// Everything here replans. It costs well under a millisecond, and the numbers
+// on screen must never belong to a plan that is no longer the one these
+// settings describe.
 for (const c of Object.values(controls)) {
-  c.el.addEventListener('input', () => { readOuts(); invalidate(); renderIdentity(); });
+  c.el.addEventListener('input', () => { computePlan(); renderIdentity(); });
   c.el.addEventListener('change', () => history.commit());
 }
 for (const id of [...PASS_IDS, ...PICK_IDS]) {
-  $(id).addEventListener('change', () => { invalidate(); renderIdentity(); history.commit(); });
+  $(id).addEventListener('change', () => { computePlan(); renderIdentity(); history.commit(); });
 }
-$('clearance').addEventListener('input', () => { readOuts(); invalidate(); });
+$('clearance').addEventListener('input', () => { computePlan(); });
 $('clearance').addEventListener('change', () => {
   try { localStorage.setItem(CLEARANCE_KEY, $('clearance').value); } catch { /* private window */ }
 });
@@ -988,6 +1084,7 @@ const urlNamedAPlace = opened.has('c');
 ready = true;
 readUrl();
 setMode('capture');
+setShowRoute(showRoute);
 if (fromHash) applyPlan(fromHash);
 renderPoints();
 renderReadout();

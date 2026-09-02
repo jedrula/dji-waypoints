@@ -574,16 +574,28 @@ whether that is the right trade is a question for the aircraft rather than for
 an argument. A second answer is a second entry in `SHAPES`, and the picker in
 Advanced already offers the bounding box for comparison.
 
-### The flight does not draw itself
+### The plan is always current; the clutter is a choice
 
-Tapping out a site and flying it are two different moments. While you are still
-placing points the flight is noise on top of the thing you are trying to look
-at -- and computing one per tap is several hundred waypoints and a coverage
-score thrown away on the next tap. So the map shows the footprint, and the
-readout is a button: **Plan the flight**. Press it and the route, the numbers
-and the verdict appear together. Change anything that would be flown and they
-come straight back down, because what is on screen must always be either the
-plan for these taps or no plan at all, never a stale one.
+Every tap replans. That sounds expensive and is not: building the flight and
+measuring it against the obstacles takes **0.4 ms** on a 350-waypoint site.
+Scoring the coverage takes **70 ms**, which is the difference between a tap that
+lands instantly and one that stutters -- so that one alone waits 250 ms for you
+to stop tapping, and the coverage tile reads `…` until it catches up. Nothing
+else is deferred, and no number on screen ever belongs to a plan that is not the
+one your points describe.
+
+What *is* a choice is whether several hundred waypoints are drawn on top of the
+thing you are tapping. The route toggle on the map (under the crosshair) turns
+the flight off without touching it -- the numbers stay live, the 3D view keeps
+showing it, and the map goes back to your points and their outline. Remembered
+between visits, because it is a preference about how you work rather than about
+this plan.
+
+**Split** puts the map and the 3D view side by side, which is where the height
+question gets answered: the map says where a point is, the 3D says how tall you
+claimed it was and whether the flight clears it. Drag the divider, double-click
+to even it up. On a narrow screen the panes stack instead, because half of a
+phone screen is not a map.
 
 ### Testing the walk without walking
 

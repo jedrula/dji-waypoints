@@ -602,12 +602,28 @@ trigger nobody has seen work. Width is covered by going around.
 them, and going round them is precisely the flight that photographs them. One
 tap does both jobs.
 
-**What counts as one thing** is `subjectsOf`, and it is deliberately the single
-rule: three or more capture taps with an outline between them are ONE thing, not
-one per tap; one or two taps outline nothing, so each is its own; every obstacle
-is its own. The scorer builds its surfaces from the same list, because a plan
-optimised for one set of things and graded against another is a plan optimised
-for nothing.
+**What counts as one thing** is `subjectsOf`, and the scorer builds its surfaces
+from the same list -- a plan optimised for one set of things and graded against
+another is a plan optimised for nothing.
+
+Eight taps round two buildings and eight round one H-shaped building are the
+same point pattern. Nothing intrinsic separates them, and no fixed distance can
+either: the corners of a single 30 x 20 m building are 36 m apart. What does
+separate them is a gap out of proportion to the ones beside it. So the taps are
+joined nearest-first into a minimum spanning tree and any link much longer than
+the typical one is cut -- a house keeps its corners, two buildings forty metres
+apart fall into two. Adaptive rather than a magic number, so it holds at the
+scale of a shed and the scale of a terrace.
+
+The footprint stays the whole hull even when the things inside it are separate:
+you outlined that ground and the grids cover it, yard included. What gets a dome
+is each thing.
+
+A footprint has two dimensions, and squaring it off is a lie about a long thing.
+An 80 x 16 m pair of buildings modelled as an 80 x 80 m block had the scorer
+grading the yard between them as facade -- 61% where the real answer was 93%.
+Subjects carry `spanX` and `spanY`; the scalar `span` stays because that is what
+the RING answers to, having to stand outside the whole thing.
 
 Three things this got wrong first, all found by drawing the plans and looking:
 

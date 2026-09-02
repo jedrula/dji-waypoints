@@ -177,6 +177,30 @@ const houseRect = { south: 50.06, north: 50.06 + 15 / 111132,
                     west: 19.93, east: 19.93 + 20 / (111412 * Math.cos((50 * Math.PI) / 180)) };
 ok('four corner taps are one thing, not four',
    domesOf(planMission(site(houseRect, 8), { altitude: 30, nadir: false, oblique: false, surround: false }, cam)).length === 1);
+// Eight taps round two buildings and eight round one H-shaped building are the
+// same point pattern; the corners of a single building are far apart, so no
+// fixed distance separates them. A gap out of scale with its neighbours does.
+{
+  const twoBuildings = { points: [
+    ...[[-40, -8], [-20, -8], [-20, 8], [-40, 8]].map(([e, n]) => ({
+      lat: 50.06 + n / 111132, lon: 19.93 + e / (111412 * Math.cos(50 * Math.PI / 180)), height: 7 })),
+    ...[[20, -8], [40, -8], [40, 8], [20, 8]].map(([e, n]) => ({
+      lat: 50.06 + n / 111132, lon: 19.93 + e / (111412 * Math.cos(50 * Math.PI / 180)), height: 7 })),
+  ] };
+  const m = planMission(twoBuildings, { altitude: 25, nadir: false, oblique: false, surround: false }, cam);
+  ok('a gap out of scale with the rest splits the taps into two things',
+     m.subjects.length === 2, `${m.subjects.length}`);
+  ok('and each thing is its own building, not the pair',
+     m.subjects.every((s) => s.spanX < 25 && s.spanY < 20),
+     m.subjects.map((s) => `${s.spanX.toFixed(0)}x${s.spanY.toFixed(0)}`).join(' '));
+  ok('while the footprint still covers the ground you outlined',
+     m.stats.areaHa > 0.1);
+  // The corners of ONE building are 25 m apart and must not be split by this.
+  ok('the corners of a single building stay one thing',
+     planMission(site(houseRect, 8), { altitude: 25, nadir: false, oblique: false, surround: false }, cam)
+       .subjects.length === 1);
+}
+
 ok('two taps outline nothing, so they are two things',
    domesOf(planMission({ points: [
      { lat: 50.061, lon: 19.931, height: 6 }, { lat: 50.0615, lon: 19.9318, height: 6 },

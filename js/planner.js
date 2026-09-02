@@ -159,28 +159,84 @@ function gridPass(g) {
 //
 // Obstacles are separate things, each its own. You marked them individually
 // because they are individual, and flying round them is what photographs them.
+// Taps split into things, by looking for a gap out of scale with the rest.
+//
+// Eight taps round two buildings and eight taps round one H-shaped building are
+// the same point pattern -- nothing intrinsic separates them, and the corners of
+// a single 30 x 20 m building are 36 m apart, so no fixed distance can. What
+// does separate them is a gap that is out of proportion to the ones beside it.
+//
+// So: connect every tap to its nearest neighbour until all are joined (a
+// minimum spanning tree), then cut any link much longer than the typical one.
+// Corners of one building give links of a similar length and nothing is cut;
+// two buildings forty metres apart give one link twice the length of any other,
+// and it goes. Adaptive rather than a magic distance, so it works at the scale
+// of a shed and the scale of a terrace.
+const GAP_FACTOR = 1.8;
+
+function clusterTaps(taps) {
+  if (taps.length < 3) return taps.map((t) => [t]);
+
+  // Prim's, keeping each accepted edge so the lengths can be judged together.
+  const inTree = [0];
+  const rest = taps.map((_, i) => i).slice(1);
+  const edges = [];
+  while (rest.length) {
+    let best = { d: Infinity };
+    for (const a of inTree) {
+      for (let k = 0; k < rest.length; k++) {
+        const b = rest[k];
+        const d = Math.hypot(taps[a].x - taps[b].x, taps[a].y - taps[b].y);
+        if (d < best.d) best = { d, a, b, k };
+      }
+    }
+    edges.push({ a: best.a, b: best.b, d: best.d });
+    inTree.push(best.b);
+    rest.splice(best.k, 1);
+  }
+
+  const sorted = [...edges].map((e) => e.d).sort((m, n) => m - n);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const keep = edges.filter((e) => e.d <= median * GAP_FACTOR);
+
+  // Union-find over the links that survived.
+  const parent = taps.map((_, i) => i);
+  const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  for (const e of keep) parent[find(e.a)] = find(e.b);
+  const groups = new Map();
+  taps.forEach((t, i) => {
+    const r = find(i);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(t);
+  });
+  return [...groups.values()];
+}
+
 export function subjectsOf(local, hull, avoid = [], f) {
   const out = [];
   const tallTaps = local.filter((q) => (q.height ?? 0) > 0.5);
 
   if (tallTaps.length && hull && hull.length >= 3 && polygonArea(hull) > 1) {
-    const c = centroid(hull);
-    const b = bounds(hull);
-    out.push({
-      x: c.x,
-      y: c.y,
-      // Two spans, because a footprint has two dimensions and squaring it off
-      // is a lie about a long thing: an 80 x 16 m pair of buildings became an
-      // 80 x 80 m block, so the scorer graded the yard between them as facade
-      // and the 3D view drew a slab over the whole site.
-      spanX: b.x1 - b.x0,
-      spanY: b.y1 - b.y0,
-      // The scalar is what the RING answers to -- it has to stand outside the
-      // whole thing, so it is the larger of the two.
-      span: Math.max(b.x1 - b.x0, b.y1 - b.y0),
-      height: Math.max(...tallTaps.map((q) => q.height)),
-      kind: 'capture',
-    });
+    // The footprint stays the hull -- you outlined that area and the grids
+    // cover it, yard included. What gets a dome, and what the scorer measures,
+    // is each THING inside it.
+    for (const group of clusterTaps(tallTaps)) {
+      const b = bounds(group);
+      out.push({
+        x: (b.x0 + b.x1) / 2,
+        y: (b.y0 + b.y1) / 2,
+        // Two spans, because a footprint has two dimensions and squaring it off
+        // is a lie about a long thing: an 80 x 16 m building modelled as
+        // 80 x 80 m has the scorer grading the ground beside it as facade.
+        spanX: Math.max(b.x1 - b.x0, 1),
+        spanY: Math.max(b.y1 - b.y0, 1),
+        // The scalar is what the RING answers to: it has to stand outside the
+        // whole thing, so it is the larger of the two.
+        span: Math.max(b.x1 - b.x0, b.y1 - b.y0, 1),
+        height: Math.max(...group.map((q) => q.height)),
+        kind: 'capture',
+      });
+    }
   } else {
     // One or two taps outline nothing, so each is a small thing of its own.
     for (const q of tallTaps) {

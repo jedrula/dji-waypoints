@@ -1,7 +1,8 @@
 import { frame, distM, bearing } from './geo.js';
 import { footprint, gsdCm, fov } from './camera.js';
+import { footprintOf, bounds, centroid, circumradius, polygonArea, clipSegment, DEFAULT_SHAPE } from './shape.js';
 
-// A 3DGS-oriented capture over a rectangle. Three passes, in this order:
+// A 3DGS-oriented capture over the points you tapped. Three passes, in this order:
 //   1. nadir grid         - metric backbone, gimbal -90
 //   2. oblique cross grid - runs perpendicular to the nadir lines so the two
 //                           together give obliques from four azimuths
@@ -88,24 +89,39 @@ export function fanPitches(pitch, n, spread, cam) {
   return out.sort((a, b) => a - b).slice(0, n);
 }
 
+// Lines are laid across the footprint's bounding box and then cut down to the
+// footprint itself. Cutting the LINE rather than dropping shots off a fixed
+// lattice is what keeps the spacing right either way, and it puts a shot on
+// each cut end -- the edge of the thing you tapped, where overlap is thinnest.
 function gridPass(g) {
-  const { halfCross, halfAlong, sideSpacing, fwdSpacing, axis, f } = g;
+  const { halfCross, halfAlong, sideSpacing, fwdSpacing, axis, f, clip } = g;
   const nLines = Math.max(2, Math.ceil((2 * halfCross) / sideSpacing) + 1);
   const dCross = (2 * halfCross) / (nLines - 1);
-  const nShots = Math.max(2, Math.ceil((2 * halfAlong) / fwdSpacing) + 1);
-  const dAlong = (2 * halfAlong) / (nShots - 1);
+  const at = (c, a) => (axis === 'NS' ? { x: c, y: a } : { x: a, y: c });
+  const along = (q) => (axis === 'NS' ? q.y : q.x);
 
   const pts = [];
+  let flown = 0;          // lines that survived the clip, and so drive the serpentine
+  let shotTotal = 0;
   for (let i = 0; i < nLines; i++) {
     const c = -halfCross + i * dCross;
+    let a0 = -halfAlong;
+    let a1 = halfAlong;
+    if (clip) {
+      const seg = clipSegment(clip, at(c, -halfAlong), at(c, halfAlong));
+      if (!seg) continue;                     // this line misses the footprint
+      a0 = Math.min(along(seg[0]), along(seg[1]));
+      a1 = Math.max(along(seg[0]), along(seg[1]));
+    }
+    const span = a1 - a0;
+    // A line that only grazes a corner is one photo, not two on top of each other.
+    const nShots = span < 0.5 ? 1 : Math.max(2, Math.ceil(span / fwdSpacing) + 1);
+    const dAlong = nShots > 1 ? span / (nShots - 1) : 0;
     for (let j = 0; j < nShots; j++) {
-      const k = i % 2 === 0 ? j : nShots - 1 - j; // serpentine
-      const a = -halfAlong + k * dAlong;
-      const x = axis === 'NS' ? c : a;
-      const y = axis === 'NS' ? a : c;
-      const ll = f.toLatLon(x, y);
+      const k = flown % 2 === 0 ? j : nShots - 1 - j;   // serpentine
+      const q = at(c, a0 + k * dAlong);
       pts.push({
-        ...ll,
+        ...f.toLatLon(q.x, q.y),
         alt: g.alt,
         pitch: g.pitch,
         heading: { mode: 'followWayline' },
@@ -114,17 +130,30 @@ function gridPass(g) {
         lineStart: j === 0,
       });
     }
+    flown++;
+    shotTotal += nShots;
   }
-  return { pts, nLines, dCross, nShots, dAlong };
+  return {
+    pts,
+    nLines: flown,
+    dCross,
+    nShots: flown ? Math.round(shotTotal / flown) : 0,
+    dAlong: fwdSpacing,
+  };
 }
 
 function orbitPass(g) {
   const { halfX, halfY, pad, f, alt, pitchOverride, rings, cam, frontOverlap, heightOverride, floor } = g;
   const aimZ = (g.subjectHeight ?? 0) / 2;
-  // A negative offset pulls the ring inside the box corners, which is what a
-  // small subject at low altitude needs -- orbiting a playground from 50 m out
-  // at 5 m high just points the camera at whatever is in between.
-  const r = Math.max(3, Math.hypot(halfX, halfY) + pad);
+  // A negative offset pulls the ring inside the footprint's corners, which is
+  // what a small subject at low altitude needs -- orbiting a playground from
+  // 50 m out at 5 m high just points the camera at whatever is in between.
+  //
+  // `reach` is how far the furthest tap sits from the middle. For a rectangle
+  // that is its half-diagonal, which is what this used to compute; for the
+  // outline of what you actually tapped it is smaller, and a tighter ring is a
+  // closer look at the thing instead of a lap around the empty corners.
+  const r = Math.max(3, (g.reach ?? Math.hypot(halfX, halfY)) + pad);
 
   // Spacing around the ring cannot come from the nadir footprint: the camera is
   // aimed sideways at the subject, so what matters is the slant range to it,
@@ -235,7 +264,7 @@ function orbitPass(g) {
 // The pass is worth much more with the orbit on than without it.
 function surroundPass(g) {
   const { halfX, halfY, pad, f, alt, rings, cam, frontOverlap } = g;
-  const r = Math.max(3, Math.hypot(halfX, halfY) + pad);
+  const r = Math.max(3, (g.reach ?? Math.hypot(halfX, halfY)) + pad);
 
   // Facing outward, a frame covers an ANGLE rather than a patch of ground, so
   // the spacing that matters is the yaw step between stations and nothing about
@@ -345,15 +374,55 @@ function transectPass(g) {
   return { pts, nLines, nShots, lineSpacing, shotSpacing, pitch, look };
 }
 
-export function planMission(rect, opts, cam) {
+// A rectangle is four taps, one at each corner. Older saved plans and links
+// carry a rect, and this is how they arrive at a planner that no longer has
+// one -- exactly, since a box's hull is its own corners.
+export function pointsFromRect(rect, height = 0) {
+  return [
+    { lat: rect.south, lon: rect.west, height },
+    { lat: rect.south, lon: rect.east, height },
+    { lat: rect.north, lon: rect.east, height },
+    { lat: rect.north, lon: rect.west, height },
+  ];
+}
+
+// `site` is what you tapped: `{ points: [{lat, lon, height}], shape }`. The
+// footprint derived from those points is what gets flown -- see js/shape.js for
+// why that derivation is a table rather than a rule.
+export function planMission(site, opts, cam) {
   const p = { ...DEFAULTS, ...opts };
-  const lat0 = (rect.north + rect.south) / 2;
-  const lon0 = (rect.east + rect.west) / 2;
-  const f = frame(lat0, lon0);
-  const a = f.toLocal(rect.south, rect.west);
-  const b = f.toLocal(rect.north, rect.east);
-  const halfX = Math.abs(b.x - a.x) / 2;
-  const halfY = Math.abs(b.y - a.y) / 2;
+  const points = site?.points ?? [];
+  if (!points.length) throw new Error('a mission needs at least one capture point');
+  const shape = site.shape ?? DEFAULT_SHAPE;
+
+  // Two passes at the frame, because the origin wants to be the middle of the
+  // footprint and the footprint is not known until there is a frame to build it
+  // in. The first frame is a scratch one at the mean of the taps; the second is
+  // the one everything downstream measures in, and it sits where every pass
+  // already assumes the middle is.
+  const mean = (k) => points.reduce((t, q) => t + q[k], 0) / points.length;
+  const scratch = frame(mean('lat'), mean('lon'));
+  const rough = footprintOf(points.map((q) => scratch.toLocal(q.lat, q.lon)), shape);
+  const rb = bounds(rough);
+  const mid = scratch.toLatLon((rb.x0 + rb.x1) / 2, (rb.y0 + rb.y1) / 2);
+
+  const f = frame(mid.lat, mid.lon);
+  const local = points.map((q) => ({ ...f.toLocal(q.lat, q.lon), height: q.height ?? 0 }));
+  const hull = footprintOf(local, shape);
+  const bb = bounds(hull);
+  const halfX = Math.max(Math.abs(bb.x0), Math.abs(bb.x1));
+  const halfY = Math.max(Math.abs(bb.y0), Math.abs(bb.y1));
+  // Only worth clipping to a footprint that has an inside. One or two taps
+  // describe a spot, not an outline, and the orbit is the pass that matters there.
+  const clip = polygonArea(hull) > 1 ? hull : null;
+  const reach = circumradius(hull, { x: 0, y: 0 });
+
+  // How tall the thing is, from the taps rather than from a slider: the tallest
+  // point you marked. Everything that used to read `subjectHeight` -- where the
+  // orbit aims, how low the rings start, how far the auto-fit search reaches
+  // down -- now answers to what you actually said was there.
+  p.subjectHeight = opts.subjectHeight
+    ?? local.reduce((h, q) => Math.max(h, q.height ?? 0), 0);
 
   const fp = footprint(cam, p.altitude);
   const sideSpacing = Math.max(1, fp.across * (1 - p.sideOverlap));
@@ -378,7 +447,7 @@ export function planMission(rect, opts, cam) {
   heightLevels.push({ kind: 'altitude', index: 0, z: p.altitude });
   if (p.nadir) {
     const r = gridPass({
-      halfCross: halfX, halfAlong: halfY, sideSpacing, fwdSpacing,
+      halfCross: halfX, halfAlong: halfY, sideSpacing, fwdSpacing, clip,
       axis: 'NS', f, alt: p.altitude, pitch: -90, pass: 'nadir',
     });
     add(r.pts);
@@ -386,7 +455,7 @@ export function planMission(rect, opts, cam) {
   }
   if (p.oblique) {
     const r = gridPass({
-      halfCross: halfY, halfAlong: halfX, sideSpacing, fwdSpacing,
+      halfCross: halfY, halfAlong: halfX, sideSpacing, fwdSpacing, clip,
       axis: 'EW', f, alt: p.altitude, pitch: p.obliquePitch, pass: 'oblique',
     });
     add(r.pts);
@@ -428,7 +497,7 @@ export function planMission(rect, opts, cam) {
   }
   if (p.orbit) {
     const r = orbitPass({
-      halfX, halfY, pad: p.orbitPad, f, cam, frontOverlap: p.frontOverlap,
+      halfX, halfY, reach, pad: p.orbitPad, f, cam, frontOverlap: p.frontOverlap,
       subjectHeight: p.subjectHeight,
       alt: p.altitude, pitchOverride: p.orbitPitch, rings: Math.max(1, p.orbitRings),
       heightOverride: p.orbitHeights, floor: p.orbitFloor,
@@ -454,7 +523,7 @@ export function planMission(rect, opts, cam) {
   }
   if (p.surround) {
     const r = surroundPass({
-      halfX, halfY, pad: p.orbitPad, f, cam, frontOverlap: p.frontOverlap,
+      halfX, halfY, reach, pad: p.orbitPad, f, cam, frontOverlap: p.frontOverlap,
       alt: p.altitude, rings: Math.max(1, p.surroundRings),
     });
     add(r.pts);
@@ -522,7 +591,8 @@ export function planMission(rect, opts, cam) {
   return {
     params: p,
     cam,
-    rect,
+    site: { points, shape },
+    hull,                       // the footprint, in local metres
     frame: f,
     centre: f.toLatLon(0, 0),
     sizeX: halfX * 2,
@@ -544,7 +614,10 @@ export function planMission(rect, opts, cam) {
       footprint: fp,
       sideSpacing,
       fwdSpacing,
-      areaHa: (halfX * 2 * halfY * 2) / 10000,
+      // The footprint's own area, which is the ground you are paying to fly
+      // over -- not the bounding box around it.
+      areaHa: (polygonArea(hull) || halfX * 2 * halfY * 2) / 10000,
+      reachM: reach,
     },
   };
 }
@@ -573,7 +646,7 @@ export function splitMission(mission, maxWp = DJI_FLY_MAX_WAYPOINTS) {
 // waypoint cap and a single battery, so search for the lowest altitude (best
 // GSD) that fits both budgets, preferring waypoint-per-photo because that is
 // the shutter mode every DJI Fly build is known to honour.
-export function proposePlan(rect, base, cam, budget = {}) {
+export function proposePlan(site, base, cam, budget = {}) {
   const maxWp = budget.maxWaypoints ?? DJI_FLY_MAX_WAYPOINTS;
   const maxMin = budget.maxMinutes ?? (base.usableFlightMin ?? DEFAULTS.usableFlightMin);
 
@@ -584,21 +657,23 @@ export function proposePlan(rect, base, cam, budget = {}) {
   // something has height, elevation diversity is the biggest single win
   // available: measured, one ring to two is +7.1 points of coverage, where two
   // to three is +0.5 and three to four is +0.8.
-  const hasHeight = (base.subjectHeight ?? DEFAULTS.subjectHeight) > 0.5;
+  // Height comes from the taps now, so ask the planner rather than the caller:
+  // one cheap plan settles whether there is anything vertical here at all.
+  const probe = planMission(site, { ...base, altitude: 40 }, cam);
+  const subjectHeight = probe.params.subjectHeight;
+  const hasHeight = subjectHeight > 0.5;
   const ringChoices = hasHeight ? [3, 2, 1] : [1];
 
   // How low the search may go. Over flat ground 20 m is a sensible floor. With
   // a subject that has height, the useful altitudes are just above it -- an
   // under-canopy playground wants 5-8 m, and a 20 m floor could never find it.
-  const floorAlt = hasHeight
-    ? Math.max(3, Math.round((base.subjectHeight ?? DEFAULTS.subjectHeight) * 1.5))
-    : 20;
+  const floorAlt = hasHeight ? Math.max(3, Math.round(subjectHeight * 1.5)) : 20;
   const step = hasHeight ? 1 : 5;
 
   // Lowest altitude (best GSD) that fits, for one shutter mode and ring count.
   const lowestFit = (photoMode, orbitRings, surround) => {
     for (let alt = floorAlt; alt <= 120; alt += step) {
-      const m = planMission(rect, { ...base, altitude: alt, photoMode, orbitRings, surround }, cam);
+      const m = planMission(site, { ...base, altitude: alt, photoMode, orbitRings, surround }, cam);
       if (fits(m)) return m;
     }
     return null;

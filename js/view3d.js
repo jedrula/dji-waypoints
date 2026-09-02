@@ -121,11 +121,13 @@ export function createView3D(canvas) {
       const l = f.toLocal(w.lat, w.lon);
       return { x: l.x, y: l.y, z: w.alt, pass: w.pass, yaw: w.yaw ?? 0, shots: w.shots ?? [w.pitch] };
     });
-    const a = f.toLocal(mission.rect.south, mission.rect.west);
-    const b = f.toLocal(mission.rect.north, mission.rect.east);
+    // The footprint you tapped, already in this frame's metres. A mission read
+    // off the controller has none -- a KMZ records the flight, not what it was
+    // for -- so there the flight's own extent stands in.
+    const src = mission.hull?.length ? mission.hull : pts;
     const box = {
-      x0: Math.min(a.x, b.x), x1: Math.max(a.x, b.x),
-      y0: Math.min(a.y, b.y), y1: Math.max(a.y, b.y),
+      x0: Math.min(...src.map((q) => q.x)), x1: Math.max(...src.map((q) => q.x)),
+      y0: Math.min(...src.map((q) => q.y)), y1: Math.max(...src.map((q) => q.y)),
     };
     const span = Math.max(box.x1 - box.x0, box.y1 - box.y0, 20);
     const maxAlt = Math.max(...pts.map((p) => p.z), 1);
@@ -461,18 +463,6 @@ export function createView3D(canvas) {
     for (let y = gy0; y <= gy1; y += grid) line({ x: gx0, y, z: 0 }, { x: gx1, y, z: 0 }, b, w, h, f);
     ctx.stroke();
 
-    // the drawn rectangle, on the ground
-    ctx.strokeStyle = '#4da3ff';
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([5, 4]);
-    ctx.beginPath();
-    const c = [
-      { x: box.x0, y: box.y0, z: 0 }, { x: box.x1, y: box.y0, z: 0 },
-      { x: box.x1, y: box.y1, z: 0 }, { x: box.x0, y: box.y1, z: 0 },
-    ];
-    for (let i = 0; i < 4; i++) line(c[i], c[(i + 1) % 4], b, w, h, f);
-    ctx.stroke();
-    ctx.setLineDash([]);
 
     // What is already standing there. Faces rather than wireframe, because a
     // wireframe box does not tell you which side of it the path is on -- and

@@ -1,3 +1,7 @@
+/* The page is a map with a band of controls on top of it. That split is the
+   whole layout: everything that is not one of the six things you touch while
+   planning lives in a sheet that slides up over the map and goes away again.
+   One layout, phone and laptop alike -- there is no second one to keep in step. */
 :root {
   --bg: #101418;
   --panel: #171c22;
@@ -9,15 +13,26 @@
   --accent2: #ffb84d;
   --warn: #ff8f6b;
   --ok: #5ad19a;
+  --capture: #4da3ff;
+  --obstacle: #ffb84d;
+  --pad: 14px;
+  --bar: 30dvh;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
   font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   background: var(--bg); color: var(--text);
+  -webkit-text-size-adjust: 100%;
 }
-#app { display: flex; height: 100%; }
-#stage { flex: 1; height: 100%; position: relative; }
+
+#app { display: flex; flex-direction: column; height: 100dvh; }
+/* The band is allowed to grow past its third when a plan has a lot to say, but
+   never past half -- the map is the thing you are working in. */
+#bar { flex: 0 0 auto; min-height: var(--bar); max-height: 50dvh; overflow-y: auto;
+       background: var(--panel); border-bottom: 1px solid var(--line);
+       padding: var(--pad) var(--pad) 10px; display: flex; flex-direction: column; gap: 9px; }
+#stage { flex: 1 1 auto; position: relative; min-height: 0; }
 #map { position: absolute; inset: 0; background: #0b0e11; }
 #map[hidden] { display: none; }
 #scene { position: absolute; inset: 0; width: 100%; height: 100%; display: block;
@@ -25,492 +40,282 @@ body {
 #scene:active { cursor: grabbing; }
 #scene[hidden] { display: none; }
 
-/* Split: map and 3D side by side, with a draggable divider between them. Wide
-   screens split left/right; a phone splits top/bottom, because half of a
-   narrow screen is not a map. `--split` is where the divider sits, as a
-   percentage of the stage along whichever axis is in play. */
-#stage { --split: 50%; }
-#stage.split #map { inset: 0 calc(100% - var(--split)) 0 0; }
-/* A canvas is a replaced element: with `width: auto` it falls back to its
-   intrinsic size and ignores `right`, collapsing to nothing. Size it. */
-#stage.split #scene { inset: 0 0 0 var(--split); width: calc(100% - var(--split));
-                      border-left: 1px solid var(--line); }
-/* The basemap picker belongs to the map, so in split it sits over the map half
-   rather than floating on the 3D side. */
-#stage.split #basetabs { right: calc(100% - var(--split) + 12px); }
-/* Squeeze the map narrower than its own controls and the basemap picker lands
-   on the zoom buttons. Below that width it hides rather than overlapping --
-   dragging the divider back brings it straight back. */
-#stage.split.tight #basetabs { display: none; }
+/* ---------- the band ---------- */
+.barrow { display: flex; align-items: center; gap: 8px; }
+.barrow.foot { margin-top: auto; padding-top: 2px; }
+.barrow.foot button { flex: 1 1 auto; }
+.barrow.foot #undo { flex: 0 0 auto; font-size: 17px; line-height: 1; padding: 7px 11px; }
 
-/* A wide invisible grab strip over a hairline -- easy to hit with a mouse
-   without drawing a chunky bar across the view. */
-#splitter { position: absolute; z-index: 600; touch-action: none;
-            inset: 0 auto 0 var(--split); width: 11px; margin-left: -5px;
-            cursor: col-resize; }
-#splitter[hidden] { display: none; }
-#splitter::after { content: ''; position: absolute; inset: 0 5px; background: var(--line); }
-#splitter:hover::after, #splitter.dragging::after { background: var(--accent); inset: 0 4px; }
-/* The one thing on the stage that is not a view control: what the flight hits,
-   and the button that gets it out of the way. Top centre, because it belongs to
-   neither the map nor the 3D view -- it is true of the plan, whichever you are
-   looking at. */
-#fixbar { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 550;
-          display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 12px;
-          background: rgba(43,26,26,0.95); border: 1px solid #6d3535; border-radius: 9px;
-          font-size: 12.5px; color: #ff9c9c; max-width: min(520px, calc(100% - 24px)); }
-#fixbar[hidden] { display: none; }
-#fixbar.near { background: rgba(43,31,26,0.95); border-color: #5c4230; color: var(--accent2); }
-#fixbar span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#fixbar button { background: rgba(255,255,255,0.12); border-color: transparent; color: #fff;
-                 padding: 5px 12px; font-size: 12.5px; font-weight: 600; flex: none; }
-#fixbar button:hover:not(:disabled) { background: rgba(255,255,255,0.2); border-color: transparent; }
+.plantitle { flex: 1; min-width: 0; text-align: left; background: none; border: 0; padding: 0;
+             font-size: 17px; font-weight: 650; letter-spacing: -0.01em; color: var(--text);
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plantitle:hover { color: var(--accent); }
+.plantitle.dirty::after { content: ' •'; color: var(--accent); }
+.barnav { display: flex; gap: 6px; flex: none; }
+.barnav button { padding: 5px 10px; font-size: 12px; color: var(--dim); }
+.tag:empty { display: none; }
+.tag { margin-left: 5px; font-size: 10.5px; color: var(--dim);
+       border: 1px solid var(--line); border-radius: 999px; padding: 0 5px; }
+.tag.ok { color: var(--ok); border-color: transparent; font-size: 13px; padding: 0; }
 
-/* What just happened, for actions whose result is on the map rather than in the
-   panel -- an undo, an auto-adjust. Says it and gets out of the way. */
-#toast { position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%); z-index: 560;
-         background: rgba(16,20,24,0.95); border: 1px solid var(--line); border-radius: 8px;
-         padding: 8px 14px; font-size: 12.5px; color: var(--text); pointer-events: none;
-         max-width: min(560px, calc(100% - 24px)); text-align: center;
-         opacity: 1; transition: opacity 0.25s; }
-#toast[hidden] { display: none; }
-#toast.fading { opacity: 0; }
+/* What a tap means. Two buttons, because there are two questions, and the one
+   that is lit is the one the map is answering. */
+.modes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.modes button { display: flex; align-items: center; justify-content: center; gap: 7px;
+                padding: 10px 8px; background: var(--panel2); color: var(--dim);
+                border: 1px solid var(--line); }
+.modes button b { font-weight: 600; font-size: 13.5px; }
+.modes button .n { font-variant-numeric: tabular-nums; font-size: 11.5px;
+                   border-radius: 999px; padding: 1px 7px; background: rgba(255,255,255,0.06); }
+.modes button[data-mode=capture].on { border-color: var(--capture); color: var(--text);
+                                      box-shadow: inset 0 -2px 0 var(--capture); }
+.modes button[data-mode=obstacle].on { border-color: var(--obstacle); color: var(--text);
+                                       box-shadow: inset 0 -2px 0 var(--obstacle); }
+.tip { margin: 0; color: var(--dim); font-size: 12px; }
 
-#viewtabs { position: absolute; top: 12px; right: 12px; z-index: 500;
-            display: flex; background: rgba(16,20,24,0.9); border: 1px solid var(--line);
-            border-radius: 8px; overflow: hidden; }
-#viewtabs button { border: 0; border-radius: 0; background: transparent; color: var(--dim);
-                   padding: 6px 14px; font-size: 12px; }
-#viewtabs button.on { background: var(--accent); color: #04101d; font-weight: 600; }
-.dimlabel { background: rgba(16,20,24,0.85); border: 1px solid var(--line); color: var(--text);
-            border-radius: 5px; padding: 1px 6px; font-size: 11px; font-variant-numeric: tabular-nums;
-            white-space: nowrap; width: auto !important; height: auto !important; }
+/* Four numbers, because a plan is four questions: is it worth flying, will it
+   fit a battery, how sharp is it, and does it see everything. */
+.readout { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+           background: var(--line); border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.readout div { background: var(--panel2); padding: 7px 4px; text-align: center; }
+.readout b { display: block; font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.readout span { display: block; font-size: 9.5px; text-transform: uppercase;
+                letter-spacing: 0.06em; color: var(--dim); margin-top: 1px; }
+.readout.empty { display: block; padding: 0; text-align: center; color: var(--dim); font-size: 12.5px; }
+.readout.empty:not(:has(button)) { padding: 14px; }
+/* While the plan is stale this slot IS the button, because it is the slot your
+   eye is already on and there is only one thing to do from here. */
+.planit { display: flex; flex-direction: column; align-items: center; gap: 2px;
+          width: 100%; border: 0; background: var(--accent); color: #04101d;
+          border-radius: 8px; padding: 10px; }
+.planit b { font-size: 14px; font-weight: 650; }
+.planit em { font-style: normal; font-size: 11.5px; opacity: 0.75; }
+.readout b.bad { color: var(--warn); }
+.readout b.ok { color: var(--ok); }
 
-#panel {
-  --pad: 18px;
-  width: 340px; min-width: 340px; height: 100%; overflow-y: auto;
-  background: var(--panel); border-right: 1px solid var(--line);
-  padding: 0 var(--pad) 40px;
-}
-#panel header { padding-top: var(--pad); margin-bottom: 14px; }
+.alert { border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.4;
+         background: rgba(43,26,26,0.6); border: 1px solid #6d3535; color: #ffcdbd; }
+.alert[hidden] { display: none; }
+.alert.warn { background: rgba(43,38,26,0.6); border-color: #6d5a35; color: #ffe4bd; }
+.alert button { margin-left: 8px; background: none; border: 0; padding: 0;
+                color: inherit; text-decoration: underline; font-size: 12px; }
 
-/* The switch between the three jobs the pane does. Sticky, because the plan
-   view is long and the way out of it should not be a scroll away. */
-#menu {
-  position: sticky; top: 0; z-index: 5; background: var(--panel);
-  display: flex; flex-wrap: wrap; gap: 4px;
-  margin: 0 calc(-1 * var(--pad)) 4px; padding: 4px var(--pad) 12px;
-  border-bottom: 1px solid var(--line);
-}
-/* Flex rather than a fixed grid of columns, because the row is no longer a
-   fixed set: the first slot wears a plan name of any length, and editing one
-   takes three of the others away. The plan gets twice the share of what is
-   left, since it is the only label that is not a single word. */
-#menu button { flex: 1 1 auto; min-width: 0;
-               display: flex; align-items: center; justify-content: center; gap: 4px;
-               padding: 8px 6px; font-size: 11.5px; color: var(--dim); white-space: nowrap; }
-#menu button[data-view=plan] { flex: 2 1 34%; }
-/* `display: flex` above beats the browser's own rule for [hidden], so a view
-   the menu has taken away has to be told again. */
-#menu button[hidden] { display: none; }
-/* Several labels across 340 px is tight, and the count badge is the first thing
-   that can go: the number is a nicety, the name of the view is not. */
-#menu .mlabel { overflow: hidden; text-overflow: ellipsis; }
-#menu button.on { background: var(--panel2); border-color: #3d4753; color: var(--text);
-                  font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
-.mbadge:empty { display: none; }
-.mbadge { font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--dim);
-          border: 1px solid var(--line); border-radius: 999px; padding: 0 5px; }
-.mbadge.ok { color: var(--ok); border-color: transparent; padding: 0; font-size: 13px; }
-.pane[hidden] { display: none; }
-h1 { font-size: 17px; margin: 0; letter-spacing: -0.01em; }
-.sub { margin: 2px 0 0; color: var(--dim); font-size: 12px; }
-
-.step { border-top: 1px solid var(--line); padding: 16px 0; }
-.step:first-of-type { border-top: 0; padding-top: 0; }
-h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
-     color: var(--dim); margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
-h2 .n, .substep .n {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 18px; height: 18px; border-radius: 50%;
-  background: var(--panel2); color: var(--text); font-size: 11px;
-}
-
-/* the steps inside a view, as in the controller workflow */
-.substep { font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em;
-           color: var(--dim); margin: 18px 0 8px; display: flex; align-items: center; gap: 7px; }
-.substep:first-child { margin-top: 0; }
-
-.search { display: flex; gap: 6px; margin-bottom: 10px; }
-input[type=text], select {
-  width: 100%; background: var(--panel2); border: 1px solid var(--line);
-  color: var(--text); border-radius: 7px; padding: 7px 9px; font: inherit; font-size: 13px;
-}
-input[type=text]:focus, select:focus { outline: none; border-color: var(--accent); }
-
+/* ---------- buttons and fields, everywhere ---------- */
 button {
   background: var(--panel2); border: 1px solid var(--line); color: var(--text);
-  border-radius: 7px; padding: 7px 12px; font: inherit; font-size: 13px; cursor: pointer;
+  border-radius: 8px; padding: 8px 12px; font: inherit; font-size: 13px; cursor: pointer;
+  min-height: 38px;
 }
 button:hover:not(:disabled) { border-color: #3d4753; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #04101d; font-weight: 600; }
 button.primary:hover:not(:disabled) { filter: brightness(1.08); }
-button.primary.armed { background: var(--accent2); border-color: var(--accent2); }
-button.block { width: 100%; padding: 9px; }
+button.block { width: 100%; }
 button:disabled { opacity: 0.4; cursor: default; }
+input[type=text], select {
+  background: var(--panel); border: 1px solid var(--line); color: var(--text);
+  border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 13px; min-height: 38px;
+}
+input[type=text]:focus, select:focus { outline: none; border-color: var(--accent); }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+input[type=checkbox] { accent-color: var(--accent); width: 18px; height: 18px; }
 
-.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
-.row > span:first-child { color: var(--dim); font-size: 13px; white-space: nowrap; }
-.row select { width: 190px; }
-.ctl { display: flex; align-items: center; gap: 8px; }
-.ctl output { width: 54px; text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
-input[type=range] { width: 118px; accent-color: var(--accent); }
-
+.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.row > span:first-child { color: var(--dim); font-size: 13px; white-space: nowrap; flex: none; }
+.row select { flex: 1; max-width: 200px; }
+.ctl { display: flex; align-items: center; gap: 9px; flex: 1; justify-content: flex-end; }
+.ctl input[type=range] { max-width: 150px; }
+.ctl output { width: 52px; text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; flex: none; }
 .hint { color: var(--dim); font-size: 12px; margin: 4px 0 0; }
 .hint.gsd { color: var(--ok); margin-bottom: 12px; }
+.hint.ok { color: var(--ok); }
+.hint.bad { color: var(--warn); }
+.warn { border: 1px solid #6d5a35; background: rgba(43,38,26,0.5); color: #ffe4bd;
+        border-radius: 8px; padding: 9px 11px; font-size: 12px; margin: 10px 0; }
+.warn[hidden] { display: none; }
 
-fieldset.passes { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px 4px; margin: 14px 0; }
-fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; padding: 0 5px; }
-.chk { display: flex; gap: 9px; align-items: flex-start; margin-bottom: 10px; cursor: pointer; }
-.chk input { margin-top: 3px; accent-color: var(--accent); }
+fieldset.passes { border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px 4px; margin: 4px 0 16px; }
+fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: uppercase;
+                         letter-spacing: 0.08em; padding: 0 5px; }
+.chk { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 12px; cursor: pointer; }
+.chk input { margin-top: 2px; flex: none; }
 .chk b { font-weight: 600; font-size: 13px; display: block; }
 .chk em { color: var(--dim); font-style: normal; font-size: 11.5px; }
 
-.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line);
-         border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 10px; }
-.stats.empty { display: block; background: var(--panel2); color: var(--dim);
-               padding: 14px; font-size: 12.5px; text-align: center; }
-.stat { background: var(--panel2); padding: 9px 11px; }
-.stat b { display: block; font-size: 16px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
-.stat span { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+.passlist { margin: 10px 0; font-size: 12px; }
+.passrow { display: flex; align-items: baseline; gap: 8px; padding: 4px 0; border-top: 1px solid var(--line); }
+.passrow .sw { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.passrow b { font-weight: 600; }
+.passrow em { color: var(--dim); font-style: normal; flex: 1; }
+.passrow .cnt { color: var(--dim); font-variant-numeric: tabular-nums; }
 
-.passlist { margin-bottom: 10px; }
-.passrow { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 3px 0; color: var(--dim); }
-.passrow i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex: none; }
-.passrow b { color: var(--text); font-weight: 500; }
-.passrow .c { margin-left: auto; font-variant-numeric: tabular-nums; }
-
-.warn { background: #2b1f1a; border: 1px solid #4a3225; color: var(--warn);
-        border-radius: 7px; padding: 9px 11px; font-size: 12.5px; margin-bottom: 10px; }
-
-.help { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 6px; color: var(--dim); font-size: 12.5px; }
-.help summary { cursor: pointer; color: var(--text); font-size: 13px; }
-.help ol { padding-left: 18px; margin: 10px 0; }
-.help li { margin-bottom: 6px; }
-.help code { background: var(--panel2); padding: 1px 4px; border-radius: 4px; font-size: 11.5px; word-break: break-all; }
-
-/* map bits */
-/* Only the typeface, not the metrics: `font: inherit` here also handed the
-   controls the app's 14px, which overflowed boxes Leaflet sizes for 12px --
-   the attribution ended up clipped against the bottom of the map. */
+/* ---------- the map ---------- */
 .leaflet-container { background: #0b0e11; font-family: inherit; }
-.leaflet-control-attribution { background: rgba(16,20,24,0.8) !important; color: var(--dim) !important; }
+.leaflet-control-attribution { background: rgba(16,20,24,0.8) !important; color: var(--dim) !important;
+                               font-size: 10px !important; }
 .leaflet-control-attribution a { color: var(--dim) !important; }
-#map.drawing { cursor: crosshair; }
-.handle { background: var(--accent); border: 2px solid #04101d; border-radius: 50%;
-          width: 12px; height: 12px; margin: -6px 0 0 -6px; cursor: move; }
-.wpdot { border-radius: 50%; margin: -2.5px 0 0 -2.5px; width: 5px; height: 5px; }
+#map.placing { cursor: crosshair; }
 
-#autofit { margin-bottom: 10px; }
-.stat.over b { color: var(--warn); }
-.stat.fits b { color: var(--ok); }
+/* A tapped point. The ring is the thing itself; the number is how tall you said
+   it was, which is the only number either kind of point carries. */
+.pt { display: flex; align-items: center; justify-content: center;
+      border-radius: 50%; border: 2px solid #04101d; color: #04101d;
+      font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.pt.capture { background: var(--capture); }
+.pt.obstacle { background: var(--obstacle); }
+.pt.on { outline: 2px solid #fff; outline-offset: 1px; }
+.pt.strike { background: #ff5d5d; color: #fff; }
+.gpsdot { background: var(--capture); border: 2px solid #fff; border-radius: 50%;
+          box-shadow: 0 0 0 1px rgba(0,0,0,0.5); }
 
-.altnote { background: #16202b; border: 1px solid #26384a; color: #8fb8d9;
-           border-radius: 7px; padding: 9px 11px; font-size: 12.5px; margin-bottom: 10px; }
-
-details.adv { border: 1px solid var(--line); border-radius: 8px; padding: 0 12px; margin-top: 14px; }
-details.adv > summary { cursor: pointer; color: var(--dim); font-size: 12px;
-  text-transform: uppercase; letter-spacing: 0.08em; padding: 10px 0; list-style: none; }
-details.adv > summary::-webkit-details-marker { display: none; }
-details.adv > summary::before { content: '+ '; }
-details.adv[open] > summary::before { content: '\2212 '; }
-details.adv[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: 12px; }
-details.adv .row:last-child { margin-bottom: 12px; }
-
-.rectbox { cursor: move; }
-#map.drawing .rectbox { cursor: crosshair; }
-
-.areabtns { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; }
-.areabtns button { padding: 9px 12px; }
-.gpsdot { background: #4da3ff; border: 2px solid #fff; border-radius: 50%;
-          width: 12px; height: 12px; margin: -6px 0 0 -6px;
-          box-shadow: 0 0 0 1px rgba(0,0,0,0.4); }
-
-.linkish { background: none; border: 0; padding: 4px 0 0; color: var(--accent);
-           font-size: 12.5px; text-decoration: underline; text-underline-offset: 2px; }
-.linkish:hover { filter: brightness(1.15); }
-
-/* ---------------- mobile ---------------- */
-/* On a phone you are standing on the site: the map is for confirming, not for
-   drawing. Panel first, map below it, and every control big enough to hit. */
-@media (max-width: 780px) {
-  html, body { height: auto; }
-  #app { flex-direction: column; height: auto; min-height: 100%; }
-
-  #panel {
-    --pad: 16px;
-    width: 100%; min-width: 0; height: auto; order: 1;
-    border-right: 0; border-bottom: 1px solid var(--line);
-    padding: 0 var(--pad) 24px;
-    overflow: visible;
-  }
-  #panel header { padding-top: var(--pad); }
-  #menu button { min-height: 40px; font-size: 13px; }
-  #menu button[data-view=plan] { flex: 1 1 100%; }
-  .editbar { position: static; margin-top: 6px; }
-  #stage { order: 2; height: 58vh; min-height: 320px; flex: none; }
-
-  h1 { font-size: 19px; }
-  .step { padding: 14px 0; }
-
-  /* thumb-sized controls */
-  button, input[type=text], select { min-height: 44px; font-size: 15px; }
-  button.block { padding: 13px; }
-  .areabtns button { padding: 13px 12px; }
-  input[type=range] { height: 34px; width: 100%; }
-  .row { flex-wrap: wrap; }
-  .ctl { flex: 1 1 100%; }
-  .row select { width: 100%; }
-  .chk { padding: 6px 0; }
-  .chk input { width: 20px; height: 20px; }
-
-  .stats { grid-template-columns: 1fr 1fr; }
-  .stat b { font-size: 18px; }
-
-  #viewtabs button { padding: 10px 14px; font-size: 13px; }
-  /* Top centre collides with the view tabs on a narrow stage; drop it under
-     them, where there is nothing but map. */
-  #fixbar { top: auto; bottom: 12px; left: 12px; right: 12px; transform: none; max-width: none; }
-  #toast { bottom: 64px; }
-  /* Thumb-sized, like every other control on a phone -- and this is the one
-     that gets pressed with one hand while walking. */
-  #findme { width: 44px; height: 44px; }
-  #findme svg { width: 21px; height: 21px; }
-  #stage { order: 2; }
-  #stage.split { height: 72vh; }
-  #stage.split #map { inset: 0 0 calc(100% - var(--split)) 0; }
-  #stage.split #scene { inset: var(--split) 0 0 0; width: 100%; height: calc(100% - var(--split));
-                        border-left: 0; border-top: 1px solid var(--line); }
-  #stage.split #basetabs { right: 12px; }
-  #splitter { inset: var(--split) 0 auto 0; width: auto; height: 22px;
-              margin: -11px 0 0 0; cursor: row-resize; }
-  #splitter::after { inset: 10px 0; }
-  #splitter:hover::after, #splitter.dragging::after { inset: 9px 0; }
-  .handle { width: 22px; height: 22px; margin: -11px 0 0 -11px; }
-  .obsh { min-height: 40px; width: 74px; font-size: 15px; }
-  .obsmain input { min-height: 32px; font-size: 15px; }
-  #menu button { font-size: 12px; padding: 8px 2px; }
-}
-
-@media (max-width: 420px) {
-  .areabtns { grid-template-columns: 1fr; }
-  .search { flex-wrap: wrap; }
-  .search input { flex: 1 1 100%; }
-  .search button { width: 100%; }
-}
-
-/* install panel */
-.devrow { display: grid; grid-template-columns: 1fr; gap: 6px; margin-bottom: 8px; }
-.devrow select:not([hidden]) { display: block; }
-.hint.ok { color: var(--ok); }
-.hint.bad { color: var(--warn); }
-
-.slots { margin: 10px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-.slots:empty { display: none; }
-.slots .hint { padding: 9px 11px; margin: 0; }
-.slot {
-  display: flex; align-items: center; gap: 9px; padding: 8px 10px; cursor: pointer;
-  background: var(--panel2); border-top: 1px solid var(--line);
-}
-.slot:first-child { border-top: 0; }
-.slot input { accent-color: var(--accent); flex: none; }
-.slot.on { background: #1b2735; }
-.slot.unusable { opacity: 0.45; cursor: default; }
-.slotmain { flex: 1; min-width: 0; }
-.slotmain b { display: block; font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.slotmain em { font-style: normal; color: var(--dim); font-size: 11px; }
-.slotmeta { color: var(--dim); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.slotmeta.bad { color: var(--warn); }
-
-.xferbox { margin-bottom: 10px; }
-.xferbox .hint { margin-top: 8px; }
-.xfer {
-  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px;
-  background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
-  padding: 9px 10px; margin-bottom: 6px;
-}
-.xfer b { display: block; font-size: 12.5px; font-weight: 600; }
-.xfer em { font-style: normal; display: block; color: var(--dim); font-size: 11px; }
-.xsrc b { color: var(--ok); }
-.xdst b { color: var(--warn); font-variant-numeric: tabular-nums; }
-.xarrow { color: var(--dim); }
-
-.kmzpick { display: block; margin: 8px 0; font-size: 12px; color: var(--dim); cursor: pointer; }
-.kmzpick input { display: none; }
-.kmzpick span { display: block; border: 1px dashed var(--line); border-radius: 7px; padding: 8px 10px; }
-.kmzpick span:hover { border-color: var(--accent); color: var(--text); }
-.kmzpick.loaded span { border-style: solid; border-color: var(--ok); color: var(--ok); }
-
-/* the plan you are on: its name, and the pencil into changing it */
-.planhead { display: flex; align-items: flex-start; gap: 10px; padding: var(--pad) 0 14px; }
-.planhead[hidden] { display: none; }
-.planid { flex: 1; min-width: 0; }
-#planTitle { font-size: 16px; text-transform: none; letter-spacing: -0.01em;
-             color: var(--text); font-weight: 600; margin: 0; display: block;
-             overflow: hidden; text-overflow: ellipsis; }
-.planwhere { color: var(--dim); font-size: 12px; margin: 3px 0 0; }
-.planwhere:empty { display: none; }
-.planacts { display: flex; align-items: center; gap: 4px; flex: none; }
-.pencil { padding: 7px 10px; line-height: 0; }
-.pencil svg { width: 14px; height: 14px; fill: currentColor; display: block; }
-/* Viewing a plan is one section, so numbering it "3" would be counting steps
-   that are not on screen. */
-#pane-plan.viewing #step-review h2 .n { display: none; }
-.planacts .linkish { padding: 6px 4px; font-size: 12px; }
-
-/* Save and Cancel follow you down a long panel: the way out of edit mode
-   should never be a scroll away, the same reason the menu is sticky. */
-.editbar { position: sticky; bottom: 0; z-index: 4;
-           display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
-           margin: 0 calc(-1 * var(--pad)); padding: 12px var(--pad);
-           background: var(--panel); border-top: 1px solid var(--line); }
-.editbar[hidden] { display: none; }
-.editbar input { flex: 1 1 120px; min-width: 0; font-size: 12px; }
-.editacts { display: flex; gap: 6px; flex: none; }
-.editbar .hint { flex: 1 1 100%; margin: 0; }
-.editbar .hint:empty { display: none; }
-
-/* saved plans */
-.planrow { display: flex; gap: 6px; }
-.planrow input { flex: 1; font-size: 12px; }
-.planlist { margin: 8px 0; }
-.planitem { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 7px;
-            background: var(--panel2); border: 1px solid var(--line); margin-bottom: 5px; }
-.planitem.on { border-color: var(--accent); }
-.planmain { flex: 1; min-width: 0; }
-.planmain b { display: block; font-size: 12.5px; font-weight: 600; color: var(--text);
-              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.planmain em { font-style: normal; color: var(--dim); font-size: 11px; }
-.planitem button { padding: 4px 9px; font-size: 11.5px; }
-.planx { background: none; border: 0; color: var(--dim); font-size: 16px; padding: 0 4px; }
-.planx:hover { color: var(--warn); }
-.syncrow { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
-
-/* obstacles */
-/* Slate for a box the flight stays clear of, and the two grades of trouble.
-   Same three colours in the panel, on the map and in the 3D view -- the whole
-   point is that a red box is red wherever you happen to be looking. */
-.obslist { margin: 10px 0 8px; }
-.obsitem { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 7px;
-           background: var(--panel2); border: 1px solid var(--line); margin-bottom: 5px; }
-.obsitem.near { border-color: #6a5330; }
-.obsitem.strike { border-color: #5c2c2c; background: #241a1a; }
-/* After the grades, so the box you are working on still reads as the one you
-   are working on even when it is also the one being hit. */
-.obsitem.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.obsmain { flex: 1; min-width: 0; cursor: pointer; }
-.obsmain input { background: none; border: 0; padding: 0; font-size: 12.5px; font-weight: 600;
-                 width: 100%; border-radius: 0; }
-.obsmain input:focus { outline: none; border-bottom: 1px solid var(--accent); }
-.obsmain em { display: block; font-style: normal; color: var(--dim); font-size: 11px;
-              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.obsitem.near .obsmain em { color: var(--accent2); }
-.obsitem.strike .obsmain em { color: #ff8080; }
-.obsh { width: 62px; flex: none; background: var(--panel); border: 1px solid var(--line);
-        color: var(--text); border-radius: 6px; padding: 5px 6px; font: inherit; font-size: 12px;
-        font-variant-numeric: tabular-nums; }
-.obsh:focus { outline: none; border-color: var(--accent); }
-.warn.bad { background: #2b1a1a; border-color: #5c2c2c; color: #ff8f8f; }
-
-/* the same news, in the plan view, where you are reading the stats */
-.hazard { background: #2b1f1a; border: 1px solid #4a3225; color: var(--accent2);
-          border-radius: 7px; padding: 9px 11px; font-size: 12.5px; margin-bottom: 10px; }
-.hazard.strike { background: #2b1a1a; border-color: #5c2c2c; color: #ff8f8f; }
-.hazard[hidden] { display: none; }
-.hazard b { display: block; margin-bottom: 5px; }
-.hazrow { color: var(--dim); font-size: 12px; padding: 1px 0; }
-.hazrow::before { content: '· '; }
-.hazard .linkish { color: inherit; }
-
-kbd { background: var(--panel2); border: 1px solid var(--line); border-bottom-width: 2px;
-      border-radius: 4px; padding: 0 4px; font: inherit; font-size: 11px; color: var(--text); }
-
-.obsbox { cursor: move; }
-#map.drawing .obsbox { cursor: crosshair; }
-.handle.obs { background: #9aa7b4; }
-
-/* basemap switcher, under the map/3d tabs */
-#basetabs { position: absolute; top: 48px; right: 12px; z-index: 500;
+#viewtabs { position: absolute; top: 10px; right: 10px; z-index: 500;
+            display: flex; background: rgba(16,20,24,0.9); border: 1px solid var(--line);
+            border-radius: 8px; overflow: hidden; }
+#viewtabs button { border: 0; border-radius: 0; background: transparent; color: var(--dim);
+                   padding: 6px 12px; font-size: 12px; min-height: 0; }
+#viewtabs button.on { background: var(--panel2); color: var(--text); font-weight: 600; }
+#basetabs { position: absolute; top: 46px; right: 10px; z-index: 500;
             display: flex; background: rgba(16,20,24,0.9); border: 1px solid var(--line);
             border-radius: 8px; overflow: hidden; }
 #basetabs[hidden] { display: none; }
 #basetabs button { border: 0; border-radius: 0; background: transparent; color: var(--dim);
-                   padding: 5px 11px; font-size: 11.5px; }
+                   padding: 5px 10px; font-size: 11px; min-height: 0; }
 #basetabs button.on { background: var(--panel2); color: var(--text); font-weight: 600; }
-/* Third in the top-right stack, under the view tabs and the basemap picker.
-   Off by default, so it has to look like something you can switch on. */
-#ground { position: absolute; top: 84px; right: 12px; z-index: 500;
-          background: rgba(16,20,24,0.9); border: 1px solid var(--line); color: var(--dim);
-          padding: 5px 11px; font-size: 11.5px; border-radius: 8px; }
-#ground[hidden] { display: none; }
-#ground:hover { color: var(--text); }
-#ground.on { background: var(--accent); border-color: var(--accent); color: #04101d; font-weight: 600; }
-/* With no basemap picker above it, it moves up into that slot. */
-#stage.split.tight #ground, #stage:not(.split) #ground.solo { top: 48px; }
 
-/* Where you are, on the map you are standing in. Left side, under Leaflet's
-   zoom control, because that is where a locate button lives on every other map
-   and the right-hand stack is already three deep. */
+/* Where you are, under Leaflet's zoom control, where a locate button lives on
+   every other map. */
 #findme { position: absolute; top: 84px; left: 10px; z-index: 500;
-          width: 34px; height: 34px; padding: 0;
+          width: 40px; height: 40px; padding: 0; min-height: 0;
           display: flex; align-items: center; justify-content: center;
-          background: rgba(16,20,24,0.9); border: 1px solid var(--line); color: var(--dim);
-          border-radius: 8px; }
+          background: rgba(16,20,24,0.9); color: var(--dim); }
 #findme[hidden] { display: none; }
-#findme:hover:not(:disabled) { color: var(--text); border-color: #3d4753; }
-#findme svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+#findme:hover:not(:disabled) { color: var(--text); }
+#findme svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.6; }
 #findme.busy { color: var(--accent); }
-#findme.busy svg { animation: findmespin 1.1s linear infinite; }
-@keyframes findmespin { to { transform: rotate(360deg); } }
 
-.slotview { background: none; border: 1px solid var(--line); color: var(--dim);
-            padding: 3px 7px; font-size: 11px; border-radius: 6px; }
-.slotview:hover { color: var(--text); border-color: var(--accent); }
-.slotview.on { color: var(--text); border-color: var(--accent); background: #1b2735; }
+/* Standing next to the thing rather than looking at it on a map: one big
+   target that puts a point where you are, not where you tapped. */
+.here { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 520;
+        transition: bottom 0.12s ease;
+        padding: 13px 30px; font-size: 15px; font-weight: 650;
+        background: var(--accent); border-color: var(--accent); color: #04101d; }
+.here[hidden] { display: none; }
+#stage.editing .here { bottom: 70px; }
+#stage.editing #toast { bottom: 124px; }
+.here.obstacle { background: var(--obstacle); border-color: var(--obstacle); }
 
-/* ---------- walking the site ---------- */
-/* Sized for a phone held at arm's length outdoors: the one control that matters
-   is enormous, and everything else is out of the way of a thumb. */
-.block.big { font-size: 20px; padding: 22px 16px; margin: 14px 0 8px; letter-spacing: 0.02em; }
-.walkset { display: grid; gap: 10px; margin-top: 10px; }
-.walkset .ctl { display: flex; align-items: center; gap: 8px; }
-.walkset input[type=number] {
-  width: 84px; text-align: center; font-size: 17px; padding: 8px 6px;
-  background: #10161d; color: #e8eef5; border: 1px solid #2a3541; border-radius: 8px;
-}
-.walkset .unit { color: #8fa0b2; font-size: 13px; }
-.step2 {
-  width: 40px; height: 40px; font-size: 20px; line-height: 1; padding: 0;
-  border-radius: 8px; flex: none;
-}
-.sizes { display: flex; gap: 6px; }
-.sizes button { flex: 1; padding: 9px 4px; font-size: 12.5px; }
-.sizes button.on { background: #1d4f7c; border-color: #3d7fb8; color: #eaf3fb; }
-.sizes button span { display: block; font-size: 10.5px; color: #8fa0b2; margin-top: 2px; }
-.sizes button.on span { color: #b9d4ea; }
-.walklist { margin-top: 12px; display: grid; gap: 4px; }
-.walkitem {
-  display: flex; gap: 8px; align-items: baseline; padding: 7px 10px;
-  background: #131a22; border: 1px solid #222c37; border-radius: 8px; font-size: 12.5px;
-}
-.walkitem b { font-size: 14px; }
-.walkitem .n { color: #6f8296; min-width: 20px; }
-.walkitem .acc { margin-left: auto; color: #8fa0b2; font-size: 11.5px; }
-.walkfoot { display: flex; gap: 8px; margin-top: 12px; }
-.walkfoot button { flex: 1; }
+/* The point you last touched, over the map because the point is on the map. */
+.pointbar { position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 530;
+            display: flex; align-items: center; gap: 9px;
+            background: rgba(16,20,24,0.95); border: 1px solid var(--line);
+            border-radius: 11px; padding: 8px 10px; }
+.pointbar[hidden] { display: none; }
+.pdot { width: 11px; height: 11px; border-radius: 50%; flex: none; background: var(--capture); }
+.pdot.obstacle { background: var(--obstacle); }
+.pname { font-size: 12.5px; color: var(--dim); flex: 1; min-width: 0;
+         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pheight { display: flex; align-items: center; gap: 4px; flex: none; }
+.pheight button { width: 38px; padding: 0; font-size: 17px; line-height: 1; }
+.pheight input { width: 56px; text-align: center; font-variant-numeric: tabular-nums; }
+.pheight .unit { color: var(--dim); font-size: 12px; }
+.px { width: 38px; padding: 0; font-size: 17px; line-height: 1; color: var(--dim); flex: none; }
 
-@media (max-width: 780px) {
-  .block.big { font-size: 24px; padding: 30px 16px; }
-  .step2 { width: 48px; height: 48px; }
-  .walkset input[type=number] { width: 96px; height: 48px; font-size: 19px; }
+/* The pretend receiver (js/gpsmock.js), which only exists when the address bar
+   asks for it. Deliberately ugly: nothing here should ever be mistaken for a
+   real fix, and on the day it shows up in a screenshot you want to notice. */
+.mockpuck { display: flex; align-items: center; justify-content: center;
+            background: #c98bff; border: 2px solid #fff; border-radius: 50%;
+            box-shadow: 0 0 0 1px rgba(0,0,0,0.6); cursor: grab; }
+.mockpuck:active { cursor: grabbing; }
+.mockpuck b { font-size: 8px; font-weight: 800; color: #2a1240; letter-spacing: -0.02em; }
+#mocknote { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 540;
+            background: rgba(60,32,88,0.92); border: 1px solid #7a53a8; color: #e9d8ff;
+            border-radius: 8px; padding: 5px 10px; font-size: 11px; }
+
+#toast { position: absolute; bottom: 70px; left: 50%; transform: translateX(-50%); z-index: 560;
+         background: rgba(16,20,24,0.95); border: 1px solid var(--line); border-radius: 9px;
+         padding: 8px 14px; font-size: 12.5px; max-width: 84%; text-align: center; }
+#toast[hidden] { display: none; }
+
+/* ---------- the sheet ---------- */
+#scrim { position: fixed; inset: 0; z-index: 900; background: rgba(0,0,0,0.5); }
+#scrim[hidden] { display: none; }
+#sheet { position: fixed; z-index: 910; left: 0; right: 0; bottom: 0; max-height: 86dvh;
+         display: flex; flex-direction: column;
+         background: var(--panel); border-top: 1px solid var(--line);
+         border-radius: 16px 16px 0 0; }
+#sheet[hidden] { display: none; }
+.sheethead { display: flex; align-items: center; gap: 10px; flex: none;
+             padding: 14px var(--pad) 10px; border-bottom: 1px solid var(--line); }
+.sheethead h2 { flex: 1; margin: 0; font-size: 15px; font-weight: 650; }
+.sheethead button { width: 38px; padding: 0; font-size: 20px; line-height: 1; color: var(--dim); }
+.sheetbody { overflow-y: auto; padding: 14px var(--pad) calc(20px + env(safe-area-inset-bottom)); }
+.sheetpane[hidden] { display: none; }
+@media (min-width: 720px) {
+  /* A sheet the width of a laptop is a banner. Keep it a panel. */
+  #sheet { left: auto; right: 16px; bottom: 16px; width: 420px; border-radius: 14px;
+           border: 1px solid var(--line); max-height: calc(100dvh - 32px); }
+}
+
+/* ---------- saved plans ---------- */
+.planrow { display: flex; gap: 6px; margin-bottom: 8px; }
+.planrow input { flex: 1; min-width: 0; }
+.planlist { margin: 8px 0; }
+.planitem { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px;
+            background: var(--panel2); border: 1px solid var(--line); margin-bottom: 6px; }
+.planitem.on { border-color: var(--accent); }
+.planmain { flex: 1; min-width: 0; }
+.planmain b { display: block; font-size: 13px; font-weight: 600;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.planmain em { font-style: normal; color: var(--dim); font-size: 11px; }
+.planitem button { min-height: 32px; padding: 5px 10px; font-size: 12px; }
+.planx { width: 32px; padding: 0; font-size: 16px; color: var(--dim); }
+.syncrow { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.syncrow .hint { margin: 0; }
+
+/* ---------- controller ---------- */
+.substep { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+           color: var(--dim); margin: 16px 0 8px; display: flex; align-items: center; gap: 8px; }
+.substep .n { display: inline-flex; align-items: center; justify-content: center;
+              width: 18px; height: 18px; border-radius: 50%;
+              background: var(--panel2); color: var(--text); font-size: 11px; }
+.devrow { display: grid; gap: 6px; margin-bottom: 8px; }
+.devrow select:not([hidden]) { display: block; }
+.slots { display: flex; flex-direction: column; gap: 5px; }
+.slots .hint { padding: 8px 10px; margin: 0; }
+.slot { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 8px;
+        background: var(--panel2); border: 1px solid var(--line); cursor: pointer; }
+.slot.on { border-color: var(--accent); }
+.slot.unusable { opacity: 0.45; cursor: default; }
+.slotmain { flex: 1; min-width: 0; }
+.slotmain b { display: block; font-size: 12.5px; font-weight: 600;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slotmain em { font-style: normal; color: var(--dim); font-size: 11px; }
+.slotmeta { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.slotmeta.bad { color: var(--warn); }
+.slotview { min-height: 30px; padding: 4px 10px; font-size: 11.5px; }
+.slotview.on { background: var(--accent); border-color: var(--accent); color: #04101d; }
+.kmzpick { display: block; margin-top: 8px; font-size: 12px; color: var(--dim); cursor: pointer; }
+.kmzpick input { display: none; }
+.kmzpick span { display: block; border: 1px dashed var(--line); border-radius: 8px; padding: 9px 10px; }
+.kmzpick.loaded span { border-style: solid; border-color: var(--ok); color: var(--ok); }
+.xferbox { margin: 8px 0; }
+.xfer { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+.xsrc, .xdst { flex: 1; min-width: 0; font-size: 12px; }
+.xsrc b, .xdst b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xsrc em, .xdst em { font-style: normal; color: var(--dim); font-size: 11px; }
+.xarrow { color: var(--dim); flex: none; }
+
+details.help { margin-top: 14px; }
+details.help summary { cursor: pointer; color: var(--dim); font-size: 12px; }
+details.help p, details.help li { color: var(--dim); font-size: 12px; }
+code { background: var(--panel2); border-radius: 4px; padding: 1px 5px; font-size: 11.5px; }
+
+/* Thumb-sized where it is a thumb doing the pressing. */
+@media (max-width: 720px) {
+  button, input[type=text], select { min-height: 44px; font-size: 15px; }
+  .modes button { padding: 12px 8px; }
+  .barnav button { min-height: 36px; }
+  .pheight button, .px { width: 42px; }
+  .readout b { font-size: 16px; }
+  input[type=range] { height: 36px; }
 }

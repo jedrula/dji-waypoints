@@ -68,32 +68,29 @@ drops anything else, and says so.
 
 ### Walking the site
 
-The desk workflow draws boxes over satellite imagery, which works until the
+The desk workflow taps points over satellite imagery, which works until the
 thing you need is not visible from above: what is under the canopy, how tall the
-climbing frame is, the wire nobody can see. **Walk** surveys on foot instead —
-stop next to a thing, say how tall it is, tap **Here**. One stop is one obstacle.
+climbing frame is, the wire nobody can see. **Here** answers all three, because
+the phone already knows where you are standing -- stand next to the thing, say
+how tall it is, move on.
 
 Two things make it honest rather than a toy:
 
-- **The box is grown by the accuracy the phone reported**, so it encloses the
-  thing wherever inside that circle you actually stood. A ±6 m fix on a
-  medium-sized thing gives a 20 m box, not an 8 m one. Erring outward is the
-  safe direction for an obstacle — the cost is an altitude a few metres higher
-  than it needed to be.
-- **A fix looser than ±25 m is refused.** A 60 m square dropped because the
+- **The point's box is grown by the accuracy the phone reported**, so it
+  encloses the thing wherever inside that circle you actually stood. A +/-6 m fix
+  gives an 18 m box, not a 6 m one. Erring outward is the safe direction for an
+  obstacle -- the cost is an altitude a few metres higher than it needed to be.
+- **A fix looser than +/-25 m is refused.** A 60 m square dropped because the
   phone was unsure reads exactly like a real obstacle, vetoes altitudes that
   were fine, and says nothing about why.
 
-What you walked becomes the area to capture, and the lowest orbit ring is set
-just over the tallest thing you found.
-
-A crosshair sits under the zoom control while you are walking: it centres the
-map on where you are and leaves a dot with the accuracy circle around it, so you
-can see yourself against the box you are growing. On a phone the app does that
-by itself on arrival, since a phone is being carried to the site and a hardcoded
-city centre is no use there. Only on arrival, and only when the address bar has
-not already named somewhere: a shared plan, or a link with a centre in it, was
-written by someone who had looked at that place and meant it.
+A crosshair under the zoom control centres the map on you and leaves a dot with
+the accuracy circle around it, so you can see yourself against the footprint you
+are growing. On a phone the app does that by itself on arrival -- a phone is
+carried to the site, and a hardcoded city centre is no use there -- but only
+when the address bar has not already named somewhere: a shared plan, or a link
+with a centre in it, was written by someone who had looked at that place and
+meant it.
 
 ### Where the lowest ring sits
 
@@ -531,49 +528,90 @@ timestamp back. Sync merges by last-write-wins, so an undo carrying the old
 timestamp would lose to the very edit it was undoing, and the box would spring
 back on the next sync.
 
-## A plan is a mode, not a tab
+## One page, two kinds of tap
 
-The first slot in the menu is not a view called Plan, it is whichever plan you
-are on: **+ New plan** when you are on none, the plan's name when you are, and
-that name plus **· editing** while you are changing it. The pencil beside the
-name is the door in; **Save** and **Cancel** are the doors out.
+All you ever want from this app is one safe flight over a thing, and there are
+only two questions on the ground: **what must the camera see**, and **what must
+the aircraft not hit**. It used to ask them in three separate views -- a plan
+you drew a rectangle in, an obstacle list, and a walk -- which were the same job
+seen from three angles. They are one page now: a map you tap, and a band of
+controls above it.
 
-Viewing a plan and editing one are different screens on purpose, because a mode
-that changes nothing is not a mode. Viewing shows what the plan *is* — the
-stats, the passes, what it collides with. The controls that would change it only
-appear once you have picked up the pencil, and while they are out, Saved, Walk
-and Controller are taken off the menu: they are each a different subject, and
-coming back from one to a half-finished plan is worse than being asked to finish
-it first. Obstacles stays, because the clearance check and the coverage score
-both read the boxes — one you forgot to draw is part of this plan.
+Tapping the map places a point. Which kind depends on which of the two buttons
+is lit, and that is the only mode in the app:
 
-Nothing tracks which mode you are in. A plan on screen that differs from the
-plan in the library **is** an edit in progress, and `getCode()` is already that
-comparison — the same string the library stores and a link carries. The only
-latch is the pencil itself, for the moment after you press it and before you
-have typed anything. See `js/planmode.js`.
+- **Capture** — what the mission has to see. The footprint of these points is
+  what gets flown, and the tallest of them is how tall the subject is.
+- **Obstacle** — what the flight is checked against. Each is a small box the
+  clearance check and the coverage score both read.
 
-Two consequences worth knowing. The menu never takes away the view you are
-standing in, so walking a site — where every stop grows the box, and so makes
-the plan an edit in progress — does not throw you out of the survey at the first
-stop; the gate closes when you leave for the plan. And which plan you are on
-rides in the undo snapshot alongside the rectangle and the controls, because it
-is not derived from either: without it, cmd+Z would hand you back the same box
-detached from the plan it came out of, and the next Save would fork a copy.
+Both carry a height, because in both cases height is the question. A point
+starts at 3 m -- a hedge, a van, a garden wall, the commonest thing you point at
+and low enough that accepting it by mistake is not dangerous -- and the bar over
+the map sets it, on the point you just placed or any earlier one. A wide thing
+is several taps, the same way a wide capture is; there is no second gesture for
+drawing an outline.
 
-**Saving onto the controller.** Installing a plan records which mission folder
-it went into, so from then on Save on that plan writes the library copy *and*
-overwrites that same mission — the button says `Save & overwrite on controller`
-when the controller is on the cable, and says why it did not when it is not.
-That memory is local, in `dji.planSlots`, and deliberately not on the plan
-record that syncs: a mission UUID is a fact about the controller plugged into
-one machine, and sending it to the phone would only offer to overwrite a slot
-the phone has never seen.
+**A tap is a tap wherever the coordinates came from.** The button marked *Here*
+places the same point at the position the phone reports, grown by the accuracy
+it admits to, which is what walking a site now is. There is no separate walk
+mode, because a stop was never anything but a tap you made with your feet.
 
-A mission cannot come the other way. `js/kmzread.js` recovers a flight from a
-KMZ — waypoints, heights, gimbal angles — but the planner only ever wrote
-missions, and the box and the dozen numbers that generated one are not in the
-file. So a mission read off the controller can be looked at, and not edited.
+### What ten taps mean
+
+The points define a footprint, and `js/shape.js` is the one place that turns one
+into the other. A convex hull is the first answer: a tight cluster of taps reads
+as an object, a spread-out set as an area, and the same gesture covers both.
+Grid lines are then cut to that footprint rather than flown across its bounding
+box -- cutting the LINE rather than dropping shots off a fixed lattice is what
+keeps the spacing right, and it puts a shot on each cut end, which is the edge
+of the thing and where overlap is thinnest.
+
+It is a table rather than a rule because which shape is right is not settled.
+A triangle of taps flies 56% of the grid its bounding box would, for 50% of the
+area -- the difference being the edge lines that still have to be flown -- and
+whether that is the right trade is a question for the aircraft rather than for
+an argument. A second answer is a second entry in `SHAPES`, and the picker in
+Advanced already offers the bounding box for comparison.
+
+### The flight does not draw itself
+
+Tapping out a site and flying it are two different moments. While you are still
+placing points the flight is noise on top of the thing you are trying to look
+at -- and computing one per tap is several hundred waypoints and a coverage
+score thrown away on the next tap. So the map shows the footprint, and the
+readout is a button: **Plan the flight**. Press it and the route, the numbers
+and the verdict appear together. Change anything that would be flown and they
+come straight back down, because what is on screen must always be either the
+plan for these taps or no plan at all, never a stale one.
+
+### Testing the walk without walking
+
+The half of this app that matters most is the half you use standing in a field,
+and a laptop indoors either has no fix at all or has one from a Wi-Fi lookup
+several kilometres and several minutes away. Neither exercises the code.
+
+`js/gpsmock.js` is a pretend receiver, and it is **not part of the app**:
+nothing imports it at load time, so on a phone, on GitHub Pages and in every
+ordinary run the file is never even fetched. The address bar turns it on.
+
+    ?mockgps                 drop the puck in the middle of the map
+    ?mockgps=50.06,19.93     put it somewhere specific
+    &acc=12                  report +/-12 m instead of the default +/-4
+    &age=180                 report a fix three minutes old, for the stale path
+
+Drag the puck to walk. Everything that asks the browser where you are gets its
+position and its accuracy, so a point's box is grown by the number you chose and
+the "too vague to place" refusal can be provoked on purpose by asking for +/-30.
+
+### What a rectangle became
+
+Every plan saved before this carried a rectangle, and a rectangle is its four
+corners -- so a v1 code opens as exactly the footprint it always described, with
+v1's subject-height slider becoming the height of each corner. Nothing in the
+library was lost, and nothing about the obstacle records changed either: a
+tapped obstacle is stored as the small box it always was, which is why the sync
+service needed no redeploy.
 
 ## Saved plans, and sync between devices
 

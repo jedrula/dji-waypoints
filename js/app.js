@@ -113,6 +113,7 @@ function setView(name) {
   // map, the imagery button paints the ground under the 3D.
   $('routeToggle').hidden = !showMap;
   $('ground').hidden = !show3d;
+  showRecentre();
   if (name === 'split') setSplit(splitPct, { store: false });
   if (showMap) map.invalidateSize();
   if (show3d) view3d.draw();
@@ -208,7 +209,34 @@ function readUrl() {
     map.setView([lat, lon], zoom, { animate: false });
   }
 }
-map.on('moveend', writeUrl);
+map.on('moveend', () => { writeUrl(); showRecentre(); });
+
+// Pan far enough and the points you are working on are somewhere off the edge,
+// with nothing on screen to say which way. One tap puts them back.
+//
+// It appears only when they are actually lost. A control that offers to take
+// you where you already are is clutter, and clutter on a map you are tapping
+// costs more than it does anywhere else -- so the test is whether the middle of
+// the site is still on screen at all.
+function siteBounds() {
+  const pts = site.capture();
+  if (!pts.length) return null;
+  return L.latLngBounds(pts.map((p) => [p.lat, p.lon]));
+}
+
+function showRecentre() {
+  const b = siteBounds();
+  $('recentre').hidden = !b || activeView === '3d' || map.getBounds().contains(b.getCenter());
+}
+
+$('recentre').addEventListener('click', () => {
+  const b = siteBounds();
+  if (!b) return;
+  // pad() keeps a single point from zooming to the maximum, and gives a real
+  // site a margin to sit in.
+  map.fitBounds(b.pad(0.35), { animate: false, maxZoom: 20 });
+  showRecentre();
+});
 
 /* ---------- controls ---------- */
 const controls = {
@@ -292,6 +320,7 @@ const site = createSite({
     renderPoints();
     computePlan();
     renderIdentity();
+    showRecentre();
     if (!replaced) history.commit();
   },
 });
@@ -458,7 +487,11 @@ function addPoint(kind, id, at, height, bad) {
       iconSize: [size, size],
       iconAnchor: [size / 2, size / 2],
     }),
-    draggable: kind === 'capture',
+    // Both kinds drag. You place them by eye against a photograph, and being
+    // able to nudge one is the difference between a tap being a commitment and
+    // a tap being a first guess. There was no reason for an obstacle to be the
+    // exception beyond nobody having written the move.
+    draggable: true,
   }).addTo(layers.points);
   m.on('click', (e) => {
     L.DomEvent.stopPropagation(e);
@@ -467,12 +500,12 @@ function addPoint(kind, id, at, height, bad) {
     renderPoints();
     renderPointBar();
   });
-  if (kind === 'capture') {
-    m.on('dragend', () => {
-      const ll = m.getLatLng();
-      site.moveCapture(id, ll.lat, ll.lng);
-    });
-  }
+  m.on('dragstart', () => { state.selected = { kind, id }; renderPointBar(); });
+  m.on('dragend', () => {
+    const ll = m.getLatLng();
+    if (kind === 'capture') site.moveCapture(id, ll.lat, ll.lng);
+    else site.moveObstacle(id, ll.lat, ll.lng);
+  });
 }
 
 function selectedPoint() {

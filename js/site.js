@@ -168,6 +168,19 @@ export function createSite({ onChange = () => {}, onSync = () => {}, storage, fe
       changed({ obstacles: true });
     },
 
+    // Moving one keeps its size and height and puts the same box somewhere
+    // else -- the accuracy it was originally grown by is already baked into
+    // the span, and dragging it does not make the phone any surer.
+    moveObstacle(id, lat, lon) {
+      const o = obstacles.list().find((x) => x.id === id);
+      if (!o) return;
+      obstacles.put({
+        ...o,
+        ...normalizeRect(sampleRect({ lat, lon }, spanMOf(o))),
+      });
+      changed({ obstacles: true });
+    },
+
     removeObstacle(id) {
       obstacles.remove(id);
       changed({ obstacles: true });

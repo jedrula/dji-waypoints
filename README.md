@@ -628,6 +628,18 @@ anything but a tap you made with your feet. The button used to say *Here*, which
 reads as "here on the map, where I tapped" -- the other gesture entirely, and
 the wrong one.
 
+**Getting back to what you are working on.** Pan far enough and your points are
+off the edge with nothing on screen to say which way. A frame button on the map
+puts them back in one tap, and appears only when the middle of the site has
+actually left the view -- a control offering to take you where you already are
+is clutter, and clutter on a map you are tapping costs more than it does
+anywhere else.
+
+**Both kinds of point drag.** You place them by eye against a photograph, so a
+tap is a first guess rather than a commitment. An obstacle keeps its size and
+height when it moves: the accuracy it was originally grown by is already baked
+into its span, and dragging it does not make the phone any surer.
+
 **A double-click zooms and must not leave points behind.** Leaflet reports both
 clicks of a double-click as clicks, so zooming in used to drop two points on top
 of each other, exactly where you were trying to look more closely. A tap now

@@ -240,6 +240,10 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
    altitude scale down that same left edge -- so it takes the right-hand slot
    the basemap picker leaves empty whenever the 3D is up. */
 #ground { top: 46px; left: auto; right: 10px; }
+/* Third in the left stack, and only there when you have lost the site: a
+   control offering to take you somewhere you already are is just clutter. */
+#recentre { top: 180px; }
+#recentre.on, #recentre:hover { color: var(--capture); }
 .maptoggle:hover { color: var(--text); }
 
 /* Standing next to the thing rather than looking at it on a map: one big

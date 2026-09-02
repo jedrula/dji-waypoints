@@ -1205,6 +1205,36 @@ console.log('\nwalking the site');
   ok('nothing on site sets no floor', ringFloor([], 5) === null);
 }
 
+// The failure this guards against destroyed real data: the first undo snapshot
+// is taken before the startup sync has pulled anything down, so restoring it
+// deleted every synced obstacle -- and the deletes travelled to every device.
+{
+  const snapOf = (obstacles) => ({ capture: [], ui: {}, obstacles });
+  const rebase = (snap, before, after) => {
+    const had = new Set(before.obstacles.map((o) => o.id));
+    const arrived = after.obstacles.filter((o) => !had.has(o.id));
+    if (!arrived.length) return snap;
+    const ids = new Set(snap.obstacles.map((o) => o.id));
+    return { ...snap, obstacles: [...snap.obstacles, ...arrived.filter((o) => !ids.has(o.id))] };
+  };
+  let world = [];
+  const h = createHistory({
+    snapshot: () => snapOf(world.map((o) => ({ ...o }))),
+    restore: (snap) => { world = snap.obstacles.map((o) => ({ ...o })); },
+    rebase,
+  });
+  // Startup: the stack's first snapshot is empty because the sync is in flight.
+  world = [{ id: 'a' }, { id: 'b' }];        // ... and then five arrive
+  h.refresh();                                // which is what must be told
+  world = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+  h.commit();                                 // you draw one yourself
+  h.undo();                                   // and take it straight back
+  ok('undoing your own box does not delete what arrived from the other device',
+     world.map((o) => o.id).sort().join() === 'a,b', world.map((o) => o.id).join());
+  ok('and the box you drew is gone, which is what undo was for',
+     !world.some((o) => o.id === 'c'));
+}
+
 console.log('\nground imagery');
 {
   const lat = 50.0614;

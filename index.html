@@ -68,6 +68,14 @@
         <circle cx="3" cy="18" r="1.6" fill="currentColor"/>
       </svg>
     </button>
+    <button id="ground" type="button" class="maptoggle" hidden
+            title="Paint the map imagery onto the ground in the 3D view">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+           stroke-width="1.7" stroke-linejoin="round">
+        <path d="M3 8.5 12 4l9 4.5-9 4.5z"/>
+        <path d="M3 13.5 12 18l9-4.5"/>
+      </svg>
+    </button>
     <button id="hereBtn" type="button" class="here" hidden>Here</button>
 
     <!-- The point you last touched. Sits over the map because the point is on
@@ -178,10 +186,6 @@
           <option value="fly">DJI Fly (Mini / Air / Mavic)</option>
           <option value="pilot2">DJI Pilot 2 (enterprise)</option>
         </select>
-      </label>
-      <label class="row">
-        <span>Imagery on the 3D ground</span>
-        <span class="ctl"><input type="checkbox" id="ground"></span>
       </label>
       <div class="passlist" id="passList"></div>
       <p class="hint" id="sizeHint"></p>

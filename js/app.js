@@ -22,7 +22,7 @@
 import { CAMERAS, gsdCm } from './camera.js';
 import { planMission, proposePlan, splitMission, pointsFromRect, DEFAULTS, DJI_FLY_MAX_WAYPOINTS } from './planner.js';
 import { SHAPES, DEFAULT_SHAPE, footprintOf, polygonArea } from './shape.js';
-import { frame } from './geo.js';
+import { frame, mPerDegLat, mPerDegLon } from './geo.js';
 import { buildKmz } from './wpml.js';
 import { createView3D } from './view3d.js';
 import { scoreCoverage } from './coverage.js';
@@ -32,7 +32,7 @@ import { initPlans } from './plansui.js';
 import { routeFromRead } from './route.js';
 import { createBasemaps } from './basemap.js';
 import { createSite, pointOf, spanMOf, DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS } from './site.js';
-import { localBox } from './obstacles.js';
+import { localBox, overlaps } from './obstacles.js';
 import { checkObstacles, clearingAltitude } from './collide.js';
 import { createHistory } from './history.js';
 import { judgeFix, parseHeight } from './walk.js';
@@ -109,6 +109,10 @@ function setView(name) {
   $('splitter').hidden = name !== 'split';
   $('basetabs').hidden = !showMap;
   $('findme').hidden = !showMap;
+  // Each belongs to the view it acts on: the route toggle hides clutter on the
+  // map, the imagery button paints the ground under the 3D.
+  $('routeToggle').hidden = !showMap;
+  $('ground').hidden = !show3d;
   if (name === 'split') setSplit(splitPct, { store: false });
   if (showMap) map.invalidateSize();
   if (show3d) view3d.draw();
@@ -171,6 +175,7 @@ for (const btn of document.querySelectorAll('#viewtabs button')) {
 function pushGround() {
   if (!ready) return;
   view3d.setGround(basemaps.groundSpec(groundOn));
+  $('ground').classList.toggle('on', groundOn);
 }
 
 /* ---------- the address bar is where the view lives ---------- */
@@ -269,10 +274,18 @@ const clearance = () => +$('clearance').value;
 const site = createSite({
   onSync: ({ pulled, error, quiet }) => {
     if (error) { if (!quiet) toast(`Obstacles not synced — ${error}`); return; }
-    if (pulled) {
-      toast(`${pulled} obstacle${pulled === 1 ? '' : 's'} arrived from your other device.`);
-      renderIdentity();
-    }
+    if (!pulled) return;
+    // A box that arrived from the other device is not an action taken here, so
+    // it is not one to undo -- but the stack HAS to be told, or the next undo
+    // reverts it by accident. Worse than by accident: restoring a snapshot
+    // deletes every obstacle the snapshot does not contain, and the first
+    // snapshot is taken at startup BEFORE the sync has pulled anything down.
+    // One undo then wipes the synced list and the delete travels to every
+    // device. `rebase` in createHistory exists for exactly this and was not
+    // being called; refresh is what calls it.
+    if (ready) history.refresh();
+    toast(`${pulled} obstacle${pulled === 1 ? '' : 's'} arrived from your other device.`);
+    renderIdentity();
   },
   onChange: ({ replaced = false } = {}) => {
     if (!ready) return;
@@ -283,13 +296,38 @@ const site = createSite({
   },
 });
 
+// The obstacle list is global and synced, so it holds every box you have ever
+// drawn -- including ones in another country. Only the ones this flight could
+// reach have anything to do with this plan: without the filter a 21 m tree
+// beside a church five hundred kilometres away became a subject of a plan in
+// Krakow, got a dome of its own, and turned a twelve minute flight into four
+// hundred and seventy-eight kilometres.
+//
+// Generous, because the surround ring stands well outside the footprint and a
+// thing just past the edge is still something to fly around; nowhere near
+// generous enough to reach the next town.
+const NEARBY_M = 400;
+
+function nearbyObstacles() {
+  const pts = site.capture();
+  if (!pts.length) return [];
+  const lat0 = pts.reduce((t, q) => t + q.lat, 0) / pts.length;
+  const box = {
+    north: Math.max(...pts.map((q) => q.lat)) + NEARBY_M / mPerDegLat(lat0),
+    south: Math.min(...pts.map((q) => q.lat)) - NEARBY_M / mPerDegLat(lat0),
+    east: Math.max(...pts.map((q) => q.lon)) + NEARBY_M / mPerDegLon(lat0),
+    west: Math.min(...pts.map((q) => q.lon)) - NEARBY_M / mPerDegLon(lat0),
+  };
+  return site.obstacles().filter((o) => overlaps(o, box));
+}
+
 // Obstacles go to the planner too, not just to the collision check: they are
 // tall things, and the flight that goes round a tall thing is the flight that
 // photographs it.
 const siteForPlanner = () => ({
   points: site.capture(),
   shape: $('shape').value,
-  obstacles: site.obstacles().map((o) => ({ ...pointOf(o), height: o.height, span: spanMOf(o) })),
+  obstacles: nearbyObstacles().map((o) => ({ ...pointOf(o), height: o.height, span: spanMOf(o) })),
 });
 
 /* ---------- placing and editing points ---------- */
@@ -480,7 +518,7 @@ function settleSoon() {
     if (!state.mission) return;
     if (!tuned) autoFit();
     if (!state.mission) return;
-    const boxes = site.obstacles().map((o) => localBox(o, state.mission.frame));
+    const boxes = nearbyObstacles().map((o) => localBox(o, state.mission.frame));
     state.coverage = scoreCoverage(state.mission, { maxCameras: 220, boxes });
     // Tagged so a later replan can tell whether this score is still about the
     // flight on screen, rather than leaving yesterday's number sitting there.
@@ -529,7 +567,7 @@ function measure() {
 
 function computePlan() {
   readOuts();
-  clearTimeout(scoreTimer);
+  clearTimeout(settleTimer);
   const points = site.capture();
   if (!points.length) {
     state.mission = null;
@@ -547,7 +585,7 @@ function computePlan() {
 
   const p = paramsFromUi(uiValues());
   p.subjectClearance = clearance();
-  const boxes0 = site.obstacles();
+  const boxes0 = nearbyObstacles();
 
   try {
     state.mission = planMission(siteForPlanner(), p, cam);
@@ -770,7 +808,7 @@ function showDeviceRoute(src) {
   if (!state.onDevice) {
     view3d.setMission(state.mission, state.coverage);
     view3d.setObstacles(
-      state.mission ? graded(site.obstacles().map((o) => localBox(o, state.mission.frame))) : [],
+      state.mission ? graded(nearbyObstacles().map((o) => localBox(o, state.mission.frame))) : [],
       state.hazard?.legs ?? [],
     );
     return;
@@ -780,7 +818,7 @@ function showDeviceRoute(src) {
   // Ungraded: every grade on screen belongs to the plan, and colouring someone
   // else's route with the plan's verdict would be a lie in the most expensive
   // possible place.
-  view3d.setObstacles(site.obstacles().map((o) => localBox(o, state.onDevice.frame)), []);
+  view3d.setObstacles(nearbyObstacles().map((o) => localBox(o, state.onDevice.frame)), []);
   map.fitBounds(L.latLngBounds(state.onDevice.waypoints.map((w) => [w.lat, w.lon])),
     { padding: [40, 40], maxZoom: 19 });
 }
@@ -1108,7 +1146,9 @@ $('clearance').addEventListener('input', () => { computePlan(); });
 $('clearance').addEventListener('change', () => {
   try { localStorage.setItem(CLEARANCE_KEY, $('clearance').value); } catch { /* private window */ }
 });
-$('ground').addEventListener('change', () => { groundOn = $('ground').checked; pushGround(); writeUrl(); });
+// A button, not a checkbox: it belongs over the 3D view it paints, not in a
+// sheet you have to go and open.
+$('ground').addEventListener('click', () => { groundOn = !groundOn; pushGround(); writeUrl(); });
 $('syncNow').addEventListener('click', () => site.sync().then(renderIdentity));
 
 /* ---------- startup ---------- */
@@ -1139,11 +1179,13 @@ ready = true;
 readUrl();
 setMode('capture');
 setShowRoute(showRoute);
+setView(activeView);   // put the map's own controls where this view wants them
 if (fromHash) applyPlan(fromHash);
 renderPoints();
 renderReadout();
 renderIdentity();
 site.start();        // what the other device drew is part of this plan's world
+history.refresh();   // and it must be in the stack's idea of now before any undo
 pushGround();
 urlFrozen = false;
 writeUrl();

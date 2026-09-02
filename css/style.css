@@ -234,6 +234,12 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
              background: rgba(16,20,24,0.9); color: var(--dim); }
 .maptoggle svg { width: 20px; height: 20px; }
 .maptoggle.on { color: var(--accent); border-color: #3d4753; }
+.maptoggle[hidden] { display: none; }
+/* The route toggle belongs to the map, so it sits with the map's own controls
+   on the left. Imagery belongs to the 3D view, and the 3D view draws its
+   altitude scale down that same left edge -- so it takes the right-hand slot
+   the basemap picker leaves empty whenever the 3D is up. */
+#ground { top: 46px; left: auto; right: 10px; }
 .maptoggle:hover { color: var(--text); }
 
 /* Standing next to the thing rather than looking at it on a map: one big

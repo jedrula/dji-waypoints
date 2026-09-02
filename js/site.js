@@ -55,12 +55,45 @@ export function spanMOf(o) {
   return Math.round((o.north - o.south) * 111320);
 }
 
-export function createSite({ onChange = () => {}, storage, fetchImpl, endpoint } = {}) {
+export function createSite({ onChange = () => {}, onSync = () => {}, storage, fetchImpl, endpoint } = {}) {
   // Capture points are the plan; obstacles are the world the plan flies through.
   let capture = [];
   const obstacles = createObstacleStore({ storage, fetchImpl, endpoint });
 
-  const changed = (how = {}) => onChange(how);
+  // One round trip at a time and in order: a save followed by a delete has to
+  // reach the service in that order, or the delete is the one that gets lost.
+  let queue = Promise.resolve();
+  let pending = null;
+
+  function sync({ quiet = false } = {}) {
+    queue = queue.then(async () => {
+      if (!obstacles.endpoint()) return;
+      try {
+        const { total, pulled } = await obstacles.sync();
+        if (pulled) changed({ obstacles: true, replaced: true });
+        onSync({ total, pulled, quiet });
+      } catch (e) {
+        // The write already landed locally, so this is never lost work -- the
+        // next sync sends it. Say so rather than looking like the edit failed.
+        onSync({ error: e.message, quiet });
+      }
+    });
+    return queue;
+  }
+
+  // Obstacles sync by themselves, because a tree you marked on the phone is
+  // only useful on the Mac that has the cable. Coalesced, though: holding the
+  // + button on a height is one edit to a person and a dozen writes to the
+  // store, and the service does not need to hear about each of them.
+  function syncSoon() {
+    clearTimeout(pending);
+    pending = setTimeout(() => sync({ quiet: true }), 900);
+  }
+
+  const changed = (how = {}) => {
+    onChange(how);
+    if (how.obstacles && !how.replaced) syncSoon();
+  };
 
   return {
     /* ---------- what to capture ---------- */
@@ -154,6 +187,10 @@ export function createSite({ onChange = () => {}, storage, fetchImpl, endpoint }
     },
 
     endpoint: obstacles.endpoint,
-    sync: obstacles.sync,
+    sync,
+    // Called once at startup: whatever the other device drew is part of the
+    // world this plan is checked against, and it has to arrive before the
+    // first "does this flight clear everything" is worth anything.
+    start: () => sync({ quiet: true }),
   };
 }

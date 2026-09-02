@@ -205,6 +205,13 @@ const clearance = () => +$('clearance').value;
 
 /* ---------- what is on the ground ---------- */
 const site = createSite({
+  onSync: ({ pulled, error, quiet }) => {
+    if (error) { if (!quiet) toast(`Obstacles not synced — ${error}`); return; }
+    if (pulled) {
+      toast(`${pulled} obstacle${pulled === 1 ? '' : 's'} arrived from your other device.`);
+      renderIdentity();
+    }
+  },
   onChange: ({ replaced = false } = {}) => {
     if (!ready) return;
     renderPoints();
@@ -728,12 +735,12 @@ window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && openSheet)
 
 /* ---------- toast ---------- */
 let toastTimer = null;
-function toast(text) {
+function toast(text, { sticky = false } = {}) {
   const el = $('toast');
   el.textContent = text;
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 2600);
+  if (!sticky) toastTimer = setTimeout(() => { el.hidden = true; }, 2600);
 }
 
 /* ---------- where you are ---------- */
@@ -754,15 +761,22 @@ const goToFix = ({ lat, lon }) => map.setView([lat, lon], Math.max(map.getZoom()
 
 let finding = false;
 async function findMe({ quiet = false, then = null } = {}) {
-  if (finding) return null;
+  // Locating takes a moment and a second press cannot make it faster, so say
+  // that rather than swallowing the tap and looking broken.
+  if (finding) { toast('Still looking for a position…'); return null; }
   finding = true;
   $('findme').classList.add('busy');
   $('hereBtn').disabled = true;
   try {
-    const fix = await bestFix({ onProgress: (f) => { if (!quiet) toast(`±${f.accuracy.toFixed(0)} m so far…`); } });
+    if (!quiet) toast('Asking your device where you are…', { sticky: true });
+    const fix = await bestFix({
+      onProgress: (f) => { if (!quiet) toast(`±${f.accuracy.toFixed(0)} m so far…`, { sticky: true }); },
+    });
     showFix(fix);
     if (!then) goToFix(fix);
     if (quiet) toast(`Map centred where you are (±${fix.accuracy.toFixed(0)} m).`);
+    else if (!then) toast(`You are here — ±${fix.accuracy.toFixed(0)} m`
+      + `${fix.age > STALE_MS ? `, from a fix ${Math.round(fix.age / 60000)} min old` : ''}.`);
     then?.(fix);
     return fix;
   } catch (err) {
@@ -945,7 +959,7 @@ $('clearance').addEventListener('change', () => {
   try { localStorage.setItem(CLEARANCE_KEY, $('clearance').value); } catch { /* private window */ }
 });
 $('ground').addEventListener('change', () => { groundOn = $('ground').checked; pushGround(); writeUrl(); });
-$('syncNow').addEventListener('click', () => site.sync().then(renderIdentity).catch(() => {}));
+$('syncNow').addEventListener('click', () => site.sync().then(renderIdentity));
 
 /* ---------- startup ---------- */
 applyUiValues({
@@ -978,6 +992,7 @@ if (fromHash) applyPlan(fromHash);
 renderPoints();
 renderReadout();
 renderIdentity();
+site.start();        // what the other device drew is part of this plan's world
 pushGround();
 urlFrozen = false;
 writeUrl();

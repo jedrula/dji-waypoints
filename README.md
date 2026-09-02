@@ -241,6 +241,32 @@ Two shutter modes:
 
 ## Scoring coverage before you fly
 
+**What the scorer thinks the site is.** It needs surfaces to score, and it used
+to invent them: five blocks in a crossroads, sized off the bounding box and the
+one global subject height, because that was all the app knew. It was a
+reasonable fiction then and it is fiction now that you tap the actual things --
+it scored somewhere you never described, and the 3D view drew an imaginary town
+on top of the real site.
+
+The proxy is what you tapped. An outline of three or more points is ONE solid,
+as tall as the tallest point on it; one or two points are a small cube each,
+because two taps outline nothing. A point at zero height contributes no cube at
+all, which is right rather than a gap: it marks ground, the ground is sampled
+anyway, and a flat site should score as a flat site.
+
+A cube per point is the obvious answer and is wrong, which is worth writing down
+because it looks so reasonable: the four corners of a building become four
+pillars, and the inward faces of pillars are surfaces no orbit can ever see. Try
+it and wall coverage pins at exactly 50% however many rings you fly -- the
+scorer goes blind to the one thing it exists to measure.
+
+Changing the model moved the numbers, and the tests moved with it: what they
+assert now is which plan beats which, not thresholds that only ever meant
+something against the invented geometry. Ring diminishing-returns is measured on
+WALLS specifically, since that is the only surface a ring is flown for and the
+overall score mixes in tops and ground that no ring can help.
+
+
 `js/coverage.js` scores a plan geometrically: it builds a rough proxy of the
 site, samples every surface, and works out how many cameras actually see each
 sample, from how wide a spread of directions, and whether any of them is from

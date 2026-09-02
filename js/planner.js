@@ -593,6 +593,7 @@ export function planMission(site, opts, cam) {
     cam,
     site: { points, shape },
     hull,                       // the footprint, in local metres
+    points: local,              // the taps themselves, in local metres, with heights
     frame: f,
     centre: f.toLatLon(0, 0),
     sizeX: halfX * 2,

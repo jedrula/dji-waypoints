@@ -252,6 +252,59 @@ Two shutter modes:
   `multipleDistance` trigger for the whole route. ~10× fewer waypoints. Fewer
   DJI Fly builds are confirmed to honour this, so check the first flight.
 
+## What is already standing here
+
+Tapping every tree round a site is work a person gives up on halfway, and the
+thing that actually brings a drone down -- a power line -- is invisible from
+above. OpenStreetMap knows where they are. **Import what is here** in Advanced
+pulls buildings, trees and power lines for whatever is on screen.
+
+What it does not know is how tall they are. Measured over a chunk of Wroclaw:
+
+    buildings   83% carry a height or a storey count
+    trees       1.2% carry a height, 0% a crown diameter
+    towers      0% carry a height
+
+So this imports geometry with confidence and heights with a warning. Anything
+invented gets a per-class assumption -- 110 kV tower 40 m, distribution pole
+10 m, street tree 18 m, untagged building 9 m -- and is marked as invented: the
+name carries a `~`, and the band counts them. Correcting the height yourself
+clears the mark, because then it is yours. A height guessed too low is not a
+bad photograph, it is a crash, and the app must never quietly claim to know one.
+
+Power spans are chopped into pieces of at most 25 m before becoming boxes.
+Obstacles are axis-aligned, so one box round a 300 m diagonal run would wall off
+a 300 m square of sky.
+
+### Two lists, not one
+
+Imported things are flown around and never orbited -- eighty street trees are
+eighty domes and no battery, and you did not ask for any of them. That made a
+safety bug the first time it was written, because "what do I orbit" and "what
+must I not hit" were the same list: dropping the imports from the subjects
+dropped them from the per-station ring floor too, and the domes flew through the
+buildings at three metres. `subjectsOf` and `hazardsOf` are separate now. In the
+Wroclaw block above that is the difference between ten strikes and none.
+
+The same class of bug lived in auto-fit, which squared every obstacle off to one
+span: a 40 x 12 m building measured as a 12 m square, blessed an altitude, and
+handed back a plan the collision check then reported strikes against. Auto-fit
+measures the boxes the check measures now.
+
+### Where the heights should really come from
+
+Poland publishes nationwide LiDAR free (GUGiK). A DSM minus a DTM is a
+normalised height model -- literally how tall everything is, trees included,
+which is exactly what OSM is missing and exactly what bites you under canopy.
+That is the right source for these numbers and it is not wired up; the per-class
+guesses are a stopgap that announces itself as one.
+
+Monocular depth estimation on a nadir photograph is not the answer, tempting as
+it looks. Those models give relative depth rather than metres, and more to the
+point the height is barely in a top-down image at all -- what encodes it is
+shadow length and the lean of a building away from nadir, not the cues a depth
+model uses. It would produce a confident, plausible, meaningless surface.
+
 ## Scoring coverage before you fly
 
 **What the scorer thinks the site is.** It needs surfaces to score, and it used

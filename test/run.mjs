@@ -1255,6 +1255,54 @@ console.log('\nwalking the site');
      !world.some((o) => o.id === 'c'));
 }
 
+console.log('\nwhat is already standing here');
+{
+  const { toObstacles, ASSUMED } = await import('../js/osm.js');
+  const at = (lat, lon) => ({ lat, lon });
+  const found = toObstacles([
+    // A building with a real height, one with storeys, one with neither.
+    { tags: { building: 'apartments', height: '17.12', 'addr:street': 'Rozbrat', 'addr:housenumber': '14' },
+      geometry: [at(51.1, 17.05), at(51.1004, 17.05), at(51.1004, 17.0506), at(51.1, 17.0506)] },
+    { tags: { building: 'yes', 'building:levels': '5' },
+      geometry: [at(51.101, 17.05), at(51.1014, 17.05), at(51.1014, 17.0506), at(51.101, 17.0506)] },
+    { tags: { building: 'garage' },
+      geometry: [at(51.102, 17.05), at(51.1021, 17.05), at(51.1021, 17.0502), at(51.102, 17.0502)] },
+    // Trees: one measured, one not.
+    { tags: { natural: 'tree', height: '30', species: 'Platanus acerifolia' }, lat: 51.103, lon: 17.051 },
+    { tags: { natural: 'tree' }, lat: 51.1031, lon: 17.0511 },
+    // A 110 kV span running diagonally for about 300 m.
+    { tags: { power: 'line', voltage: '110000' },
+      geometry: [at(51.104, 17.052), at(51.1058, 17.0548)] },
+  ]);
+
+  const byLabel = (t) => found.filter((f) => f.label.includes(t));
+  ok('a tagged building keeps its own height',
+     byLabel('Rozbrat')[0].height === 17.12 && byLabel('Rozbrat')[0].assumed === false);
+  ok('storeys become metres rather than being thrown away',
+     byLabel('Building')[0].height === 16 && byLabel('Building')[0].assumed === false);
+  ok('a building with neither is assumed and says so',
+     byLabel('garage')[0].height === ASSUMED.building && byLabel('garage')[0].assumed === true);
+  ok('a measured tree is not overwritten by the default',
+     byLabel('Platanus')[0].height === 30 && byLabel('Platanus')[0].assumed === false);
+  ok('an untagged tree gets the assumed height, marked',
+     byLabel('Tree')[0].height === ASSUMED.tree && byLabel('Tree')[0].assumed === true);
+
+  // The reason spans are chopped: one box round a 300 m diagonal would wall off
+  // a 300 m square of sky.
+  const span = byLabel('110 kV');
+  ok(`a long span becomes many short boxes (${span.length})`, span.length > 8);
+  ok('every piece stands at the height its voltage implies',
+     span.every((b) => b.height === ASSUMED.powerHigh && b.assumed === true));
+  const widest = Math.max(...span.map((b) => (b.north - b.south) * 111132));
+  ok(`and no piece is a huge box (${widest.toFixed(0)} m across)`, widest < 30, `${widest}`);
+
+  // Nothing may be imported without a decision about its height.
+  ok('everything imported carries an explicit assumed flag',
+     found.every((f) => typeof f.assumed === 'boolean' && f.height > 0));
+  ok('the cap is honoured', toObstacles(Array.from({ length: 50 }, () => (
+    { tags: { natural: 'tree' }, lat: 51.1, lon: 17.05 })), { max: 10 }).length === 10);
+}
+
 console.log('\nground imagery');
 {
   const lat = 50.0614;

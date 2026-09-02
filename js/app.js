@@ -31,7 +31,8 @@ import { encodePlan, decodePlan } from './share.js';
 import { initPlans } from './plansui.js';
 import { routeFromRead } from './route.js';
 import { createBasemaps } from './basemap.js';
-import { createSite, pointOf, spanMOf, DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS } from './site.js';
+import { createSite, pointOf, spanMOf, spansOf, isEstimated, isImported, labelOf,
+  DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS } from './site.js';
 import { localBox, overlaps } from './obstacles.js';
 import { checkObstacles, clearingAltitude } from './collide.js';
 import { createHistory } from './history.js';
@@ -421,7 +422,14 @@ function nearbyObstacles() {
 const siteForPlanner = () => ({
   points: site.capture(),
   shape: $('shape').value,
-  obstacles: nearbyObstacles().map((o) => ({ ...pointOf(o), height: o.height, span: spanMOf(o) })),
+  obstacles: nearbyObstacles().map((o) => {
+    const sp = spansOf(o);
+    return {
+      ...pointOf(o), height: o.height,
+      span: Math.max(sp.x, sp.y), spanX: sp.x, spanY: sp.y,
+      capture: !isImported(o),
+    };
+  }),
 });
 
 /* ---------- placing and editing points ---------- */
@@ -722,6 +730,38 @@ function autoFit() {
 }
 $('refit').addEventListener('click', () => { tuned = false; autoFit(); toast('Re-fitted to the site.'); });
 
+// What is already standing here, from OpenStreetMap: buildings, trees and --
+// the ones you cannot see from above and that actually bring an aircraft down
+// -- power lines. See js/osm.js for what it knows and what it is guessing.
+$('importOsm').addEventListener('click', async () => {
+  const btn = $('importOsm');
+  btn.disabled = true;
+  btn.textContent = 'Asking OpenStreetMap…';
+  try {
+    const { fetchAround } = await import('./osm.js');
+    const b = map.getBounds();
+    const found = await fetchAround({
+      north: b.getNorth(), south: b.getSouth(), east: b.getEast(), west: b.getWest(),
+    });
+    if (!found.length) { toast('Nothing mapped in this view.'); return; }
+    const guessed = found.filter((f) => f.assumed).length;
+    site.addImported(found);
+    history.commit();
+    toast(`${found.length} added${guessed ? ` — ${guessed} with an assumed height` : ''}.`);
+  } catch (e) {
+    toast(`Import failed — ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Import what is here';
+  }
+});
+
+$('clearOsm').addEventListener('click', () => {
+  const gone = site.clearImported();
+  history.commit();
+  toast(gone ? `Removed ${gone} imported obstacle${gone === 1 ? '' : 's'}.` : 'Nothing imported to remove.');
+});
+
 // The footprint, without planning anything. This is what the map draws while
 // you tap, and what the readout can say for free.
 function measure() {
@@ -879,6 +919,14 @@ function renderAlert(over) {
   el.hidden = !bits.length;
   el.className = `alert ${kind}`;
   el.textContent = bits.join(' ');
+  const guessed = nearbyObstacles().filter(isEstimated).length;
+  if (guessed) {
+    if (el.hidden) { el.hidden = false; el.className = 'alert warn'; el.textContent = ''; }
+    const g = document.createElement('span');
+    g.textContent = ` ${guessed} obstacle${guessed === 1 ? ' has an' : 's have'} assumed `
+      + `height${guessed === 1 ? '' : 's'} — check anything the flight passes close to.`;
+    el.append(g);
+  }
   if (!tuned && state.mission) {
     const b = document.createElement('span');
     b.className = 'fitnote';

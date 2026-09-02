@@ -40,6 +40,23 @@ export const DEFAULT_OBSTACLE_SPAN = 6;
 // still leaves room for every control in the code.
 export const MAX_CAPTURE_POINTS = 50;
 
+// An obstacle's name carries two things the sync service already stores for
+// free, so neither needs a schema change: what it is, and whether its height
+// was measured or invented.
+//
+// A leading "~" means the height is an estimate -- the importer's per-class
+// guess rather than anything anyone measured. It is stripped the moment you
+// set the height yourself, because then it is yours and it is not a guess.
+export const EST_PREFIX = '~';
+export const isEstimated = (o) => String(o.name ?? '').startsWith(EST_PREFIX);
+export const labelOf = (o) => String(o.name ?? '').replace(/^~/, '');
+
+// Imported obstacles are flown around and checked against, never orbited. You
+// tapped a thing because you care about it; the importer only described the
+// surroundings, and eighty street trees would otherwise be eighty domes.
+export const IMPORTED = 'osm';
+export const isImported = (o) => labelOf(o).endsWith(` (${IMPORTED})`);
+
 let nextId = 1;
 const newId = () => `p${nextId++}${Math.random().toString(36).slice(2, 6)}`;
 
@@ -51,8 +68,23 @@ export function pointOf(o) {
   return { lat: (o.north + o.south) / 2, lon: (o.east + o.west) / 2 };
 }
 
+// A box has two dimensions. Flattening it to one is a lie about anything long,
+// and it was a dangerous one: auto-fit measured a 40 x 12 m building as a
+// 12 m square, decided the flight cleared it, and the collision check then
+// reported ten strikes against the same building.
+export function spansOf(o) {
+  const lat0 = (o.north + o.south) / 2;
+  return {
+    x: Math.max(1, (o.east - o.west) * 111320 * Math.cos((lat0 * Math.PI) / 180)),
+    y: Math.max(1, (o.north - o.south) * 111132),
+  };
+}
+
+// The single number the older callers want: the larger side, because that is
+// what something has to stand outside of.
 export function spanMOf(o) {
-  return Math.round((o.north - o.south) * 111320);
+  const s = spansOf(o);
+  return Math.round(Math.max(s.x, s.y));
 }
 
 export function createSite({ onChange = () => {}, onSync = () => {}, storage, fetchImpl, endpoint } = {}) {
@@ -157,8 +189,34 @@ export function createSite({ onChange = () => {}, onSync = () => {}, storage, fe
     setObstacleHeight(id, height) {
       const o = obstacles.list().find((x) => x.id === id);
       if (!o) return;
-      obstacles.put({ ...o, height: Math.max(0, height) });
+      // Setting it yourself makes it yours: the estimate mark goes.
+      obstacles.put({ ...o, name: labelOf(o), height: Math.max(0, height) });
       changed({ obstacles: true });
+    },
+
+    // Everything the importer found, in one write, so a hundred trees are one
+    // undo step and one sync rather than a hundred of each.
+    addImported(found) {
+      let added = 0;
+      for (const f of found) {
+        const rect = normalizeRect({ north: f.north, south: f.south, east: f.east, west: f.west });
+        obstacles.put({
+          ...rect,
+          height: Math.max(0, f.height),
+          name: `${f.assumed ? EST_PREFIX : ''}${f.label} (${IMPORTED})`,
+        });
+        added += 1;
+      }
+      if (added) changed({ obstacles: true });
+      return added;
+    },
+
+    // Taking an import back out again, without touching anything you placed.
+    clearImported() {
+      const gone = obstacles.list().filter(isImported);
+      for (const o of gone) obstacles.remove(o.id);
+      if (gone.length) changed({ obstacles: true });
+      return gone.length;
     },
 
     setObstacleSpan(id, span) {

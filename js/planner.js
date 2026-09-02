@@ -212,7 +212,18 @@ function clusterTaps(taps) {
   return [...groups.values()];
 }
 
-export function subjectsOf(local, hull, avoid = [], f) {
+// Two questions, two answers, and conflating them was a safety bug.
+//
+// "What do I orbit and score" excludes anything imported from a map: eighty
+// street trees are eighty domes and no battery, and you did not ask for any of
+// them. "What must I not hit" excludes nothing -- and when those were the same
+// list, the domes stopped knowing that the imported buildings were there and
+// flew through them at three metres.
+export function hazardsOf(local, hull, avoid = [], f) {
+  return subjectsOf(local, hull, avoid, f, { all: true });
+}
+
+export function subjectsOf(local, hull, avoid = [], f, { all = false } = {}) {
   const out = [];
   const tallTaps = local.filter((q) => (q.height ?? 0) > 0.5);
 
@@ -248,9 +259,14 @@ export function subjectsOf(local, hull, avoid = [], f) {
   for (const o of avoid) {
     if ((o.height ?? 0) <= 0.5) continue;
     const span = o.span ?? SUBJECT_SPAN;
+    // Imported from a map rather than tapped: still something to fly around,
+    // never something to fly around FOR.
+    if (!all && o.capture === false) continue;
     out.push({
       ...f.toLocal(o.lat, o.lon),
-      span, spanX: span, spanY: span,
+      span,
+      spanX: o.spanX ?? span,
+      spanY: o.spanY ?? span,
       height: o.height,
       kind: 'obstacle',
     });
@@ -561,6 +577,8 @@ export function planMission(site, opts, cam) {
     ?? local.reduce((h, q) => Math.max(h, q.height ?? 0), 0);
 
   const subjects = subjectsOf(local, hull, avoid, f);
+  // Everything solid, imported or not. What the rings keep clear of.
+  const hazards = hazardsOf(local, hull, avoid, f);
 
   const fp = footprint(cam, p.altitude);
   const sideSpacing = Math.max(1, fp.across * (1 - p.sideOverlap));
@@ -664,7 +682,7 @@ export function planMission(site, opts, cam) {
     // The vertical part is safe by construction: it rises from a station that
     // is already standing clear of its own subject. The horizontal part is at
     // transitZ, which clears the tallest thing on the site by the clearance.
-    const transitZ = Math.max(...subjects.map((q) => q.height)) + (p.subjectClearance ?? 2);
+    const transitZ = Math.max(...hazards.map((q) => q.height)) + (p.subjectClearance ?? 2);
     const overhead = (w) => ({
       ...w, alt: transitZ, photo: false, transit: true,
       heading: { mode: 'followWayline' }, pitch: -90, lineStart: false,
@@ -672,7 +690,10 @@ export function planMission(site, opts, cam) {
     for (const subject of visited) {
       const r = objectPass({
         subject,
-        others: visited.filter((o) => o !== subject),
+        // Everything solid except this thing itself -- including what was
+        // imported, which the rings must clear even though they never orbit it.
+        others: hazards.filter((o) => o !== subject
+          && !(Math.abs(o.x - subject.x) < 0.01 && Math.abs(o.y - subject.y) < 0.01)),
         f, cam, frontOverlap: p.frontOverlap, rings,
         clearance: p.subjectClearance ?? 2, pitchOverride: p.orbitPitch,
       });
@@ -853,13 +874,18 @@ export function proposePlan(site, base, cam, budget = {}) {
   const boxes = (site.obstacles ?? []).filter((o) => (o.height ?? 0) > 0);
   const hits = (m) => {
     if (!boxes.length) return false;
+    // The SAME footprint the app's own collision check uses. Squaring a box
+    // off here made auto-fit measure a 40 x 12 m building as a 12 m square,
+    // bless an altitude, and hand back a plan the check then reported ten
+    // strikes against.
     const local = boxes.map((o, i) => {
       const c = m.frame.toLocal(o.lat, o.lon);
-      const half = (o.span ?? SUBJECT_SPAN) / 2;
+      const hx = (o.spanX ?? o.span ?? SUBJECT_SPAN) / 2;
+      const hy = (o.spanY ?? o.span ?? SUBJECT_SPAN) / 2;
       return {
         id: `a${i}`,
-        min: { x: c.x - half, y: c.y - half, z: 0 },
-        max: { x: c.x + half, y: c.y + half, z: Math.max(0.1, o.height) },
+        min: { x: c.x - hx, y: c.y - hy, z: 0 },
+        max: { x: c.x + hx, y: c.y + hy, z: Math.max(0.1, o.height) },
       };
     });
     return checkObstacles(m, local, { clearance }).strikes > 0;

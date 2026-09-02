@@ -87,6 +87,14 @@ Two things make it honest rather than a toy:
 What you walked becomes the area to capture, and the lowest orbit ring is set
 just over the tallest thing you found.
 
+A crosshair sits under the zoom control while you are walking: it centres the
+map on where you are and leaves a dot with the accuracy circle around it, so you
+can see yourself against the box you are growing. On a phone the app does that
+by itself on arrival, since a phone is being carried to the site and a hardcoded
+city centre is no use there. Only on arrival, and only when the address bar has
+not already named somewhere: a shared plan, or a link with a centre in it, was
+written by someone who had looked at that place and meant it.
+
 ### Where the lowest ring sits
 
 Rings spread from a floor up to the set altitude. Without obstacles that floor

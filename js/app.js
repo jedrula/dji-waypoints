@@ -62,6 +62,10 @@ let urlFrozen = true;
 function paneChanged() {
   if (!ready) return;
   setDrawing(null);   // which redraws the obstacles
+  // Where you are is the subject of a walk and context everywhere else, so the
+  // locate control comes out for the walk and nothing else. Planning has its
+  // own "Where I am", which places a box rather than just looking.
+  $('findme').hidden = menu.current() !== 'walk';
 }
 
 const menu = createMenu([
@@ -738,6 +742,67 @@ function bestFix({ onProgress } = {}) {
   });
 }
 
+// A fix is a dot and the circle it could be anywhere inside. Drawn the same
+// way wherever it came from -- the Area button, the locate control, a walk.
+function showFix({ lat, lon, accuracy, age }) {
+  layers.gps.clearLayers();
+  L.circle([lat, lon], {
+    radius: Math.max(accuracy, 1),
+    color: '#4da3ff', weight: 1, fillOpacity: 0.08, interactive: false,
+  }).addTo(layers.gps);
+  L.marker([lat, lon], {
+    icon: L.divIcon({ className: 'gpsdot', iconSize: [12, 12] }),
+    interactive: false,
+  }).addTo(layers.gps)
+    .bindTooltip(`±${accuracy.toFixed(0)} m · ${age < 1000 ? 'live' : `${(age / 1000).toFixed(0)} s old`}`);
+}
+
+// Keep however far in you are already looking, unless that is further out than
+// a person is worth drawing at. Not animated, for the reason readUrl gives:
+// arriving where you are standing is not a journey, and Leaflet's animated path
+// waits on a CSS transition that never finishes in a tab nobody is painting.
+function goToFix({ lat, lon }) {
+  map.setView([lat, lon], Math.max(map.getZoom(), 19), { animate: false });
+}
+
+// The locate control on the map, and the phone arriving with nowhere better to
+// look. `quiet` is the second one: it moved the map without being asked, so it
+// says so in a toast rather than in the walk's status line, and a refusal is
+// left silent -- nobody who just denied the permission needs telling twice.
+let finding = false;
+async function findMe({ quiet = false } = {}) {
+  if (finding) return null;
+  if (!navigator.geolocation) {
+    if (!quiet) walkStatus('This browser has no location support.', 'bad');
+    return null;
+  }
+  finding = true;
+  $('findme').classList.add('busy');
+  $('findme').disabled = true;
+  try {
+    const fix = await bestFix({
+      onProgress: (f) => { if (!quiet) walkStatus(`±${f.accuracy.toFixed(0)} m so far — still trying…`); },
+    });
+    showFix(fix);
+    goToFix(fix);
+    const how = `±${fix.accuracy.toFixed(0)} m`;
+    if (quiet) toast(`Map centred where you are (${how}).`);
+    else walkStatus(`You are here — ${how}.`
+      + (fix.age > STALE_MS ? ` That fix is ${Math.round(fix.age / 60000)} min old, though.` : ''),
+    fix.age > STALE_MS ? 'bad' : 'ok');
+    return fix;
+  } catch (err) {
+    if (!quiet) walkStatus(GPS_ERRORS[err.code] ?? `Could not locate you: ${err.message}`, 'bad');
+    return null;
+  } finally {
+    finding = false;
+    $('findme').classList.remove('busy');
+    $('findme').disabled = false;
+  }
+}
+
+$('findme').addEventListener('click', () => findMe());
+
 $('locate').addEventListener('click', async () => {
   if (!navigator.geolocation) {
     $('areaHint').textContent = 'This browser has no location support — pan the map instead.';
@@ -767,22 +832,13 @@ $('locate').addEventListener('click', async () => {
   btn.textContent = 'Where I am';
   const { lat, lon, accuracy, age } = fix;
 
-  layers.gps.clearLayers();
-  L.circle([lat, lon], {
-    radius: Math.max(accuracy, 1),
-    color: '#4da3ff', weight: 1, fillOpacity: 0.08, interactive: false,
-  }).addTo(layers.gps);
-  L.marker([lat, lon], {
-    icon: L.divIcon({ className: 'gpsdot', iconSize: [12, 12] }),
-    interactive: false,
-  }).addTo(layers.gps)
-    .bindTooltip(`±${accuracy.toFixed(0)} m · ${age < 1000 ? 'live' : `${(age / 1000).toFixed(0)} s old`}`);
+  showFix(fix);
 
   const stale = age > STALE_MS;
   const rough = accuracy > 25;
   const place = () => dropBoxAt(lat, lon);
 
-  map.setView([lat, lon], Math.max(map.getZoom(), 19));
+  goToFix(fix);
 
   if (stale) {
     // A laptop with no GPS reuses the last Wi-Fi position, which can be an old
@@ -1836,6 +1892,7 @@ window.addEventListener('keydown', (e) => {
 });
 
 const fromHash = decodePlan(location.hash);
+const urlNamedAPlace = new URLSearchParams(location.search).has('c');
 if (fromHash) applyPlan(fromHash);
 
 // After the plan, because a plan auto-fits the map and an explicit centre in
@@ -1852,6 +1909,13 @@ renderObstacles();   // they are context, so they are on the map before any plan
 pushGround();        // hands the 3D view its tile source, on or off
 urlFrozen = false;
 writeUrl();          // a bare visit still ends up with an address worth copying
+
+// A phone is carried to the site, so the useful place to start is where you are
+// standing rather than a hardcoded city centre. Only when the address bar has
+// not already said somewhere more specific, though: a shared plan or a link
+// with a centre in it was written by someone who had looked at that place and
+// meant it, and yanking them to a field in another country is not help.
+if (stacked() && !fromHash && !urlNamedAPlace) findMe({ quiet: true });
 // Handy when poking at it from the console, which is most of how the 3D view
 // gets debugged -- there is nothing in the DOM to inspect.
 window.__state = state;

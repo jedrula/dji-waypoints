@@ -76,6 +76,18 @@
         <path d="M3 13.5 12 18l9-4.5"/>
       </svg>
     </button>
+    <button id="findplace" type="button" class="maptoggle" title="Go to an address or coordinates">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+           stroke-width="1.9" stroke-linecap="round">
+        <circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/>
+      </svg>
+    </button>
+    <form id="placebar" class="placebar" hidden>
+      <input id="place" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Cybulskiego 22, Wrocław — or 51.1103, 17.0553">
+      <button id="placeGo" type="submit" class="primary">Go</button>
+      <button id="placeClose" type="button" class="px" aria-label="Close">&times;</button>
+    </form>
     <button id="recentre" type="button" class="maptoggle" hidden
             title="Back to the points you have placed">
       <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"

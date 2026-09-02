@@ -113,6 +113,8 @@ function setView(name) {
   // map, the imagery button paints the ground under the 3D.
   $('routeToggle').hidden = !showMap;
   $('ground').hidden = !show3d;
+  $('findplace').hidden = !showMap;
+  if (!showMap) openPlace(false);
   showRecentre();
   if (name === 'split') setSplit(splitPct, { store: false });
   if (showMap) map.invalidateSize();
@@ -228,6 +230,69 @@ function showRecentre() {
   const b = siteBounds();
   $('recentre').hidden = !b || activeView === '3d' || map.getBounds().contains(b.getCenter());
 }
+
+/* ---------- going somewhere ---------- */
+// A mission usually starts from an address: you know where the job is before
+// you know anything else about it. Two ways in, because both are how people
+// actually have a place to hand -- a name, or a pair of numbers off a phone.
+
+// Coordinates first, and offline: "51.1103, 17.0553" is not a question for a
+// geocoder, and a pasted pair should not need the network or wait on it.
+function asCoords(text) {
+  const m = String(text).trim().match(/^(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)$/);
+  if (!m) return null;
+  const lat = Number(m[1]);
+  const lon = Number(m[2]);
+  return Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? { lat, lon } : null;
+}
+
+function openPlace(on) {
+  $('placebar').hidden = !on;
+  $('findplace').classList.toggle('on', on);
+  if (on) $('place').focus();
+}
+$('findplace').addEventListener('click', () => openPlace($('placebar').hidden));
+$('placeClose').addEventListener('click', () => openPlace(false));
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('placebar').hidden) openPlace(false); });
+
+$('placebar').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const q = $('place').value.trim();
+  if (!q) return;
+
+  const here = asCoords(q);
+  if (here) {
+    map.setView([here.lat, here.lon], Math.max(map.getZoom(), 19), { animate: false });
+    openPlace(false);
+    toast(`At ${here.lat.toFixed(5)}, ${here.lon.toFixed(5)}.`);
+    return;
+  }
+
+  $('placeGo').disabled = true;
+  $('placeGo').textContent = '…';
+  try {
+    const r = await fetch('https://nominatim.openstreetmap.org/search'
+      + `?format=json&limit=1&q=${encodeURIComponent(q)}`);
+    const [hit] = await r.json();
+    if (!hit) { toast(`Nothing found for “${q}”.`); return; }
+    // Zoom to the thing rather than to a fixed level: a boundingbox is a
+    // street or a city depending on what was asked for, and 19 over a city is
+    // a rooftop somewhere near the middle of it.
+    const bb = hit.boundingbox?.map(Number);
+    if (bb && bb.every(Number.isFinite)) {
+      map.fitBounds(L.latLngBounds([bb[0], bb[2]], [bb[1], bb[3]]), { animate: false, maxZoom: 19 });
+    } else {
+      map.setView([+hit.lat, +hit.lon], 18, { animate: false });
+    }
+    openPlace(false);
+    toast(hit.display_name.split(',').slice(0, 3).join(',').trim());
+  } catch {
+    toast('Search is unavailable — pan the map, or paste coordinates.');
+  } finally {
+    $('placeGo').disabled = false;
+    $('placeGo').textContent = 'Go';
+  }
+});
 
 $('recentre').addEventListener('click', () => {
   const b = siteBounds();
@@ -443,22 +508,41 @@ map.on('dblclick', () => { clearTimeout(pendingTap); pendingTap = null; });
 // A point is a dot with the height you gave it written in it, because the
 // height is the only thing a point carries and the only thing worth reading off
 // the map without touching anything.
+// Markers are kept and updated, not thrown away and rebuilt.
+//
+// Clearing the layer on every render is the simple version and it quietly
+// breaks dragging: a render can land between picking a marker up and moving
+// it, and the element the browser is tracking the drag against is gone,
+// replaced by a fresh one that never heard about the gesture. Anything that
+// touches the site re-renders -- placing a point, the score arriving, an
+// obstacle syncing in from the phone -- so the window is not narrow.
+//
+// It also stops the marker under the cursor flickering on every replan.
+const pointMarkers = new Map();
+let draggingKey = null;
+
 function renderPoints() {
-  layers.points.clearLayers();
   layers.obsBoxes.clearLayers();
 
   const struck = new Set((state.hazard?.obstacles ?? [])
     .filter((o) => o.grade !== 'clear').map((o) => o.id));
 
+  const wanted = new Set();
   for (const o of site.obstacles()) {
     const grade = struck.has(o.id)
       ? (state.hazard.obstacles.find((x) => x.id === o.id)?.grade ?? 'clear') : 'clear';
     L.rectangle([[o.south, o.west], [o.north, o.east]], {
       color: OBSTACLE_COLOR[grade], weight: 1, fillOpacity: 0.12, interactive: false,
     }).addTo(layers.obsBoxes);
-    addPoint('obstacle', o.id, pointOf(o), o.height, grade !== 'clear');
+    wanted.add(syncPoint('obstacle', o.id, pointOf(o), o.height, grade !== 'clear'));
   }
-  for (const p of site.capture()) addPoint('capture', p.id, p, p.height, false);
+  for (const p of site.capture()) wanted.add(syncPoint('capture', p.id, p, p.height, false));
+
+  for (const [key, m] of pointMarkers) {
+    if (wanted.has(key)) continue;
+    layers.points.removeLayer(m);
+    pointMarkers.delete(key);
+  }
 
   // The outline that would be flown, so "these ten taps" and "this shape" are
   // visibly the same thing. Drawn from the plan when there is one and from the
@@ -476,14 +560,34 @@ function renderPoints() {
   }
 }
 
-function addPoint(kind, id, at, height, bad) {
+function syncPoint(kind, id, at, height, bad) {
+  const key = `${kind}:${id}`;
   const on = state.selected?.kind === kind && state.selected?.id === id;
   const size = kind === 'capture' ? 24 : 22;
+  const html = `<div class="pt ${kind}${on ? ' on' : ''}${bad ? ' strike' : ''}" `
+    + `style="width:${size}px;height:${size}px">${Math.round(height)}</div>`;
+
+  const existing = pointMarkers.get(key);
+  if (existing) {
+    // Never touch the one in hand: replacing its icon mid-gesture is exactly
+    // what breaks the drag.
+    if (draggingKey !== key) {
+      const ll = existing.getLatLng();
+      if (Math.abs(ll.lat - at.lat) > 1e-9 || Math.abs(ll.lng - at.lon) > 1e-9) {
+        existing.setLatLng([at.lat, at.lon]);
+      }
+      if (existing._ptHtml !== html) {
+        existing._ptHtml = html;
+        existing.setIcon(L.divIcon({ className: '', html, iconSize: [size, size], iconAnchor: [size / 2, size / 2] }));
+      }
+    }
+    return key;
+  }
+
   const m = L.marker([at.lat, at.lon], {
     icon: L.divIcon({
       className: '',
-      html: `<div class="pt ${kind}${on ? ' on' : ''}${bad ? ' strike' : ''}" `
-          + `style="width:${size}px;height:${size}px">${Math.round(height)}</div>`,
+      html,
       iconSize: [size, size],
       iconAnchor: [size / 2, size / 2],
     }),
@@ -492,7 +596,7 @@ function addPoint(kind, id, at, height, bad) {
     // a tap being a first guess. There was no reason for an obstacle to be the
     // exception beyond nobody having written the move.
     draggable: true,
-  }).addTo(layers.points);
+  });
   m.on('click', (e) => {
     L.DomEvent.stopPropagation(e);
     if (state.mode !== kind) setMode(kind);
@@ -500,12 +604,21 @@ function addPoint(kind, id, at, height, bad) {
     renderPoints();
     renderPointBar();
   });
-  m.on('dragstart', () => { state.selected = { kind, id }; renderPointBar(); });
+  m.addTo(layers.points);
+  m._ptHtml = html;
+  m.on('dragstart', () => {
+    draggingKey = key;
+    state.selected = { kind, id };
+    renderPointBar();
+  });
   m.on('dragend', () => {
+    draggingKey = null;
     const ll = m.getLatLng();
     if (kind === 'capture') site.moveCapture(id, ll.lat, ll.lng);
     else site.moveObstacle(id, ll.lat, ll.lng);
   });
+  pointMarkers.set(key, m);
+  return key;
 }
 
 function selectedPoint() {

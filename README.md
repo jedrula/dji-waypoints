@@ -635,6 +635,22 @@ actually left the view -- a control offering to take you where you already are
 is clutter, and clutter on a map you are tapping costs more than it does
 anywhere else.
 
+**Markers are kept and updated, never rebuilt.** Clearing the layer on every
+render is the simple version and it quietly breaks dragging: a render lands
+between picking a marker up and moving it, and the element the browser is
+tracking the gesture against is gone, replaced by a fresh one that never heard
+about it. Anything that touches the site re-renders -- placing a point, the
+coverage score arriving, an obstacle syncing in from the phone -- so the window
+is not narrow. Markers are now keyed by id, moved and re-iconed in place, and
+the one being dragged is left alone entirely.
+
+**Searching for where the job is.** A mission usually starts from an address,
+so there is a search on the map rather than behind a sheet. It takes a place
+name through Nominatim, and it takes a bare `51.1103, 17.0553` without going
+near the network -- a pasted pair of numbers is not a question for a geocoder.
+A named result is framed to its own bounding box, because "Wroclaw" and
+"Cybulskiego 22" want very different zooms and a fixed one is wrong for both.
+
 **Both kinds of point drag.** You place them by eye against a photograph, so a
 tap is a first guess rather than a commitment. An obstacle keeps its size and
 height when it moves: the accuracy it was originally grown by is already baked

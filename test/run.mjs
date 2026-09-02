@@ -1282,6 +1282,10 @@ console.log('\nwhat is already standing here');
      byLabel('Building')[0].height === 16 && byLabel('Building')[0].assumed === false);
   ok('a building with neither is assumed and says so',
      byLabel('garage')[0].height === ASSUMED.building && byLabel('garage')[0].assumed === true);
+  // The assumptions are measurements, not opinions: an untagged building in a
+  // Polish city came out at p90 24.3 m against the 9 m that used to be guessed.
+  ok('and the assumption is one a city building could plausibly reach',
+     ASSUMED.building >= 20 && ASSUMED.tree >= 18);
   ok('a measured tree is not overwritten by the default',
      byLabel('Platanus')[0].height === 30 && byLabel('Platanus')[0].assumed === false);
   ok('an untagged tree gets the assumed height, marked',

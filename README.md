@@ -282,19 +282,43 @@ It is Poland only, and it says nothing rather than guessing elsewhere -- the
 service answers 0 for "off the edge of my data" as readily as for sea level, and
 a false zero on a hillside is the dangerous direction.
 
-### Why the point cloud is not the answer, and what is
+### What the point cloud actually gives you
 
-The same agency publishes the raw LiDAR free and unrestricted, 4-20 points per
-square metre, flown 2010-2019 and again 2018-2026. It is extraordinary data --
-individual tree crowns, wires, every roof -- and it contains every height this
-app currently guesses at.
+The same agency publishes the raw LiDAR free and unrestricted, and
+`tools/lidar-spike.py` goes and gets it. It is not part of the app and is not a
+dependency of it -- it needs laspy where the app needs nothing -- but it is
+where the importer's assumed heights came from, and it is the shape the real
+feature would take.
 
-It is also LAZ tiles of hundreds of megabytes each, several per site. Decoding
-them in a browser is possible and downloading them in a field is not. The right
-target is the DERIVED raster -- a 1 m NMPT grid is a few megabytes for a whole
-site rather than hundreds -- or a one-off preprocess into a compact height
-model for the areas you actually fly. Neither is wired up; what is wired up is
-the terrain, which needed no preprocessing at all.
+A tile over Cybulskiego 22 in Wroclaw: **2024, 12 points per square metre,
+21 MB, classified** into ground, building and vegetation. Heights measured
+above the local ground:
+
+    buildings   p50 24.2 m   p90 29.8 m   max 41.5 m
+    trees       p50 20.5 m   p90 28.5 m   max 38.0 m
+
+That is how the building assumption stopped being 9 m. Nine was invented, and
+it was wrong by fifteen metres in the median case and by twenty at the address
+itself, which is a flight into a wall with the check reporting it clear.
+
+**The delivery problem, and the answer.** Reducing that tile to a 1 m height
+raster over a 200 m site gives 39 kB, or 10 kB gzipped -- the same answer,
+roughly two thousand times smaller than the LAZ it came from. That is what a
+browser should fetch. Preprocessing is the missing piece, not the data.
+
+Three traps, all of which cost a wrong answer that looked right:
+
+- The tile index wants its BBOX as **north,east** with an EPSG:2180 URN, and so
+  are the GML envelopes it returns. At Wroclaw both coordinates are about
+  362000, so getting it backwards silently hands you neighbouring tiles that
+  contain everything except your point.
+- Newer surveys are published in **PL-2000 zones**, not PUWG92, and a PL-2000
+  easting starts with the zone number: 6432800 rather than 362800. Read one as
+  PUWG92 and the tile looks empty.
+- **Wires are not classified.** No class 13, 14, 15 or 16 in any tile sampled,
+  so power lines still have to come from OpenStreetMap geometry with an assumed
+  height. The thing most likely to bring an aircraft down is the thing this data
+  does not label.
 
 ## What is already standing here
 

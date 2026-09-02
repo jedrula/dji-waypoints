@@ -16,9 +16,23 @@ const OVERPASS = 'https://overpass-api.de/api/interpreter';
 // Assumed heights, deliberately generous. Each is the top of the structure
 // rather than the wire or the crown centre, because the number feeds a
 // clearance check and the safe error is upward.
+// The building figure was 9 m and it was invented. Measured against the LiDAR
+// for a tile of Wroclaw -- 5.4 million classified points, 16 per square metre,
+// heights taken above the local ground -- untagged buildings there run:
+//
+//     p50 16.2 m   p75 20.2 m   p90 24.3 m   p99 31.6 m   max 36.7 m
+//
+// and the building at Cybulskiego 22 is 29.3 m. Nine metres was wrong by
+// fourteen in the median case and by twenty at the address, which is a plan
+// flown into a wall with the check reporting it clear. It is p90 now: still a
+// guess, but one on the safe side of most of what is actually there.
+//
+// The vegetation figure survived the same test almost exactly -- high veg came
+// out at p50 17.6 m over the same site against an assumed 18 -- which is luck
+// rather than judgement, and it is kept at p90 for the same reason.
 export const ASSUMED = {
-  tree: 18,
-  building: 9,          // a three-storey block, when nothing is tagged
+  tree: 20,             // measured p90 19.7 m over a Wroclaw tile
+  building: 24,         // measured p90 24.3 m; the old 9 m was invented
   powerLow: 10,         // 400 V distribution on wooden poles
   powerMedium: 16,      // 15-30 kV
   powerHigh: 40,        // 110 kV lattice towers

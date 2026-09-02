@@ -334,6 +334,10 @@ const siteForPlanner = () => ({
 const MODES = {
   capture: {
     label: 'capture point',
+    // What the standing-here button says in this mode. "Here" on its own reads
+    // as "here on the map, where I tapped" -- which is the other gesture
+    // entirely, and the wrong one.
+    here: 'Capture where I stand',
     colour: '#4da3ff',
     tip: 'Tap the map on what you want captured. Tap a point to set how tall it is.',
     list: () => site.capture(),
@@ -345,6 +349,7 @@ const MODES = {
   },
   obstacle: {
     label: 'obstacle',
+    here: 'Obstacle where I stand',
     colour: '#ffb84d',
     tip: 'Tap the map where something stands. Tap a point to set how tall it is.',
     list: () => site.obstacles(),
@@ -364,6 +369,9 @@ function setMode(mode) {
   $('tip').textContent = MODES[mode].tip;
   showTip();
   $('hereBtn').classList.toggle('obstacle', mode === 'obstacle');
+  $('hereBtn').textContent = MODES[mode].here;
+  $('hereBtn').title = `Put ${mode === 'capture' ? 'a capture point' : 'an obstacle'} `
+    + 'at the position your phone reports, rather than where you tap the map';
   $('clearMode').textContent = mode === 'capture' ? 'Clear points' : 'Clear obstacles';
   renderPoints();
   renderPointBar();
@@ -375,15 +383,33 @@ for (const b of document.querySelectorAll('#modes button')) {
 // One tap, one point, whichever mode you are in. Placing is the whole
 // interaction: there is no arm-then-drag, because on a phone in a field the
 // gesture you can rely on is a tap.
-map.on('click', (e) => {
+function placeAt(latlng) {
   if (state.mode === 'capture' && site.capture().length >= MAX_CAPTURE_POINTS) {
     toast(`That is ${MAX_CAPTURE_POINTS} capture points — enough to describe anything this app can fly.`);
     return;
   }
-  const added = MODES[state.mode].add({ lat: e.latlng.lat, lon: e.latlng.lng });
+  const added = MODES[state.mode].add({ lat: latlng.lat, lon: latlng.lng });
   if (added) state.selected = { kind: state.mode, id: added.id };
   renderPointBar();
+}
+
+// A double-click zooms, and Leaflet reports BOTH of its clicks as clicks -- so
+// zooming in used to leave two stray points behind, on top of each other,
+// exactly where you were trying to look more closely.
+//
+// So a tap waits to find out what it is. The delay is the price of keeping
+// double-click zoom, and it is paid on every tap, which is why it is as short
+// as it can be: long enough for the second click of a deliberate double, short
+// enough that placing still feels like tapping.
+const DOUBLE_CLICK_MS = 250;
+let pendingTap = null;
+
+map.on('click', (e) => {
+  clearTimeout(pendingTap);
+  const { latlng } = e;
+  pendingTap = setTimeout(() => { pendingTap = null; placeAt(latlng); }, DOUBLE_CLICK_MS);
 });
+map.on('dblclick', () => { clearTimeout(pendingTap); pendingTap = null; });
 
 // A point is a dot with the height you gave it written in it, because the
 // height is the only thing a point carries and the only thing worth reading off

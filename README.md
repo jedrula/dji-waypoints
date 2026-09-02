@@ -620,10 +620,20 @@ the map sets it, on the point you just placed or any earlier one. A wide thing
 is several taps, the same way a wide capture is; there is no second gesture for
 drawing an outline.
 
-**A tap is a tap wherever the coordinates came from.** The button marked *Here*
-places the same point at the position the phone reports, grown by the accuracy
-it admits to, which is what walking a site now is. There is no separate walk
-mode, because a stop was never anything but a tap you made with your feet.
+**A tap is a tap wherever the coordinates came from.** *Capture where I stand*
+(and *Obstacle where I stand*, in the other mode) places the same point at the
+position the phone reports, grown by the accuracy it admits to, which is what
+walking a site now is. There is no separate walk mode, because a stop was never
+anything but a tap you made with your feet. The button used to say *Here*, which
+reads as "here on the map, where I tapped" -- the other gesture entirely, and
+the wrong one.
+
+**A double-click zooms and must not leave points behind.** Leaflet reports both
+clicks of a double-click as clicks, so zooming in used to drop two points on top
+of each other, exactly where you were trying to look more closely. A tap now
+waits 250 ms to find out what it is. The delay is the price of keeping
+double-click zoom and it is paid on every tap, which is why it is as short as it
+can be.
 
 ### A dome per thing, not a ring round the site
 

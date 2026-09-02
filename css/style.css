@@ -246,7 +246,8 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
    target that puts a point where you are, not where you tapped. */
 .here { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 520;
         transition: bottom 0.12s ease;
-        padding: 13px 30px; font-size: 15px; font-weight: 650;
+        padding: 12px 22px; font-size: 14.5px; font-weight: 650; white-space: nowrap;
+        max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis;
         background: var(--accent); border-color: var(--accent); color: #04101d; }
 .here[hidden] { display: none; }
 #stage.editing .here { bottom: 70px; }

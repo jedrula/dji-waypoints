@@ -169,8 +169,14 @@ export function subjectsOf(local, hull, avoid = [], f) {
     out.push({
       x: c.x,
       y: c.y,
-      // The footprint's own width, so the ring stands off from the whole thing
-      // rather than from an assumed six metres.
+      // Two spans, because a footprint has two dimensions and squaring it off
+      // is a lie about a long thing: an 80 x 16 m pair of buildings became an
+      // 80 x 80 m block, so the scorer graded the yard between them as facade
+      // and the 3D view drew a slab over the whole site.
+      spanX: b.x1 - b.x0,
+      spanY: b.y1 - b.y0,
+      // The scalar is what the RING answers to -- it has to stand outside the
+      // whole thing, so it is the larger of the two.
       span: Math.max(b.x1 - b.x0, b.y1 - b.y0),
       height: Math.max(...tallTaps.map((q) => q.height)),
       kind: 'capture',
@@ -178,15 +184,17 @@ export function subjectsOf(local, hull, avoid = [], f) {
   } else {
     // One or two taps outline nothing, so each is a small thing of its own.
     for (const q of tallTaps) {
-      out.push({ x: q.x, y: q.y, span: SUBJECT_SPAN, height: q.height, kind: 'capture' });
+      out.push({ x: q.x, y: q.y, span: SUBJECT_SPAN, spanX: SUBJECT_SPAN, spanY: SUBJECT_SPAN,
+        height: q.height, kind: 'capture' });
     }
   }
 
   for (const o of avoid) {
     if ((o.height ?? 0) <= 0.5) continue;
+    const span = o.span ?? SUBJECT_SPAN;
     out.push({
       ...f.toLocal(o.lat, o.lon),
-      span: o.span ?? SUBJECT_SPAN,
+      span, spanX: span, spanY: span,
       height: o.height,
       kind: 'obstacle',
     });

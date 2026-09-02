@@ -41,10 +41,13 @@ export function buildProxy(subjects = []) {
   return subjects
     .filter((s) => (s.height ?? 0) > 0.5)
     .map((s) => {
-      const half = Math.max(0.5, (s.span ?? 6) / 2);
+      // Two half-spans: a long thing squared off would have the scorer grading
+      // the ground beside it as facade.
+      const hx = Math.max(0.5, (s.spanX ?? s.span ?? 6) / 2);
+      const hy = Math.max(0.5, (s.spanY ?? s.span ?? 6) / 2);
       return {
-        min: { x: s.x - half, y: s.y - half, z: 0 },
-        max: { x: s.x + half, y: s.y + half, z: s.height },
+        min: { x: s.x - hx, y: s.y - hy, z: 0 },
+        max: { x: s.x + hx, y: s.y + hy, z: s.height },
       };
     });
 }

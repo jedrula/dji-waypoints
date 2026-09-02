@@ -216,18 +216,38 @@ ok('two taps outline nothing, so they are two things',
   ok('and is listed as a subject', withTree.subjects.filter((s) => s.kind === 'obstacle').length === 1);
 }
 
-// The low ring is the one that has to be argued with: sized off its own thing
-// it flies at 2 m round a bush standing beside a twenty metre tree.
+// A bush standing beside a twenty metre tree. Lifting the WHOLE ring to clear
+// the tree is the obvious answer and it throws the dome away -- you end up
+// orbiting something three metres tall from twenty-five metres up, looking
+// almost straight down at it. The tree is near one arc, so only that arc rises.
 {
+  const CLEAR = 5;
   const bushByTree = planMission(
     { points: [{ lat: 50.06, lon: 19.93, height: 3 }],
       obstacles: [{ lat: 50.06, lon: 19.9301, height: 20, span: 6 }] },
-    { altitude: 30, nadir: false, oblique: false, surround: false }, cam);
-  const bushDome = domesOf(bushByTree).find((d) => Math.abs(d[0].heading.poi.lon - 19.93) < 1e-4);
-  const lowest = Math.min(...bushDome.map((w) => w.alt));
-  ok(`a dome clears the tall thing beside it (${lowest.toFixed(0)} m past a 20 m tree)`, lowest > 20);
-  ok('and collapses to one ring rather than three within a metre of each other',
-     new Set(bushDome.map((w) => Math.round(w.alt))).size === 1);
+    { altitude: 30, subjectClearance: CLEAR, nadir: false, oblique: false, surround: false }, cam);
+  const dome = domesOf(bushByTree).find((d) => Math.abs(d[0].heading.poi.lon - 19.93) < 1e-4);
+  const f = bushByTree.frame;
+  const tree = bushByTree.subjects.find((q) => q.height === 20);
+
+  // Safety first: nothing may be both beside the tree and below it.
+  const unsafe = dome.filter((w) => {
+    const l = f.toLocal(w.lat, w.lon);
+    const gapX = Math.max(Math.abs(l.x - tree.x) - tree.spanX / 2, 0);
+    const gapY = Math.max(Math.abs(l.y - tree.y) - tree.spanY / 2, 0);
+    return Math.hypot(gapX, gapY) < CLEAR && w.alt < tree.height + CLEAR;
+  });
+  ok('no station is both beside the tall thing and below it', unsafe.length === 0, `${unsafe.length}`);
+
+  // ...and the point of doing it per station rather than per ring:
+  const alts = dome.map((w) => w.alt);
+  ok(`the far side of the ring still flies low (${Math.min(...alts).toFixed(0)} m past a 20 m tree)`,
+     Math.min(...alts) < 6);
+  ok('while the arc beside the tree goes over it',
+     Math.max(...alts) > tree.height + CLEAR - 0.5, `${Math.max(...alts).toFixed(0)}`);
+  ok('so most of the dome keeps the close look it was flown for',
+     alts.filter((z) => z < 8).length > alts.length / 2,
+     `${alts.filter((z) => z < 8).length} of ${alts.length}`);
 }
 
 // Nothing tall means nothing to orbit. A flat field is a grid job, and a ring

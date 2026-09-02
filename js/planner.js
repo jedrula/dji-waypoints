@@ -304,22 +304,25 @@ function objectPass(g) {
   // floor. Only things it would actually pass near: a tall thing on the far
   // side of the site is not in the way, and letting it lift every ring would
   // throw away the low views that are the whole point of flying one.
-  // Only things the RING passes close to, which is not the same as things near
-  // the middle. A ring of radius r stands off from its own centre, so its
-  // closest approach to something d away is |d - r| -- a neighbour at exactly
-  // r is right under the flight path, and one at the centre or far outside is
-  // nowhere near it. Testing distance-from-centre instead counts neighbours the
-  // ring never goes near, which collapsed the dome round every post in a row
-  // that had a post on each side.
-  const nearby = others.filter((o) => {
-    const d = Math.hypot(o.x - cx, o.y - cy);
-    return Math.abs(d - r) - o.span / 2 < clearance;
-  });
-  const floor = nearby.length
-    ? Math.max(...nearby.map((o) => o.height)) + clearance
-    : 0;
-  const lowZ = Math.max(2, floor, Math.min(H * 0.35, H - 0.5));
-  const highZ = Math.max(lowZ + 1, floor, H + Math.max(2, H * 0.35));
+  // How low the flight may be AT ONE PLACE, given what stands near that place.
+  //
+  // Lifting the whole ring instead is the obvious version and it throws the
+  // dome away: a five metre post thirty metres from a nineteen metre tree
+  // ended up orbited from twenty-four metres, looking almost straight down at
+  // something five metres tall. The tree is only near one arc of that ring.
+  // So the ring stays a closed loop and rises over the obstacle where it has
+  // to, like flying over a hedge, and keeps its low viewpoints everywhere else.
+  const floorAt = (x, y) => {
+    let z = 0;
+    for (const o of others) {
+      const gapX = Math.max(Math.abs(x - o.x) - (o.spanX ?? o.span) / 2, 0);
+      const gapY = Math.max(Math.abs(y - o.y) - (o.spanY ?? o.span) / 2, 0);
+      if (Math.hypot(gapX, gapY) < clearance) z = Math.max(z, o.height + clearance);
+    }
+    return z;
+  };
+  const lowZ = Math.max(2, Math.min(H * 0.35, H - 0.5));
+  const highZ = Math.max(lowZ + 1, H + Math.max(2, H * 0.35));
   // Rings only earn their place if they see the thing from genuinely different
   // elevations. Squeezed between a floor raised by a neighbour and the top of a
   // short thing, three of them land within a metre of each other and cost three
@@ -350,17 +353,22 @@ function objectPass(g) {
     const step = Math.max(0.4, frameWidth * (1 - frontOverlap));
     const n = Math.max(MIN_PER_RING_OBJ, Math.min(MAX_PER_RING_OBJ,
       Math.ceil((2 * Math.PI * ringR) / step)));
-    const aimed = -(Math.atan2(rise, ringR) * 180) / Math.PI;
-    const pitch = pitchOverride ?? Math.round(
-      Math.max(cam.minGimbalPitch, Math.min(cam.maxGimbalPitch, aimed)) * 10,
-    ) / 10;
     for (let i = 0; i < n; i++) {
       // Offset alternate rings by half a step so they do not stack identically.
       const ang = (2 * Math.PI * (i + (ri % 2) * 0.5)) / n;
+      const px = cx + ringR * Math.sin(ang);
+      const py = cy + ringR * Math.cos(ang);
+      // Where something stands beside the ring, this station alone goes over it.
+      const z = Math.max(h, floorAt(px, py));
+      // Aim from the height actually flown, or a lifted station keeps the tilt
+      // of the height it was lifted from and points past the thing.
+      const aimed = -(Math.atan2(z - aimZ, ringR) * 180) / Math.PI;
       pts.push({
-        ...f.toLatLon(cx + ringR * Math.sin(ang), cy + ringR * Math.cos(ang)),
-        alt: h,
-        pitch,
+        ...f.toLatLon(px, py),
+        alt: z,
+        pitch: pitchOverride ?? Math.round(
+          Math.max(cam.minGimbalPitch, Math.min(cam.maxGimbalPitch, aimed)) * 10,
+        ) / 10,
         heading: { mode: 'towardPOI', poi: centre },
         photo: true,
         pass: 'orbit',

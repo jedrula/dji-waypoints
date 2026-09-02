@@ -606,7 +606,6 @@ function computePlan() {
 
   drawRoute();
   renderPoints();
-  renderConflicts();
   renderReadout();
   renderIdentity();
   if (state.onDevice) showDeviceRoute(null);
@@ -619,9 +618,20 @@ function computePlan() {
 // The route on the map, or not. The 3D view always gets it -- looking at the
 // flight is the whole of that view's job -- so this is only about the map,
 // where the flight sits on top of the thing you are tapping.
+//
+// The flagged legs go with it. They are drawn thicker than the route because
+// they are the part of it you must not miss, which means that left behind on
+// their own they read as the main feature rather than as a warning about a
+// flight that is no longer on screen. The band still says how many there are
+// and still offers the altitude that clears them, so nothing is hidden by
+// hiding them -- only located.
 function drawRoute() {
-  if (showRoute && state.mission) { renderPath(state.mission); return; }
-  for (const g of [layers.path, layers.dots, layers.poses]) g.clearLayers();
+  if (showRoute && state.mission) {
+    renderPath(state.mission);
+    renderConflicts();
+    return;
+  }
+  for (const g of [layers.path, layers.dots, layers.poses, layers.conflicts]) g.clearLayers();
 }
 
 function setShowRoute(on) {

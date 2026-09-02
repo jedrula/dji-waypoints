@@ -31,9 +31,9 @@ import { encodePlan, decodePlan } from './share.js';
 import { initPlans } from './plansui.js';
 import { routeFromRead } from './route.js';
 import { createBasemaps } from './basemap.js';
-import { createSite, pointOf, DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS } from './site.js';
+import { createSite, pointOf, spanMOf, DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS } from './site.js';
 import { localBox } from './obstacles.js';
-import { checkObstacles, clearingAltitude, ringFloor } from './collide.js';
+import { checkObstacles, clearingAltitude } from './collide.js';
 import { createHistory } from './history.js';
 import { judgeFix, parseHeight } from './walk.js';
 import { bestFix, GPS_ERRORS, STALE_MS } from './gps.js';
@@ -283,7 +283,14 @@ const site = createSite({
   },
 });
 
-const siteForPlanner = () => ({ points: site.capture(), shape: $('shape').value });
+// Obstacles go to the planner too, not just to the collision check: they are
+// tall things, and the flight that goes round a tall thing is the flight that
+// photographs it.
+const siteForPlanner = () => ({
+  points: site.capture(),
+  shape: $('shape').value,
+  obstacles: site.obstacles().map((o) => ({ ...pointOf(o), height: o.height, span: spanMOf(o) })),
+});
 
 /* ---------- placing and editing points ---------- */
 const MODES = {
@@ -461,10 +468,17 @@ $('clearMode').addEventListener('click', () => {
 // hundred waypoints; scoring the coverage is seventy, which is the difference
 // between a tap that lands instantly and one that stutters. So the flight is
 // rebuilt on every change and the score catches up a moment after you stop.
-let scoreTimer = null;
-function scoreSoon() {
-  clearTimeout(scoreTimer);
-  scoreTimer = setTimeout(() => {
+// Auto-fit searches altitudes and ring counts by planning dozens of trial
+// missions -- a third of a second, which is fine once you stop tapping and
+// unbearable per tap. It rides the same debounce as the score, and it stops the
+// moment you touch a control: from then on the numbers are yours.
+let tuned = false;
+let settleTimer = null;
+function settleSoon() {
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => {
+    if (!state.mission) return;
+    if (!tuned) autoFit();
     if (!state.mission) return;
     const boxes = site.obstacles().map((o) => localBox(o, state.mission.frame));
     state.coverage = scoreCoverage(state.mission, { maxCameras: 220, boxes });
@@ -473,8 +487,30 @@ function scoreSoon() {
     state.coverage.forWaypoints = state.mission.stats.waypoints;
     renderReadout();
     view3d.setMission(state.mission, state.coverage);
-  }, 250);
+  }, 260);
 }
+
+// The lowest altitude that fits a battery and DJI Fly's 200 waypoints, with the
+// ring count the site's own height argues for. Without it the plan is whatever
+// the raw defaults happen to be -- 40 m over a house is not a decision anyone
+// made.
+function autoFit() {
+  let picked;
+  try {
+    picked = proposePlan(siteForPlanner(), paramsFromUi(uiValues()), cam);
+  } catch {
+    return;
+  }
+  const m = picked?.mission;
+  if (!m) return;
+  $('altitude').value = m.params.altitude;
+  $('orbitRings').value = String(m.params.orbitRings);
+  $('surround').checked = m.params.surround;
+  $('photoMode').value = m.params.photoMode;
+  state.fitNote = picked.note ?? null;
+  computePlan();
+}
+$('refit').addEventListener('click', () => { tuned = false; autoFit(); toast('Re-fitted to the site.'); });
 
 // The footprint, without planning anything. This is what the map draws while
 // you tap, and what the readout can say for free.
@@ -510,8 +546,8 @@ function computePlan() {
   }
 
   const p = paramsFromUi(uiValues());
+  p.subjectClearance = clearance();
   const boxes0 = site.obstacles();
-  p.orbitFloor = ringFloor(boxes0.map((o) => o.height), clearance());
 
   try {
     state.mission = planMission(siteForPlanner(), p, cam);
@@ -539,7 +575,7 @@ function computePlan() {
   view3d.setMission(state.mission, state.coverage);
   view3d.setObstacles(graded(boxes), state.hazard.legs);
   writeUrl();
-  scoreSoon();
+  settleSoon();
 }
 
 // The route on the map, or not. The 3D view always gets it -- looking at the
@@ -623,6 +659,14 @@ function renderAlert(over) {
   el.hidden = !bits.length;
   el.className = `alert ${kind}`;
   el.textContent = bits.join(' ');
+  if (!tuned && state.mission) {
+    const b = document.createElement('span');
+    b.className = 'fitnote';
+    b.textContent = `Auto-fitted: ${state.mission.params.altitude} m, `
+      + `${state.mission.params.orbitRings} ring${state.mission.params.orbitRings === 1 ? '' : 's'} per thing.`;
+    if (el.hidden) { el.hidden = false; el.className = 'alert note'; el.textContent = ''; }
+    el.append(b);
+  }
   if (state.clearAlt && state.clearAlt > +$('altitude').value) {
     const b = document.createElement('button');
     b.type = 'button';
@@ -1043,12 +1087,22 @@ window.addEventListener('keydown', (e) => {
 // Everything here replans. It costs well under a millisecond, and the numbers
 // on screen must never belong to a plan that is no longer the one these
 // settings describe.
-for (const c of Object.values(controls)) {
-  c.el.addEventListener('input', () => { computePlan(); renderIdentity(); });
+const TUNABLE = new Set(['altitude', 'orbitRings', 'surroundRings', 'photoMode', ...PASS_IDS]);
+for (const [name, c] of Object.entries(controls)) {
+  c.el.addEventListener('input', () => {
+    if (TUNABLE.has(name)) tuned = true;
+    computePlan();
+    renderIdentity();
+  });
   c.el.addEventListener('change', () => history.commit());
 }
 for (const id of [...PASS_IDS, ...PICK_IDS]) {
-  $(id).addEventListener('change', () => { computePlan(); renderIdentity(); history.commit(); });
+  $(id).addEventListener('change', () => {
+    if (TUNABLE.has(id)) tuned = true;
+    computePlan();
+    renderIdentity();
+    history.commit();
+  });
 }
 $('clearance').addEventListener('input', () => { computePlan(); });
 $('clearance').addEventListener('change', () => {

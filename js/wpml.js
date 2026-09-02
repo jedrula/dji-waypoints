@@ -253,7 +253,11 @@ export function waylinesWpml(mission, profile) {
       `        <wpml:waypointSpeed>${f1(w.speed)}</wpml:waypointSpeed>`,
       headingXml(w, '        '),
       turnXml('        '),
-      actionGroupXml(w, w.exportIndex, '        ', { withPhoto: !interval, pitchRef }),
+      // A transit waypoint is the climb out of one dome and across to the next.
+      // It is a place the aircraft passes through, not a station, so it takes
+      // no photo -- and photo: false is how any waypoint says that.
+      actionGroupXml(w, w.exportIndex, '        ',
+        { withPhoto: !interval && w.photo !== false, pitchRef }),
     ].filter((r) => r !== null);
     if (interval && w.exportIndex === 0) {
       rows.push(intervalGroupXml(mission, last, '        '));

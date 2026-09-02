@@ -583,6 +583,55 @@ places the same point at the position the phone reports, grown by the accuracy
 it admits to, which is what walking a site now is. There is no separate walk
 mode, because a stop was never anything but a tap you made with your feet.
 
+### A dome per thing, not a ring round the site
+
+The perimeter orbit was a SITE-shaped answer to a THING-shaped question. One
+ring at one radius around everything gives a 3 m wall and a 20 m tower the same
+treatment and spends most of its length over the grass between them, when what
+a reconstruction wants is angular diversity per surface. So every tall thing
+gets its own dome, sized to itself: far enough back to frame its HEIGHT, never
+closer than its own footprint plus the clearance, and rings that pull in as they
+rise so the slant range stays even.
+
+Framing the whole WIDTH is the tempting version and it is wrong -- it asks to
+fit the entire footprint in one frame, so a 200 m site three metres tall gets a
+260 m standoff, resolves nothing, and makes auto-fit fall back to a shutter
+trigger nobody has seen work. Width is covered by going around.
+
+**Obstacles are subjects too.** You marked them so the aircraft would go round
+them, and going round them is precisely the flight that photographs them. One
+tap does both jobs.
+
+**What counts as one thing** is `subjectsOf`, and it is deliberately the single
+rule: three or more capture taps with an outline between them are ONE thing, not
+one per tap; one or two taps outline nothing, so each is its own; every obstacle
+is its own. The scorer builds its surfaces from the same list, because a plan
+optimised for one set of things and graded against another is a plan optimised
+for nothing.
+
+Three things this got wrong first, all found by drawing the plans and looking:
+
+- **A ring never goes near its own centre.** The low ring is floored by anything
+  it would pass close to, and the first version tested distance from the middle
+  rather than closest approach to the *ring*. That collapsed the dome around
+  every post in a row that had a post on each side -- the label said three rings
+  and one was flown. The test is `|d - r| - span/2 < clearance` now, and the
+  pass reports rings flown rather than rings asked for.
+- **Getting from one dome to the next is a leg like any other.** A dome round a
+  bush sits at three metres and the next is across the site, so the straight
+  line between them went through the tree you marked. Each dome now climbs out
+  to a transit height that clears the tallest thing; those waypoints take no
+  photo, which is what `photo: false` means and what `js/wpml.js` now honours.
+- **Auto-fit did not know about obstacles.** It searched for the lowest altitude
+  that fit a battery and DJI Fly's waypoint cap, which over a statue in a
+  courtyard sent the grids through the twelve metre walls. A plan that does not
+  fly is not a fit, and the altitude search is where that has to be caught --
+  by the time the collision warning appears the app has already recommended
+  the flight.
+
+Auto-fit runs by itself until you touch a control, and **Re-fit to the site** in
+Advanced puts you back on it.
+
 ### What ten taps mean
 
 The points define a footprint, and `js/shape.js` is the one place that turns one

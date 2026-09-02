@@ -1,6 +1,7 @@
 import { frame, distM, bearing } from './geo.js';
 import { footprint, gsdCm, fov } from './camera.js';
 import { footprintOf, bounds, centroid, circumradius, polygonArea, clipSegment, DEFAULT_SHAPE } from './shape.js';
+import { checkObstacles } from './collide.js';
 
 // A 3DGS-oriented capture over the points you tapped. Three passes, in this order:
 //   1. nadir grid         - metric backbone, gimbal -90
@@ -24,13 +25,16 @@ export const DEFAULTS = {
   oblique: true,
   orbit: true,
   orbitPad: 15,          // metres outside the box corners
-  orbitRings: 1,         // concentric rings; >1 forms a dome around the subject
+  // Rings per THING, not per site -- so three is affordable, and three is what
+  // a reconstruction wants: one looking up, one level, one looking down. A
+  // subject only ever seen from one elevation has no data for the others.
+  subjectClearance: 2,   // how far a dome stands off a thing, and off its neighbours
+  orbitRings: 3,
   // Where the LOWEST ring sits, in metres AGL. null spreads from half the set
   // altitude, which is an arbitrary anchor that happens to look reasonable. A
   // number here is the honest version: the height of the tallest thing under
   // the ring plus the clearance you are willing to fly at, so the low ring
   // skims the site rather than guessing at it.
-  orbitFloor: null,
   surround: true,        // outward-facing ring: the landscape, not the subject
   surroundRings: 1,      // >1 adds vertical parallax on whatever stands nearby
   transect: false,       // crossing lines THROUGH the site, camera side-on
@@ -142,95 +146,155 @@ function gridPass(g) {
   };
 }
 
-function orbitPass(g) {
-  const { halfX, halfY, pad, f, alt, pitchOverride, rings, cam, frontOverlap, heightOverride, floor } = g;
-  const aimZ = (g.subjectHeight ?? 0) / 2;
-  // A negative offset pulls the ring inside the footprint's corners, which is
-  // what a small subject at low altitude needs -- orbiting a playground from
-  // 50 m out at 5 m high just points the camera at whatever is in between.
-  //
-  // `reach` is how far the furthest tap sits from the middle. For a rectangle
-  // that is its half-diagonal, which is what this used to compute; for the
-  // outline of what you actually tapped it is smaller, and a tighter ring is a
-  // closer look at the thing instead of a lap around the empty corners.
-  const r = Math.max(3, (g.reach ?? Math.hypot(halfX, halfY)) + pad);
+// Every tall thing on the site, in one list, in local metres.
+//
+// This is the single rule, and it has to be single: the things flown around and
+// the things scored must be the same things, or the plan optimises for a site
+// the score is not measuring.
+//
+// Three or more capture taps with an outline between them are ONE thing -- the
+// footprint you drew -- not one thing per tap. Get that wrong and it shows up
+// twice over: the flight puts a dome around each corner of a building, and the
+// scorer models four pillars whose inward faces nothing can ever see.
+//
+// Obstacles are separate things, each its own. You marked them individually
+// because they are individual, and flying round them is what photographs them.
+export function subjectsOf(local, hull, avoid = [], f) {
+  const out = [];
+  const tallTaps = local.filter((q) => (q.height ?? 0) > 0.5);
 
-  // Spacing around the ring cannot come from the nadir footprint: the camera is
-  // aimed sideways at the subject, so what matters is the slant range to it,
-  // not the height above the ground. Measure to the NEAREST part of the box so
-  // the closest surfaces still overlap -- the far side only gets more.
-  const nearHoriz = Math.max(2, r - Math.max(halfX, halfY));
-  const nearRange = Math.hypot(nearHoriz, Math.max(0.5, alt - aimZ));
-  // Orbiting with the camera on the centre means travelling sideways in image
-  // space, so consecutive frames overlap along the image's wide axis.
-  const frameWidth = 2 * nearRange * Math.tan(fov(cam).h / 2);
-  const ringSpacing = Math.max(0.5, frameWidth * (1 - frontOverlap));
-  // Bound the angular step to the published range for orbital capture -- a
-  // frame every 7.5 to 15 degrees. Without this, a ring drawn tight around a
-  // small subject computes a ~5 deg step, which adds almost nothing once
-  // consecutive frames already overlap heavily, and eats the waypoint budget
-  // that extra RINGS and cross passes would spend far better.
-  const MIN_PER_RING = 24; // 15 deg
-  const MAX_PER_RING = 48; // 7.5 deg
-  const n = Math.max(MIN_PER_RING, Math.min(MAX_PER_RING,
-    Math.ceil((2 * Math.PI * r) / ringSpacing)));
-  const centre = f.toLatLon(0, 0);
+  if (tallTaps.length && hull && hull.length >= 3 && polygonArea(hull) > 1) {
+    const c = centroid(hull);
+    const b = bounds(hull);
+    out.push({
+      x: c.x,
+      y: c.y,
+      // The footprint's own width, so the ring stands off from the whole thing
+      // rather than from an assumed six metres.
+      span: Math.max(b.x1 - b.x0, b.y1 - b.y0),
+      height: Math.max(...tallTaps.map((q) => q.height)),
+      kind: 'capture',
+    });
+  } else {
+    // One or two taps outline nothing, so each is a small thing of its own.
+    for (const q of tallTaps) {
+      out.push({ x: q.x, y: q.y, span: SUBJECT_SPAN, height: q.height, kind: 'capture' });
+    }
+  }
+
+  for (const o of avoid) {
+    if ((o.height ?? 0) <= 0.5) continue;
+    out.push({
+      ...f.toLocal(o.lat, o.lon),
+      span: o.span ?? SUBJECT_SPAN,
+      height: o.height,
+      kind: 'obstacle',
+    });
+  }
+  return out;
+}
+
+// One dome around ONE thing.
+//
+// The perimeter orbit this replaces was a SITE-shaped answer: a single ring at
+// a single radius around everything, which gives a 3 m wall and a 20 m tower
+// exactly the same treatment and spends most of its length over the grass
+// between them. What a reconstruction wants is angular diversity per surface,
+// and that is a thing-shaped question -- so every tall thing you tapped gets
+// its own ring, sized to itself.
+//
+// Obstacles are tall things too. You marked them so the aircraft would go
+// round them, and going round them is precisely the flight that photographs
+// them, so they are subjects here as well: one tap does both jobs.
+// How wide a tapped thing is assumed to be when nothing says otherwise. A tap
+// says where and how tall, not how wide; a genuinely wide thing is several taps.
+export const SUBJECT_SPAN = 6;
+
+const FILL = 1.35;              // leave a margin around the thing in frame
+const MIN_PER_RING_OBJ = 12;    // every 30 deg, the floor for a small thing
+const MAX_PER_RING_OBJ = 32;    // every 11 deg, past which frames stop earning
+
+function objectPass(g) {
+  const { subject, others = [], f, cam, frontOverlap, rings, clearance, pitchOverride } = g;
+  const { x: cx, y: cy, height: H, span } = subject;
+  const aimZ = H / 2;
+
+  // Far enough back to frame the thing's HEIGHT, and never closer than its own
+  // footprint plus whatever clearance the flight is being held to.
+  //
+  // Framing the whole WIDTH is the tempting version and it is wrong: it asks to
+  // fit the entire footprint in one frame, so a 200 m site three metres tall
+  // gets a 260 m standoff, resolves nothing, and costs a ring the size of the
+  // county. Width is covered by going around; only height has to fit the frame,
+  // and the span term already keeps the ring outside the thing.
+  const view = fov(cam);
+  const framing = (H / 2) / Math.tan(view.v / 2) * FILL;
+  const r = Math.max(span / 2 + clearance + 2, framing, 3);
+
+  // Heights from just above the ground to over the top, so the thing is seen
+  // looking up, level and down. One ring means the level one.
+  //
+  // The low ring is the one that has to be argued with. Sized off this thing
+  // alone it is a route that flies at 2 m around a bush standing next to a
+  // twenty metre tree -- so anything else the ring would pass near raises the
+  // floor. Only things it would actually pass near: a tall thing on the far
+  // side of the site is not in the way, and letting it lift every ring would
+  // throw away the low views that are the whole point of flying one.
+  // Only things the RING passes close to, which is not the same as things near
+  // the middle. A ring of radius r stands off from its own centre, so its
+  // closest approach to something d away is |d - r| -- a neighbour at exactly
+  // r is right under the flight path, and one at the centre or far outside is
+  // nowhere near it. Testing distance-from-centre instead counts neighbours the
+  // ring never goes near, which collapsed the dome round every post in a row
+  // that had a post on each side.
+  const nearby = others.filter((o) => {
+    const d = Math.hypot(o.x - cx, o.y - cy);
+    return Math.abs(d - r) - o.span / 2 < clearance;
+  });
+  const floor = nearby.length
+    ? Math.max(...nearby.map((o) => o.height)) + clearance
+    : 0;
+  const lowZ = Math.max(2, floor, Math.min(H * 0.35, H - 0.5));
+  const highZ = Math.max(lowZ + 1, floor, H + Math.max(2, H * 0.35));
+  // Rings only earn their place if they see the thing from genuinely different
+  // elevations. Squeezed between a floor raised by a neighbour and the top of a
+  // short thing, three of them land within a metre of each other and cost three
+  // times the flying for one viewpoint -- so below a couple of metres of spread
+  // it is honestly one ring.
+  const spread = highZ - lowZ;
+  const useRings = rings <= 1 || spread < 2 ? 1 : rings;
+  const heights = useRings === 1
+    ? [Math.max(lowZ, Math.min(highZ, aimZ > lowZ ? aimZ : lowZ))]
+    : Array.from({ length: useRings }, (_, k) => lowZ + (spread * k) / (useRings - 1));
+
+  // A dome rather than a cylinder: each ring pulls in as it rises so the slant
+  // range stays constant, which keeps framing and ground resolution even.
+  const slant = Math.hypot(r, Math.max(0.5, heights[0] - aimZ));
+  const centre = f.toLatLon(cx, cy);
   const pts = [];
-
-  // Ring heights spread from a floor up to the set altitude. Standard capture
-  // guidance is three or more orbits at different elevations -- one looking
-  // level, one down, one up -- because a subject only ever seen from one
-  // elevation has no data for the others.
-  //
-  // The floor defaults to half the altitude, which is a shape rather than a
-  // measurement. Given one, the low ring means something: it is the tallest
-  // thing under the ring plus the clearance, so the first orbit skims the site.
-  //
-  // A floor at or above the altitude is ignored rather than clamped. That is
-  // the under-canopy case -- you have deliberately set an altitude BELOW the
-  // things around you, and collapsing every ring onto the ceiling would be a
-  // silent answer to a question you meant to ask. The collision check is what
-  // tells you about it, and it already does.
-  const usableFloor = floor != null && floor > 0 && floor < alt ? floor : alt * 0.5;
-  const derivedHeights = rings <= 1
-    ? [alt]
-    : Array.from({ length: rings },
-        (_, k) => usableFloor + ((alt - usableFloor) * k) / (rings - 1));
-  // The TOP ring is the set altitude, always. Rings spread up TO the altitude,
-  // which is the same height the grids fly, so those two are one level and stay
-  // tied -- an override governs the rings below it, and cannot lift one through
-  // the ceiling either.
-  const top = derivedHeights.length - 1;
-  const heights = heightOverride?.length === derivedHeights.length
-    ? heightOverride.map((z, i) => (i === top ? alt : Math.min(z, alt)))
-    : derivedHeights;
-
-  // Rings form a DOME rather than a cylinder: each one pulls in as it rises so
-  // the slant range to the subject stays constant. That keeps framing and
-  // ground resolution even across rings, and it is the shape the guidance
-  // recommends for anything with height.
-  const slant = Math.hypot(r, Math.max(0.5, Math.min(...heights) - aimZ));
 
   for (let ri = 0; ri < heights.length; ri++) {
     const h = heights[ri];
     const rise = h - aimZ;
-    const ringR = rings <= 1 ? r : Math.max(3, Math.sqrt(Math.max(9, slant * slant - rise * rise)));
-    // Aim at the MIDDLE of the subject, not at the ground under it. Over flat
-    // terrain subjectHeight is 0 and this is the ground centre. Around 3 m tall
-    // playground equipment from a 3 m ring it comes out near horizontal, which
-    // is what actually frames the structure instead of the dirt in front of it.
-    // Rounded to 0.1 deg so the planner, the UI and the exported XML (which
-    // writes one decimal) all agree on the same number.
+    const ringR = useRings === 1
+      ? r
+      : Math.max(span / 2 + clearance + 1, Math.sqrt(Math.max(9, slant * slant - rise * rise)));
+    // Spacing comes from the slant range to the thing, not from height above
+    // the ground: the camera is aimed sideways at it.
+    const range = Math.hypot(ringR, rise);
+    const frameWidth = 2 * range * Math.tan(view.h / 2);
+    const step = Math.max(0.4, frameWidth * (1 - frontOverlap));
+    const n = Math.max(MIN_PER_RING_OBJ, Math.min(MAX_PER_RING_OBJ,
+      Math.ceil((2 * Math.PI * ringR) / step)));
     const aimed = -(Math.atan2(rise, ringR) * 180) / Math.PI;
     const pitch = pitchOverride ?? Math.round(
-      Math.max(cam.minGimbalPitch, Math.min(cam.maxGimbalPitch, aimed)) * 10
+      Math.max(cam.minGimbalPitch, Math.min(cam.maxGimbalPitch, aimed)) * 10,
     ) / 10;
     for (let i = 0; i < n; i++) {
       // Offset alternate rings by half a step so they do not stack identically.
       const ang = (2 * Math.PI * (i + (ri % 2) * 0.5)) / n;
-      const ll = f.toLatLon(ringR * Math.sin(ang), ringR * Math.cos(ang));
       pts.push({
-        ...ll,
+        ...f.toLatLon(cx + ringR * Math.sin(ang), cy + ringR * Math.cos(ang)),
         alt: h,
         pitch,
         heading: { mode: 'towardPOI', poi: centre },
@@ -240,12 +304,9 @@ function orbitPass(g) {
       });
     }
   }
-  return {
-    pts, n: pts.length, r, heights,
-    radii: [...new Set(pts.map((p) => Math.round(Math.hypot(f.toLocal(p.lat, p.lon).x, f.toLocal(p.lat, p.lon).y))))],
-    pitch: pts.length ? pts[0].pitch : 0,
-  };
+  return { pts, r, heights, top: highZ };
 }
+
 
 // The same ring, flown with the camera pointing AWAY from the middle. Every
 // other pass here photographs the box; nothing photographs what is around it,
@@ -394,6 +455,9 @@ export function planMission(site, opts, cam) {
   const points = site?.points ?? [];
   if (!points.length) throw new Error('a mission needs at least one capture point');
   const shape = site.shape ?? DEFAULT_SHAPE;
+  // Marked to be flown around, and therefore also flown around -- which is the
+  // flight that photographs them. See objectPass.
+  const avoid = site.obstacles ?? [];
 
   // Two passes at the frame, because the origin wants to be the middle of the
   // footprint and the footprint is not known until there is a frame to build it
@@ -423,6 +487,8 @@ export function planMission(site, opts, cam) {
   // down -- now answers to what you actually said was there.
   p.subjectHeight = opts.subjectHeight
     ?? local.reduce((h, q) => Math.max(h, q.height ?? 0), 0);
+
+  const subjects = subjectsOf(local, hull, avoid, f);
 
   const fp = footprint(cam, p.altitude);
   const sideSpacing = Math.max(1, fp.across * (1 - p.sideOverlap));
@@ -495,30 +561,83 @@ export function planMission(site, opts, cam) {
       }
     }
   }
-  if (p.orbit) {
-    const r = orbitPass({
-      halfX, halfY, reach, pad: p.orbitPad, f, cam, frontOverlap: p.frontOverlap,
-      subjectHeight: p.subjectHeight,
-      alt: p.altitude, pitchOverride: p.orbitPitch, rings: Math.max(1, p.orbitRings),
-      heightOverride: p.orbitHeights, floor: p.orbitFloor,
+  if (p.orbit && subjects.length) {
+    // Nearest-first, so the route walks from one thing to the next rather than
+    // criss-crossing the site between them.
+    const order = [...subjects];
+    const visited = [];
+    let at = { x: 0, y: 0 };
+    while (order.length) {
+      let best = 0;
+      for (let i = 1; i < order.length; i++) {
+        if (Math.hypot(order[i].x - at.x, order[i].y - at.y)
+            < Math.hypot(order[best].x - at.x, order[best].y - at.y)) best = i;
+      }
+      const [next] = order.splice(best, 1);
+      visited.push(next);
+      at = next;
+    }
+
+    const rings = Math.max(1, p.orbitRings);
+    let count = 0;
+    let tallest = null;
+    const flownRings = [];
+
+    // Getting from one dome to the next is a leg like any other, and the
+    // aircraft flies it straight. A dome round a bush sits at three metres and
+    // the next one is across the site, so the direct line between them goes
+    // through whatever stands in between -- which is exactly the tree you
+    // marked. Climb out of each dome and travel above everything.
+    //
+    // The vertical part is safe by construction: it rises from a station that
+    // is already standing clear of its own subject. The horizontal part is at
+    // transitZ, which clears the tallest thing on the site by the clearance.
+    const transitZ = Math.max(...subjects.map((q) => q.height)) + (p.subjectClearance ?? 2);
+    const overhead = (w) => ({
+      ...w, alt: transitZ, photo: false, transit: true,
+      heading: { mode: 'followWayline' }, pitch: -90, lineStart: false,
     });
-    add(r.pts);
-    orbitHeightsUsed = r.heights;
-    r.heights.forEach((h, i) => {
-      // The top ring normally sits exactly at the set altitude, where the grids
-      // already are; leave that level to the altitude slider so a drag there
-      // moves the whole plan rather than pinning one ring to it.
-      if (!heightLevels.some((lv) => lv.kind === 'altitude' && lv.z === h)) {
+    for (const subject of visited) {
+      const r = objectPass({
+        subject,
+        others: visited.filter((o) => o !== subject),
+        f, cam, frontOverlap: p.frontOverlap, rings,
+        clearance: p.subjectClearance ?? 2, pitchOverride: p.orbitPitch,
+      });
+      if (r.pts.length) {
+        // Only worth the two waypoints when the ring is actually below the
+        // transit height: a dome round the tallest thing already ends up there.
+        const needsLift = r.heights.some((h) => h < transitZ - 0.5);
+        if (needsLift) add([overhead(r.pts[0])]);
+        add(r.pts);
+        if (needsLift) add([overhead(r.pts[r.pts.length - 1])]);
+      }
+      count += r.pts.length;
+      flownRings.push(r.heights.length);
+      if (!tallest || subject.height > tallest.subject.height) tallest = { subject, r };
+    }
+    // The altitude scale can only speak for one set of heights, so it speaks
+    // for the tallest thing -- the one whose rings reach highest.
+    orbitHeightsUsed = tallest.r.heights;
+    tallest.r.heights.forEach((h, i) => {
+      if (!heightLevels.some((lv) => Math.abs(lv.z - h) < 0.05)) {
         heightLevels.push({ kind: 'orbit', index: i, z: h });
       }
     });
-    const ringTxt = r.heights.length > 1
-      ? `${r.heights.length} rings, ${r.heights[0].toFixed(0)}–${r.heights[r.heights.length - 1].toFixed(0)} m, r = ${r.r.toFixed(0)} m`
-      : `r = ${r.r.toFixed(0)} m`;
+    const nCap = visited.filter((q) => q.kind === 'capture').length;
+    const nObs = visited.length - nCap;
+    // A dome squeezed between a raised floor and a short subject honestly flies
+    // fewer rings than were asked for, so report what was flown.
+    const ringTally = [...new Set(flownRings)].sort((a, b) => b - a)
+      .map((n) => `${flownRings.filter((x) => x === n).length}\u00d7${n}`)
+      .join(', ');
+    const sameEverywhere = new Set(flownRings).size === 1;
     passes.push({
-      name: `Orbit ${r.pitch.toFixed(0)}°`,
-      count: r.pts.length,
-      detail: ringTxt,
+      name: `Orbit ${visited.length} thing${visited.length === 1 ? '' : 's'}`,
+      count,
+      detail: `${sameEverywhere ? `${flownRings[0]} ring${flownRings[0] === 1 ? '' : 's'} each`
+        : `rings ${ringTally}`} · tallest ${tallest.subject.height.toFixed(0)} m`
+        + `${nObs ? ` · ${nCap} tapped, ${nObs} obstacles` : ''}`,
     });
   }
   if (p.surround) {
@@ -568,7 +687,7 @@ export function planMission(site, opts, cam) {
   // come from a distance-triggered action group. Ring points are all kept --
   // a circle reduced to its endpoints is a straight line.
   let exported = waypoints;
-  let photos = waypoints.reduce((n, w) => n + w.shots.length, 0);
+  let photos = waypoints.reduce((n, w) => n + (w.photo === false ? 0 : w.shots.length), 0);
   if (p.photoMode === 'interval') {
     exported = waypoints.filter((w, i) => {
       if (w.pass === 'orbit' || w.pass === 'surround') return true;
@@ -591,7 +710,8 @@ export function planMission(site, opts, cam) {
   return {
     params: p,
     cam,
-    site: { points, shape },
+    site: { points, shape, obstacles: avoid },
+    subjects,                   // every tall thing, in local metres
     hull,                       // the footprint, in local metres
     points: local,              // the taps themselves, in local metres, with heights
     frame: f,
@@ -651,7 +771,28 @@ export function proposePlan(site, base, cam, budget = {}) {
   const maxWp = budget.maxWaypoints ?? DJI_FLY_MAX_WAYPOINTS;
   const maxMin = budget.maxMinutes ?? (base.usableFlightMin ?? DEFAULTS.usableFlightMin);
 
-  const fits = (m) => m.stats.waypoints <= maxWp && m.stats.minutes <= maxMin;
+  // A plan that does not fly is not a fit, however cheap it is. Auto-fit used to
+  // ask only whether a mission fitted the battery and DJI Fly's waypoint cap,
+  // which over a statue in a courtyard picked the lowest altitude available and
+  // sent the grids straight through the twelve metre walls around it. The
+  // altitude search is exactly where that has to be caught: by the time the
+  // collision warning appears, the app has already recommended the flight.
+  const clearance = base.subjectClearance ?? DEFAULTS.subjectClearance ?? 2;
+  const boxes = (site.obstacles ?? []).filter((o) => (o.height ?? 0) > 0);
+  const hits = (m) => {
+    if (!boxes.length) return false;
+    const local = boxes.map((o, i) => {
+      const c = m.frame.toLocal(o.lat, o.lon);
+      const half = (o.span ?? SUBJECT_SPAN) / 2;
+      return {
+        id: `a${i}`,
+        min: { x: c.x - half, y: c.y - half, z: 0 },
+        max: { x: c.x + half, y: c.y + half, z: Math.max(0.1, o.height) },
+      };
+    });
+    return checkObstacles(m, local, { clearance }).strikes > 0;
+  };
+  const fits = (m) => m.stats.waypoints <= maxWp && m.stats.minutes <= maxMin && !hits(m);
 
   // Over flat ground one ring is enough -- the orbit is a supporting pass, and
   // there is no vertical subject to see from several elevations. The moment
@@ -741,7 +882,7 @@ export function proposePlan(site, base, cam, budget = {}) {
   let best = null;
   for (const photoMode of ['waypoint', 'interval']) {
     for (let alt = 20; alt <= 120; alt += 5) {
-      const m = planMission(rect, { ...base, altitude: alt, photoMode }, cam);
+      const m = planMission(site, { ...base, altitude: alt, photoMode }, cam);
       if (!best || m.stats.minutes < best.stats.minutes) best = m;
     }
   }

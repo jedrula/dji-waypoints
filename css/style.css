@@ -91,6 +91,8 @@ body {
 .alert { border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.4;
          background: rgba(43,26,26,0.6); border: 1px solid #6d3535; color: #ffcdbd; }
 .alert[hidden] { display: none; }
+.alert.note { background: var(--panel2); border-color: var(--line); color: var(--dim); }
+.fitnote { display: inline; }
 .alert.warn { background: rgba(43,38,26,0.6); border-color: #6d5a35; color: #ffe4bd; }
 .alert button { margin-left: 8px; background: none; border: 0; padding: 0;
                 color: inherit; text-decoration: underline; font-size: 12px; }

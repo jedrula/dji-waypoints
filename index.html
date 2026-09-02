@@ -97,6 +97,9 @@
   <div class="sheetbody">
 
     <div class="sheetpane" id="pane-adv" hidden>
+      <button id="refit" class="block" type="button">Re-fit to the site</button>
+      <p class="hint">Lowest altitude and ring count that fit one battery and DJI Fly's
+      200 waypoints. Runs by itself until you touch a control below.</p>
       <label class="row">
         <span>Altitude AGL</span>
         <span class="ctl"><input id="altitude" type="range" min="3" max="120" step="1"><output id="altitudeOut"></output></span>
@@ -125,7 +128,7 @@
         <label class="chk"><input type="checkbox" id="oblique" checked>
           <span><b>Oblique cross-grid</b><em>&minus;45&deg; · perpendicular lines</em></span></label>
         <label class="chk"><input type="checkbox" id="orbit" checked>
-          <span><b>Perimeter orbit</b><em>aims at centre · facades &amp; edges</em></span></label>
+          <span><b>Orbit every tall thing</b><em>a dome each · facades from every side</em></span></label>
         <label class="chk"><input type="checkbox" id="surround" checked>
           <span><b>Surround ring</b><em>faces outward &middot; horizon &amp; landscape</em></span></label>
         <label class="chk"><input type="checkbox" id="transect">
@@ -145,14 +148,14 @@
         <span class="ctl"><input id="speed" type="range" min="1" max="15" step="0.5"><output id="speedOut"></output></span>
       </label>
       <label class="row">
-        <span>Orbit offset</span>
+        <span>Surround offset</span>
         <span class="ctl"><input id="orbitPad" type="range" min="-30" max="40" step="1"><output id="orbitPadOut"></output></span>
       </label>
       <label class="row">
-        <span>Orbit rings</span>
+        <span>Rings per thing</span>
         <select id="orbitRings">
           <option value="1">1</option><option value="2">2</option>
-          <option value="3">3 — low / level / down</option>
+          <option value="3">3 — up / level / down</option>
           <option value="4">4</option><option value="5">5</option>
         </select>
       </label>

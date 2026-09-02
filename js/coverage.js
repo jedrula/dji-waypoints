@@ -28,55 +28,25 @@ export const SCORE_DEFAULTS = {
   faceStep: 1.2,        // metres between samples on a structure face
 };
 
-// A rough stand-in for the site. Flat ground when there is nothing tall.
-// Otherwise a CLUSTER with real gaps between the pieces -- four blocks in a
-// pinwheel plus a tall thin one -- because the question a coverage score has to
-// answer is what can see *between* things, and a single fat block in the middle
-// cannot pose that question. Gaps are sized so a camera outside the cluster
-// cannot see down them except along their axis.
-// How wide a tapped thing is assumed to be. A tap says where and how tall, not
-// how wide -- and the same assumption is already made for an obstacle tap, so
-// it is the same number. A genuinely wide thing is several taps.
-export const PROXY_SPAN = 6;
-
-// The thing being captured, as the scorer models it: one cube per point you
-// tapped, standing at the height you gave it.
+// The surfaces the scorer measures: one cube per subject the planner flies
+// around. Deliberately derived from the SAME list -- subjectsOf in
+// js/planner.js -- because a plan optimised for one set of things and graded
+// against another is a plan optimised for nothing.
 //
-// This used to invent a crossroads of five blocks sized off the bounding box,
-// because all the app knew was one subject height and a rectangle -- so it made
-// up a plausible little town to have some walls to score against. It is no
-// longer guessing. You said where the things are and how tall each one is, so
-// scoring anything else would be scoring somewhere you never described, and
-// drawing it in 3D put an imaginary town on screen over the real site.
-//
-// Points at zero height contribute no cube. That is correct rather than a gap:
-// they mark ground, the ground is sampled anyway, and a flat site should score
-// as a flat site.
-export function buildProxy(points = [], hull = null, span = PROXY_SPAN) {
-  const tall = points.filter((p) => (p.height ?? 0) > 0.5);
-  if (!tall.length) return [];
-  const top = Math.max(...tall.map((p) => p.height));
-
-  // Several taps with an outline between them are ONE thing, and it has to be
-  // modelled as one solid. A cube per tap looks reasonable and is not: the four
-  // corners of a building become four pillars, whose inward faces no orbit can
-  // ever see, so wall coverage pins at 50% however many rings you fly and the
-  // scorer goes blind to the only thing it is for.
-  if (hull && hull.length >= 3) {
-    const xs = hull.map((q) => q.x);
-    const ys = hull.map((q) => q.y);
-    return [{
-      min: { x: Math.min(...xs), y: Math.min(...ys), z: 0 },
-      max: { x: Math.max(...xs), y: Math.max(...ys), z: top },
-    }];
-  }
-
-  // One or two taps outline nothing, so each is its own small thing.
-  const half = Math.max(0.5, span / 2);
-  return tall.map((p) => ({
-    min: { x: p.x - half, y: p.y - half, z: 0 },
-    max: { x: p.x + half, y: p.y + half, z: p.height },
-  }));
+// It used to invent five blocks in a crossroads, sized off the bounding box and
+// one global subject height, because that was all the app knew. That fiction
+// scored somewhere you never described, and drew an imaginary town over the
+// real site in 3D.
+export function buildProxy(subjects = []) {
+  return subjects
+    .filter((s) => (s.height ?? 0) > 0.5)
+    .map((s) => {
+      const half = Math.max(0.5, (s.span ?? 6) / 2);
+      return {
+        min: { x: s.x - half, y: s.y - half, z: 0 },
+        max: { x: s.x + half, y: s.y + half, z: s.height },
+      };
+    });
 }
 
 // `boxes` are the surfaces being scored; `occluders` is everything solid,
@@ -149,7 +119,7 @@ export function scoreCoverage(mission, opts = {}) {
   const cfg = { ...SCORE_DEFAULTS, ...opts };
   const halfX = mission.sizeX / 2;
   const halfY = mission.sizeY / 2;
-  const boxes = buildProxy(mission.points ?? [], mission.hull ?? null);
+  const boxes = buildProxy(mission.subjects ?? []);
   const occluders = [...boxes, ...(opts.boxes ?? [])];
   // Sample density follows site size: a 20 m playground needs finer steps than
   // a 400 m block, and a fixed step would either under-sample one or bury the

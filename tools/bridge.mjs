@@ -79,8 +79,11 @@ export function adbDevices() {
 // plugged in, and ptpcamerad then holds the interface libmtp needs. It is
 // launchd-managed and comes straight back, so the only thing that works is to
 // kill it immediately before each command rather than once at the start.
+// Android File Transfer grabs the same device just as exclusively, and its
+// agent lingers in the background long after you have closed the window.
 function shooAwayImageCapture() {
-  try { execFileSync('/usr/bin/killall', ['-9', 'ptpcamerad', 'mscamerad-xpc'], { stdio: 'ignore' }); } catch { /* not running */ }
+  const holders = ['ptpcamerad', 'mscamerad-xpc', 'Android File Transfer Agent', 'Android File Transfer'];
+  try { execFileSync('/usr/bin/killall', ['-9', ...holders], { stdio: 'ignore' }); } catch { /* not running */ }
 }
 
 let mtpToolChecked = false;
@@ -104,12 +107,30 @@ export function mtpTool() {
   return existsSync(MTP_TOOL) ? MTP_TOOL : null;
 }
 
+// Losing the device for a moment is normal here, not exceptional. Something
+// else grabs the interface between the killall and the claim; or the claim
+// succeeds, the session does not, and libmtp resets the USB interface and comes
+// back with a device whose storage never enumerated. Both clear on their own,
+// and both used to reach the panel as a wall of LIBMTP PANIC lines that read
+// like the controller was broken. So: shoo the holders away, and if it failed
+// the way a busy device fails, give it a moment and go once more.
+const TRANSIENT = /claim_interface|PTP_ERROR_IO|another process is holding it|did not come up cleanly|Unable to initialize device/;
+
 function mtp(args) {
   const bin = mtpTool();
   if (!bin) throw new Error('mtp helper unavailable — needs libmtp (brew install libmtp) and a compiler');
-  shooAwayImageCapture();
-  const out = execFileSync(bin, args, { encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'pipe'] });
-  return out;
+  for (let attempt = 0; ; attempt++) {
+    shooAwayImageCapture();
+    try {
+      return execFileSync(bin, args, { encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      const why = `${e.stderr ?? ''}${e.message ?? ''}`;
+      if (attempt >= 1 || !TRANSIENT.test(why)) throw e;
+      // Long enough for a killed holder to be gone and a reset interface to
+      // settle, short enough that a person does not read it as a hang.
+      try { execFileSync('/bin/sleep', ['0.6'], { stdio: 'ignore' }); } catch { /* nothing to do */ }
+    }
+  }
 }
 
 // "d|f<TAB>id<TAB>size<TAB>name" per line.

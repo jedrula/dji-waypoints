@@ -523,11 +523,57 @@ timestamp back. Sync merges by last-write-wins, so an undo carrying the old
 timestamp would lose to the very edit it was undoing, and the box would spring
 back on the next sync.
 
+## A plan is a mode, not a tab
+
+The first slot in the menu is not a view called Plan, it is whichever plan you
+are on: **+ New plan** when you are on none, the plan's name when you are, and
+that name plus **· editing** while you are changing it. The pencil beside the
+name is the door in; **Save** and **Cancel** are the doors out.
+
+Viewing a plan and editing one are different screens on purpose, because a mode
+that changes nothing is not a mode. Viewing shows what the plan *is* — the
+stats, the passes, what it collides with. The controls that would change it only
+appear once you have picked up the pencil, and while they are out, Saved, Walk
+and Controller are taken off the menu: they are each a different subject, and
+coming back from one to a half-finished plan is worse than being asked to finish
+it first. Obstacles stays, because the clearance check and the coverage score
+both read the boxes — one you forgot to draw is part of this plan.
+
+Nothing tracks which mode you are in. A plan on screen that differs from the
+plan in the library **is** an edit in progress, and `getCode()` is already that
+comparison — the same string the library stores and a link carries. The only
+latch is the pencil itself, for the moment after you press it and before you
+have typed anything. See `js/planmode.js`.
+
+Two consequences worth knowing. The menu never takes away the view you are
+standing in, so walking a site — where every stop grows the box, and so makes
+the plan an edit in progress — does not throw you out of the survey at the first
+stop; the gate closes when you leave for the plan. And which plan you are on
+rides in the undo snapshot alongside the rectangle and the controls, because it
+is not derived from either: without it, cmd+Z would hand you back the same box
+detached from the plan it came out of, and the next Save would fork a copy.
+
+**Saving onto the controller.** Installing a plan records which mission folder
+it went into, so from then on Save on that plan writes the library copy *and*
+overwrites that same mission — the button says `Save & overwrite on controller`
+when the controller is on the cable, and says why it did not when it is not.
+That memory is local, in `dji.planSlots`, and deliberately not on the plan
+record that syncs: a mission UUID is a fact about the controller plugged into
+one machine, and sending it to the phone would only offer to overwrite a slot
+the phone has never seen.
+
+A mission cannot come the other way. `js/kmzread.js` recovers a flight from a
+KMZ — waypoints, heights, gimbal angles — but the planner only ever wrote
+missions, and the box and the dozen numbers that generated one are not in the
+file. So a mission read off the controller can be looked at, and not edited.
+
 ## Saved plans, and sync between devices
 
 Plans are saved by name in the browser, and a plan is only its code, so the
-whole library is a few kilobytes. **Saved plans** at the top of the panel: name
-it, Save, Load it back later. That alone needs no server and no account.
+whole library is a few kilobytes. **Saved plans** in the menu: Load one to go to
+it, Export it as KMZ without disturbing what is on screen, or delete it. Naming
+and saving happen where the plan is, not here. That alone needs no server and no
+account.
 
 Sync adds the other device, and there is nothing to set up: no login, no key to
 copy. Every device runs under one **sync key** hardcoded in `js/synced.js`, and
@@ -662,7 +708,31 @@ Unable to initialize device` from a failed `libusb_claim_interface`. It is
 launchd-managed and respawns instantly, so the fix is to kill it immediately
 before each MTP command rather than once up front. That is what
 `shooAwayImageCapture()` does, and it is the entire reason a controller that
-"cannot connect" suddenly can.
+"cannot connect" suddenly can. Android File Transfer holds the device just as
+exclusively and its agent outlives the window, so it is on the same kill list.
+When a claim still fails, do not trust the guess in the error message -- ask the
+registry who actually has it:
+
+    ioreg -p IOUSB -w0                       # the RC's node, named KATMAI-IDP…
+    ioreg -p IOService -w0 -r -n "<that name>"
+
+Each holder shows up as an `AppleUSBHostDeviceUserClient` child named after its
+process.
+
+**Losing the device for a moment is normal, so one retry is part of the call.**
+Chrome, `adb` and Image Capture all come and go on the same interface, and
+mtptool can lose the race in two ways. Either the claim fails outright, or the
+claim succeeds, the session does not, and libmtp resets the USB interface and
+reopens -- and *that* device can arrive with no storage enumerated at all.
+
+The second one used to lie about what went wrong. mtptool fell back to storage
+id 0, walked the path from nowhere, found nothing and reported
+`no such folder: Android/data/dji.go.v5/files/waypoint` -- about a folder that
+was there the whole time and had never been looked for. It now says
+`device reported no storage` instead, and `mtp()` in `tools/bridge.mjs` treats
+both failures as what they are: transient. Shoo the holders away, wait 600 ms,
+go once more. A controller that is simply not plugged in is not in that set and
+still fails immediately.
 
 **libmtp's own CLI cannot write into a folder.** `mtp-sendfile` takes no parent,
 so it aims at the storage root with storage id 0, and the RC answers

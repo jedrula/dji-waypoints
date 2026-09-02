@@ -1,16 +1,24 @@
-// The left pane holds three unrelated jobs -- planning a flight, the plans you
-// keep, and a controller on the end of a USB cable -- and stacking them in one
-// scroll made each look like a step of the next. Each is a view now, and this is
-// the switch that drives them: one button per view, one pane visible at a time.
+// The left pane holds several unrelated jobs -- the plan you are on, the plans
+// you keep, the world it flies through, and a controller on the end of a USB
+// cable -- and stacking them in one scroll made each look like a step of the
+// next. Each is a view now, and this is the switch that drives them: one button
+// per view, one pane visible at a time.
 //
 // Views are declared by the app; this module only knows about `#menu` and a
 // `#pane-<id>` per view, so a new view is a button and a div.
+//
+// Two things here are not just switching. A label can change, because the first
+// slot is no longer a fixed word -- it is whichever plan you are on. And a
+// button can be taken away, because editing a plan hides every view that is not
+// part of finishing it; a hidden view cannot be shown, so the pane you are
+// looking at can never be one the menu is no longer offering.
 
 const $ = (id) => document.getElementById(id);
 
 export function createMenu(views) {
   const nav = $('menu');
   const buttons = new Map();
+  const hidden = new Set();
   let current = null;
 
   for (const v of views) {
@@ -31,7 +39,7 @@ export function createMenu(views) {
 
   function show(id) {
     const view = views.find((v) => v.id === id);
-    if (!view || id === current) return;
+    if (!view || hidden.has(id) || id === current) return;
     current = id;
     for (const v of views) {
       $(`pane-${v.id}`).hidden = v.id !== id;
@@ -50,6 +58,24 @@ export function createMenu(views) {
     el.className = `mbadge ${kind}`;
   }
 
+  function setLabel(id, text) {
+    const el = buttons.get(id)?.querySelector('.mlabel');
+    if (el) el.textContent = text;
+  }
+
+  // Taking a view away while you are standing in it would leave a pane on
+  // screen with no way back to it, so the caller's own view comes forward
+  // first. `keep` is that view: the one doing the hiding.
+  function setVisible(ids, on, keep) {
+    for (const id of ids) {
+      const b = buttons.get(id);
+      if (!b) continue;
+      b.hidden = !on;
+      if (on) hidden.delete(id); else hidden.add(id);
+    }
+    if (!on && hidden.has(current) && keep) show(keep);
+  }
+
   show(views[0].id);
-  return { show, badge, current: () => current };
+  return { show, badge, setLabel, setVisible, current: () => current };
 }

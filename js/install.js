@@ -24,6 +24,32 @@ const state = {
   file: null,      // a KMZ picked from disk, which wins over the saved plan
 };
 
+// Where each plan was last installed, so that saving an edited plan can go
+// straight back to the same mission instead of asking you to find it again.
+//
+// Deliberately not on the plan record, which syncs: a mission UUID is a fact
+// about the controller plugged into THIS machine, and shipping it to the phone
+// would only offer to overwrite a slot the phone has never seen. Local, keyed
+// by plan id, and it costs nothing when it turns out to be stale -- the slot
+// simply is not on the controller any more, and Save says so.
+const SLOT_KEY = 'dji.planSlots';
+
+function slotMemory() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SLOT_KEY) ?? '{}');
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function rememberSlot(planId, transport, slot) {
+  if (!planId) return;
+  const all = slotMemory();
+  all[planId] = { transport, slot };
+  try { localStorage.setItem(SLOT_KEY, JSON.stringify(all)); } catch { /* full or private */ }
+}
+
 let savedPlans = () => [];
 let partsForPlan = () => null;
 let planRoute = () => null;
@@ -349,24 +375,17 @@ async function scan() {
 
 async function go() {
   const parts = sourceParts();
-  const usable = state.slots.filter((s) => s.exists);
-  const start = usable.findIndex((s) => s.id === state.selected);
-  if (!parts || start < 0) return;
-  const targets = usable.slice(start, start + parts.length);
+  if (!parts || !state.selected) return;
 
   state.busy = true;
   $('instGo').disabled = true;
   setStatus('writing…');
   try {
-    const { installed } = await api('/api/install', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        transport: state.transport,
-        items: parts.map((p, i) => ({ slot: targets[i].id, b64: b64(p.bytes) })),
-      }),
-    });
+    const { installed, targets } = await writeParts(parts, state.selected);
     const backups = installed.map((r) => r.backup).filter(Boolean);
+    // A plan now has a home on this controller, which is what lets Save
+    // overwrite it later. A KMZ from disk does not -- there is no plan behind it.
+    if (state.planId && !state.file) rememberSlot(state.planId, state.transport, targets[0].id);
     state.busy = false;
     await loadSlots({ quiet: true });
     setStatus(`Installed ${installed.length} mission${installed.length === 1 ? '' : 's'}. `
@@ -378,6 +397,28 @@ async function go() {
   }
   state.busy = false;
   await loadSlots({ quiet: true });
+}
+
+// Writing a set of parts into consecutive slots from `first`. The one rule the
+// panel above enforces is enforced here too: a plan in three parts needs three
+// mission folders from that point on, or it is not installable at all.
+async function writeParts(parts, first) {
+  const usable = state.slots.filter((s) => s.exists);
+  const start = usable.findIndex((s) => s.id === first);
+  if (start < 0) throw new Error('that mission is no longer on the controller');
+  const targets = usable.slice(start, start + parts.length);
+  if (targets.length < parts.length) {
+    throw new Error(`${parts.length} parts but only ${targets.length} mission folder(s) from there`);
+  }
+  const { installed } = await api('/api/install', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      transport: state.transport,
+      items: parts.map((p, i) => ({ slot: targets[i].id, b64: b64(p.bytes) })),
+    }),
+  });
+  return { installed, targets };
 }
 
 /* ---------- wiring ---------- */
@@ -427,5 +468,36 @@ export function initInstall(opts) {
     // Saving, deleting or syncing a plan changes what step 2 can offer.
     plansChanged: () => { if (hasApi) renderAll(); },
     refresh: () => { if (hasApi) scan(); },
+
+    // Has this plan been installed somewhere, and is that somewhere on the
+    // cable right now? `connected` is what turns Save into an overwrite.
+    slotFor(planId) {
+      const known = slotMemory()[planId];
+      if (!known) return null;
+      const here = state.transport === known.transport
+        && state.slots.find((s) => s.id === known.slot && s.exists);
+      return {
+        ...known,
+        short: shortId(known.slot),
+        connected: Boolean(hasApi && here),
+        waypoints: here ? here.waypoints : null,
+      };
+    },
+
+    // Save's controller half: the same bytes the panel would write, into the
+    // mission this plan already lives in.
+    async installPlan(planId) {
+      const known = slotMemory()[planId];
+      const plan = savedPlans().find((p) => p.id === planId);
+      if (!known || !plan) throw new Error('this plan has no mission on the controller yet');
+      const parts = partsForPlan(plan);
+      if (!parts) throw new Error('this plan will not build — it may be from an older format');
+      const { installed, targets } = await writeParts(parts, known.slot);
+      await loadSlots({ quiet: true });
+      const backup = installed.map((r) => r.backup).filter(Boolean).pop();
+      return `Saved, and written to ${targets.map((t) => shortId(t.id)).join(', ')}. `
+        + 'Reopen DJI Fly on the controller to see it'
+        + (backup ? ` — replaced copy saved to ${backup}` : '');
+    },
   };
 }

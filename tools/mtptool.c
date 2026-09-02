@@ -51,9 +51,24 @@ int main(int argc, char **argv) {
   }
   LIBMTP_mtpdevice_t *dev = LIBMTP_Open_Raw_Device_Uncached(&raw[0]);
   free(raw);
-  if (!dev) { fprintf(stderr, "could not open the device (is ptpcamerad holding it?)\n"); return 1; }
+  // Whoever has it, macOS gives USB interfaces out exclusively, so naming a
+  // suspect here only sends you chasing the wrong process. ioreg tells you:
+  //   ioreg -p IOService -w0 -r -n "$(the device's USB product name)"
+  // lists an AppleUSBHostDeviceUserClient per holder.
+  if (!dev) { fprintf(stderr, "could not open the device (another process is holding it)\n"); return 1; }
+  // A session that came up the hard way -- PTP_ERROR_IO, libmtp resets the USB
+  // interface and reopens -- can arrive with no storage enumerated at all. The
+  // old code fell back to storage 0 there, walked the path from nowhere, found
+  // nothing, and reported "no such folder" about a folder that was never looked
+  // for. Ask twice, then say which of the two things actually went wrong.
   LIBMTP_Get_Storage(dev, LIBMTP_STORAGE_SORTBY_NOTSORTED);
-  uint32_t storage = dev->storage ? dev->storage->id : 0;
+  if (!dev->storage) LIBMTP_Get_Storage(dev, LIBMTP_STORAGE_SORTBY_NOTSORTED);
+  if (!dev->storage) {
+    fprintf(stderr, "device reported no storage — the session did not come up cleanly\n");
+    LIBMTP_Release_Device(dev);
+    return 1;
+  }
+  uint32_t storage = dev->storage->id;
   const char *path = strcmp(cmd, "put") == 0 ? argv[3] : argv[2];
   uint32_t dir = resolve(dev, storage, path);
   if (dir == NOT_FOUND) { fprintf(stderr, "no such folder: %s\n", path); return 1; }

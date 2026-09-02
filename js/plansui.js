@@ -6,15 +6,16 @@
 //
 // It owns nothing outside its own pane: the plan count goes out through
 // `setCount` (the menu badge wears it) and loading one hands over through
-// `applyCode` / `onLoaded`.
+// `applyCode` / `onLoaded`. Saving is not here either -- it belongs to the plan
+// you are editing, so js/planmode.js owns the button and calls `save` below.
 
 import { createPlanStore } from './plans.js';
 
 const $ = (id) => document.getElementById(id);
 
 export function initPlans({
-  getCode, applyCode, describe, exportPlan = null,
-  setCount = () => {}, onLoaded = () => {}, onChange = () => {},
+  applyCode, exportPlan = null,
+  setCount = () => {}, onLoaded = () => {}, onChange = () => {}, onDeleted = () => {},
 }) {
   const store = createPlanStore();
   let selected = null;
@@ -29,15 +30,6 @@ export function initPlans({
   function status(text, kind = '') {
     $('planStatus').textContent = text;
     $('planStatus').className = `hint ${kind}`;
-  }
-
-  // Saving happens from the plan view, so that is where the answer has to
-  // appear -- the list's own status line is a pane away.
-  function saveStatus(text, kind = '') {
-    const el = $('saveStatus');
-    if (!el) return;
-    el.textContent = text;
-    el.className = `hint ${kind}`;
   }
 
   function render() {
@@ -60,7 +52,6 @@ export function initPlans({
       load.addEventListener('click', () => {
         if (applyCode(p.code)) {
           selected = p.id;
-          $('planName').value = p.name;
           status(`Loaded “${p.name}”.`, 'ok');
           render();
           onLoaded(p);
@@ -93,6 +84,7 @@ export function initPlans({
       del.addEventListener('click', () => {
         store.remove(p.id);
         if (selected === p.id) selected = null;
+        onDeleted(p.id);
         status(`Deleted “${p.name}”.`);
         render();
         sync({ quiet: true });
@@ -105,25 +97,17 @@ export function initPlans({
     onChange(plans);
   }
 
-  $('planSave').addEventListener('click', () => {
-    const code = getCode();
-    if (!code) {
-      const msg = 'Draw a box first — there is no plan to save.';
-      saveStatus(msg, 'bad');
-      status(msg, 'bad');
-      return;
-    }
-    const name = $('planName').value.trim() || describe() || 'Untitled plan';
-    // Saving over the plan you loaded is the common case; a new name is a new plan.
-    const existing = store.list().find((p) => p.id === selected && p.name === name);
-    const saved = store.save({ id: existing?.id, name, code });
+  // An id means overwrite the plan you were editing -- including under a new
+  // name, because renaming a plan is not the same act as making another one.
+  // Without an id it is new, which is what the + New button leaves you with.
+  function save({ id, name, code }) {
+    const saved = store.save({ id, name, code });
     selected = saved.id;
-    $('planName').value = saved.name;
-    saveStatus(`Saved “${saved.name}” — it is in Saved plans now.`, 'ok');
     status(`Saved “${saved.name}”.`, 'ok');
     render();
     sync({ quiet: true });
-  });
+    return saved;
+  }
 
   $('syncNow').addEventListener('click', () => sync());
 
@@ -160,5 +144,11 @@ export function initPlans({
   }
   render();
   sync({ quiet: true });
-  return { render, sync, list: () => store.list() };
+  return {
+    render,
+    sync,
+    save,
+    list: () => store.list(),
+    select: (id) => { selected = id; render(); },
+  };
 }

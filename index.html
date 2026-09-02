@@ -18,6 +18,17 @@
     <nav id="menu"></nav>
 
     <div class="pane" id="pane-plan">
+      <div class="planhead" id="planHead">
+        <div class="planid">
+          <h2 id="planTitle">New plan</h2>
+          <p class="planwhere" id="planWhere"></p>
+        </div>
+        <div class="planacts">
+          <button id="planEdit" type="button" class="pencil" title="Edit this plan" aria-label="Edit this plan"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M11.1 1.4a1.6 1.6 0 0 1 2.3 2.3l-.9.9-2.3-2.3.9-.9zM9.5 3l2.3 2.3-6.4 6.4-3 .7.7-3L9.5 3z"/></svg></button>
+          <button id="planNew" type="button" class="linkish" title="Start a plan from scratch">+ New</button>
+        </div>
+      </div>
+
       <section class="step" id="step-area">
         <h2><span class="n">1</span> Area</h2>
         <div class="search">
@@ -132,12 +143,16 @@
         <div id="warn" class="warn" hidden></div>
         <p class="hint" id="sizeHint"></p>
 
-        <div class="planrow saverow">
-          <input id="planName" type="text" placeholder="Name this plan…" autocomplete="off">
+      </section>
+
+      <div class="editbar" id="editBar">
+        <input id="planName" type="text" placeholder="Name this plan…" autocomplete="off">
+        <div class="editacts">
           <button id="planSave" class="primary" type="button">Save plan</button>
+          <button id="planCancel" type="button">Cancel</button>
         </div>
         <p class="hint" id="saveStatus"></p>
-      </section>
+      </div>
     </div>
 
     <div class="pane" id="pane-saved" hidden>

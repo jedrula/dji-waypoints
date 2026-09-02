@@ -9,6 +9,7 @@ import { encodePlan, decodePlan } from './share.js';
 import { initPlans } from './plansui.js';
 import { routeFromRead } from './route.js';
 import { createMenu } from './menu.js';
+import { initPlanMode } from './planmode.js';
 import { initWorld } from './worldui.js';
 import { localBox, overlaps, describe, DEFAULT_HEIGHT } from './obstacles.js';
 import { checkObstacles, clearingAltitude, ringFloor } from './collide.js';
@@ -64,7 +65,11 @@ function paneChanged() {
 }
 
 const menu = createMenu([
-  { id: 'plan', label: 'Plan', onShow: () => paneChanged() },
+  // No label of its own: js/planmode.js writes whichever plan you are on into
+  // this slot, and "+ New plan" when you are on none.
+  // Arriving at the plan is when the menu gate can close: leaving a walk that
+  // has been growing the box is the way that happens without anything replanning.
+  { id: 'plan', label: '+ New plan', onShow: () => { paneChanged(); if (ready) planmode.refresh(); } },
   { id: 'saved', label: 'Saved', onShow: () => paneChanged() },
   { id: 'world', label: 'Obstacles', onShow: () => paneChanged() },
   { id: 'walk', label: 'Walk', onShow: () => paneChanged() },
@@ -996,7 +1001,25 @@ function recheck() {
   view3d.setObstacles(graded(boxes), state.hazard.legs);
 }
 
+// The box off the map, and everything drawn from it with it. Undo lands here,
+// and so does cancelling a plan you never saved.
+function dropPlan() {
+  state.rect = null;
+  layers.rect.remove();
+  layers.handles.clearLayers();
+  layers.dims.clearLayers();
+}
+
+// A plan changing is the only thing that can change what mode you are in --
+// having one at all, and whether it still matches the one in the library -- so
+// the two are the same call. `ready` because setup replans before planmode is
+// built; startup refreshes once by hand when it is.
 function replan() {
+  replanFrom();
+  if (ready) planmode.refresh();
+}
+
+function replanFrom() {
   const p = readParams();
   $('gsdHint').textContent = `${gsdCm(cam, p.altitude).toFixed(2)} cm/px ground resolution`;
   // No area, no flight -- and so nothing true left to say about what it hits.
@@ -1557,12 +1580,13 @@ view3d.onBoxSelect((id) => {
 // Saved plans store the same code the link carries, so a saved plan and a
 // pasted link are the same thing arriving by different routes.
 const plans = initPlans({
-  getCode: () => encodePlan(state.rect, uiValues()),
   // Saving or deleting one changes what the controller can be handed.
   onChange: () => bridge.plansChanged(),
   setCount: (n) => menu.badge('saved', n || ''),
-  // You loaded a plan to work on it, so the plan is what you should be looking at.
-  onLoaded: () => menu.show('plan'),
+  // You loaded a plan to look at it, so the plan is what you should be looking
+  // at -- and it is the plan you are on from here until you leave it.
+  onLoaded: (p) => { menu.show('plan'); planmode.load(p); },
+  onDeleted: (id) => planmode.forget(id),
   applyCode: (code) => {
     const plan = decodePlan(code);
     if (plan) applyPlan(plan);
@@ -1575,6 +1599,30 @@ const plans = initPlans({
     if (!built) return 0;
     return downloadKmz(built.mission, built.plan.ui.profile ?? $('profile').value);
   },
+});
+
+// Viewing a plan, or changing one. See js/planmode.js for why the mode is
+// derived from the plan rather than tracked alongside it.
+const planmode = initPlanMode({
+  menu,
+  plans,
+  device: bridge,
+  getCode: () => encodePlan(state.rect, uiValues()),
+  hasPlan: () => Boolean(state.rect),
+  applyCode: (code) => {
+    const plan = decodePlan(code);
+    if (plan) applyPlan(plan);
+    return Boolean(plan);
+  },
+  // Starting over, or discarding a plan you never saved, is an action a person
+  // took -- so cmd+Z takes it back like any other. Without the commit the
+  // stack's idea of the present would also be a plan that is no longer on
+  // screen, and the next undo would revert to it by accident.
+  clearPlan: () => { dropPlan(); replan(); history.commit(); },
+  // Which plan you are on is not derived from the rectangle, so the stack has
+  // to be told when it changes. Not an action of its own -- it always rides
+  // alongside one -- which is exactly what refresh is for.
+  onSession: () => { if (ready) history.refresh(); },
   // A plan nobody named is still worth finding again: say where and how big.
   describe: () => (state.mission
     ? `${state.mission.sizeX.toFixed(0)}×${state.mission.sizeY.toFixed(0)} m at ${state.rect.north.toFixed(4)}, ${state.rect.west.toFixed(4)}`
@@ -1725,6 +1773,9 @@ const history = createHistory({
     rect: state.rect ? { ...state.rect } : null,
     ui: uiValues(),
     obstacles: world.list().map((o) => ({ ...o })),
+    // Not derived from the other three: the same box and sliders are a
+    // different thing depending on whether they are a saved plan or a new one.
+    plan: { ...planmode.current() },
   }),
   restore: (snap) => {
     applyUiValues(snap.ui);
@@ -1733,13 +1784,11 @@ const history = createHistory({
       applyRect(L.latLngBounds([snap.rect.south, snap.rect.west], [snap.rect.north, snap.rect.east]));
       drawHandles();
     } else {
-      state.rect = null;
-      layers.rect.remove();
-      layers.handles.clearLayers();
-      layers.dims.clearLayers();
+      dropPlan();
     }
     state.autofitNote = null;
     state.autofitAlt = null;
+    planmode.restore(snap.plan);
     replan();
   },
   // A box that arrived from the other device belongs in every snapshot on the
@@ -1797,6 +1846,8 @@ readUrl();
 readParams();
 $('gsdHint').textContent = `${gsdCm(cam, DEFAULTS.altitude).toFixed(2)} cm/px ground resolution`;
 ready = true;
+planmode.refresh();  // replan ran while planmode was still being built
+history.refresh();   // and so did the snapshot behind the undo stack
 renderObstacles();   // they are context, so they are on the map before any plan is
 pushGround();        // hands the 3D view its tile source, on or off
 urlFrozen = false;

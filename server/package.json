@@ -1,0 +1,14 @@
+{
+  "name": "dji-waypoints-heights",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Measured obstacle heights for Poland, from GUGiK LiDAR, on demand.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node test/run.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": { "laz-perf": "^0.0.7" }
+}

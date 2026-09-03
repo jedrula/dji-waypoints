@@ -10,6 +10,7 @@ import { findTiles } from '../src/gugik.js';
 import { createTile, tileOf, originOf, TILE_M, SIZE, NO_DATA, MAX_H } from '../src/ndsm.js';
 import { createStore, LISTS } from '../src/store.js';
 import { createScene, GRID, CELL_M, KIND } from '../src/scene.js';
+import { createOrthoStore, ORTHO_PX } from '../src/ortho.js';
 
 let fails = 0;
 const ok = (name, cond, extra = '') => {
@@ -252,6 +253,45 @@ console.log('\nrough model');
      `${height[at(215, 230)]} vs ${height[at(245, 230)]}`);
   ok('counts what it had to invent', stats.kinds.guessed > 10000, String(stats.kinds.guessed));
   ok('and what it actually saw', stats.kinds.building > 1000 && stats.kinds.ground > 100000);
+}
+
+console.log('\northophoto');
+{
+  const dir = mkdtempSync(join(tmpdir(), 'ortho-'));
+  const reply = (bytes, type = 'image/jpeg') => ({
+    ok: true, headers: { get: () => type },
+    arrayBuffer: async () => new ArrayBuffer(bytes),
+  });
+
+  // A real photograph of a city carries about 0.24 bytes a pixel.
+  let store = createOrthoStore({ dir, fetchImpl: async () => reply(985798) });
+  const good = await store.fetchOrtho(1, 1);
+  ok('keeps a real photograph', good.bytes === 985798);
+
+  // The same service over a forest answers 200 with a blank white JPEG,
+  // because JPEG has no alpha and no-data has to look like something.
+  store = createOrthoStore({ dir, fetchImpl: async () => reply(115315) });
+  let blank = null;
+  try { await store.fetchOrtho(2, 2); } catch (e) { blank = e; }
+  ok('rejects a blank tile', Boolean(blank), 'it was accepted');
+  ok('and says it is absence, not failure', blank?.blank === true);
+
+  // A WMS reports errors as a valid XML document with a 200.
+  store = createOrthoStore({ dir, fetchImpl: async () => reply(900000, 'text/xml') });
+  let xml = null;
+  try { await store.fetchOrtho(3, 3); } catch (e) { xml = e; }
+  ok('rejects an XML error dressed as an image', Boolean(xml) && !xml.blank);
+
+  // A real transient failure is a failure, not an absence -- the difference
+  // decides whether it is retried.
+  store = createOrthoStore({ dir, fetchImpl: async () => ({ ok: false, status: 400 }) });
+  let http = null;
+  try { await store.fetchOrtho(4, 4); } catch (e) { http = e; }
+  ok('a 400 is a failure and stays retryable', Boolean(http) && !http.blank);
+
+  ok('the blank threshold sits between the two', 115315 / (ORTHO_PX * ORTHO_PX) < 0.06
+     && 985798 / (ORTHO_PX * ORTHO_PX) > 0.06);
+  rmSync(dir, { recursive: true, force: true });
 }
 
 console.log(`\n${fails === 0 ? 'ALL PASS' : `${fails} FAILURES`}`);

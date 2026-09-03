@@ -130,6 +130,30 @@ Water is the other honest gap. It returns almost nothing to a laser, so the
 river arrives as a hole; it is filled from its rim and flattened, and those
 cells keep class 0 so nothing downstream mistakes the fill for a measurement.
 
+### Colour, where there is any
+
+GUGiK's "HighResolution" orthophoto advertises the whole country and covers the
+towns. Ask it for a forest in Zachodniopomorskie and it returns a **perfectly
+valid JPEG that is blank white** -- JPEG has no alpha, so no-data has to look
+like something, and stored unchecked that becomes a tile whose photo washes the
+whole model out. A blank one compresses to 0.027 bytes a pixel where Wroclaw
+runs 0.24, so that is the test, and it distinguishes absence (never retried)
+from a transient failure (always retried).
+
+Where there is no national photo the viewer falls back to the same Esri imagery
+the planner's map uses, warped from Web Mercator onto the PUWG92 grid per
+output pixel. Pasting it instead of warping puts every roof a couple of metres
+from its own outline.
+
+```
+Cybulskiego 22, Wroclaw    GUGiK 25 cm       12 pts/m2   38% unmeasured (a river)
+Lesna Polana 2, Dominikowo Esri z19          4 pts/m2    12% unmeasured
+```
+
+The rural tile is a third the point density and still resolves individual tree
+crowns along the forest edge, which is the thing you actually want to know
+about before flying there.
+
 ```
 /scene                       the viewer, default Cybulskiego 22
 /scene?lat=..&lon=..         anywhere in Poland with coverage

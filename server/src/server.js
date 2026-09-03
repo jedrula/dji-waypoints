@@ -149,6 +149,20 @@ async function cachedScene(tn, te) {
       readFile(scenePath(tn, te)),
       readFile(sceneMetaPath(tn, te), 'utf8').then(JSON.parse),
     ]);
+    // The photo is fetched alongside the geometry but is not part of it, and
+    // the geometry takes minutes while the photo takes seconds. A WMS hiccup
+    // during a build used to be written into the scene and kept forever, so
+    // the tile was permanently colourless over a failure that had long since
+    // passed. Check the disk instead of trusting what we recorded.
+    if (meta.ortho?.error && !meta.ortho?.empty) {
+      try {
+        const s2 = await stat(orthoStore.fileFor(tn, te));
+        if (s2.size > 0) {
+          meta.ortho = { bytes: s2.size, pixels: ORTHO_PX };
+          await writeFile(sceneMetaPath(tn, te), JSON.stringify(meta));
+        }
+      } catch { /* still missing; the recorded error stands */ }
+    }
     return { body, meta };
   } catch {
     return null;
@@ -175,7 +189,7 @@ async function buildScene(tn, te) {
     const got = await orthoStore.fetchOrtho(tn, te);
     ortho = { bytes: got.bytes, pixels: ORTHO_PX };
   } catch (err) {
-    ortho = { error: String(err.message ?? err) };
+    ortho = err.blank ? { empty: true, reason: String(err.message) } : { error: String(err.message ?? err) };
   }
 
   // heights first, then one classification byte per cell -- one file, one
@@ -396,6 +410,14 @@ const server = http.createServer(async (req, res) => {
       const { east, north } = toPuwg92(lat, lon);
       const { te, tn } = tileOf(east, north);
       return send(res, 200, { tile: { tn, te }, east, north }, origin);
+    }
+
+    // The viewer needs the same projection the server uses -- one copy, and
+    // the client warps imagery with exactly the maths the tiles were cut on.
+    if (url.pathname === '/puwg92.js') {
+      const mod = await readFile(path.join(HERE, '..', '..', 'js', 'puwg92.js'));
+      res.writeHead(200, headers(origin, { 'Content-Type': 'text/javascript; charset=utf-8' }));
+      return res.end(mod);
     }
 
     if (url.pathname === '/' || url.pathname === '/scene') {

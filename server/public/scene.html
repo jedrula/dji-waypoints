@@ -63,8 +63,7 @@
 </div>
 
 <div class="panel" id="controls" hidden>
-  <label>walls <input type="range" id="wallCut" min="0.5" max="6" step="0.25" value="1.75"></label>
-  <label>height <input type="range" id="exag" min="1" max="3" step="0.1" value="1"></label>
+  <label title="how big a step counts as a vertical face">walls <input type="range" id="wallCut" min="0.5" max="6" step="0.25" value="1.75"></label>
   <label><input type="checkbox" id="showKind"> classify</label>
   <span><kbd>drag</kbd> orbit · <kbd>wheel</kbd> zoom · <kbd>shift+drag</kbd> pan</span>
 </div>
@@ -74,15 +73,19 @@ const $ = (id) => document.getElementById(id);
 // A module with top-level await swallows its own failures: the promise rejects,
 // nothing catches it, and the page just sits on the loading screen looking like
 // a slow network. Say what actually went wrong, on the page.
-addEventListener('unhandledrejection', (e) => {
-  $('bootmsg').innerHTML = `<span class="bad">${String(e.reason?.message ?? e.reason)}</span>`;
+// Once the model is up, a stray runtime error must not put the loading screen
+// back over the top of it -- the view still works and burying it is worse than
+// the error. Before that, say what went wrong instead of spinning forever.
+let ready = false;
+const report = (msg) => {
+  if (ready) { console.error(msg); return; }
+  $('bootmsg').innerHTML = `<span class="bad">${msg}</span>`;
   $('boot').hidden = false;
-});
-addEventListener('error', (e) => {
-  $('bootmsg').innerHTML = `<span class="bad">${e.message}</span>`;
-  $('boot').hidden = false;
-});
+};
+addEventListener('unhandledrejection', (e) => report(String(e.reason?.message ?? e.reason)));
+addEventListener('error', (e) => report(e.message));
 const params = new URLSearchParams(location.search);
+const { toWgs84 } = await import('/puwg92.js');
 
 // Cybulskiego 22 by default -- the address this whole thread started from.
 const lat = Number(params.get('lat') ?? 51.1166299);
@@ -109,12 +112,118 @@ const N = meta.grid;
 const height = new Uint16Array(raw, 0, N * N);
 const kind = new Uint8Array(raw, N * N * 2, N * N);
 
-const ortho = await new Promise((resolve) => {
-  const img = new Image();
-  img.onload = () => resolve(img);
-  img.onerror = () => resolve(null);
-  img.src = `/v1/scene/${tn}/${te}.jpg`;
-});
+// Colour, in order of preference.
+//
+// GUGiK's orthophoto is the right source -- open, 25 cm, and already in the
+// same projection as the geometry -- but "HighResolution" means the towns.
+// Over a forest in Zachodniopomorskie there is none, and the fallback is the
+// same Esri imagery the map in the planner uses. That arrives in Web Mercator
+// on an XYZ grid and the model is on a PUWG92 metre grid, so it has to be
+// warped rather than pasted: sample per output pixel through the inverse
+// projection, or every roof sits a couple of metres from its own outline.
+let orthoSource = 'GUGiK orthophoto, 25 cm';
+
+async function loadImage(src, crossOrigin) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    if (crossOrigin) img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
+}
+
+async function gugikOrtho() {
+  if (meta.ortho?.empty) return null;
+  return loadImage(`/v1/scene/${tn}/${te}.jpg`);
+}
+
+const ESRI = (z, x, y) =>
+  `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+const lonToX = (lon, z) => ((lon + 180) / 360) * 2 ** z;
+const latToY = (lat, z) => {
+  const r = (lat * Math.PI) / 180;
+  return ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * 2 ** z;
+};
+
+async function esriOrtho() {
+  const OUT = 2048;
+  const b = meta.bounds;
+  // A zoom whose pixels are finer than the output, so the warp downsamples
+  // rather than inventing detail.
+  const z = Math.min(19, Math.ceil(Math.log2((360 * OUT)
+    / ((b.east - b.west) * 256)) ));
+  const x0 = Math.floor(lonToX(b.west, z));
+  const x1 = Math.floor(lonToX(b.east, z));
+  const y0 = Math.floor(latToY(b.north, z));
+  const y1 = Math.floor(latToY(b.south, z));
+  // At the zoom that matches a 24 cm output pixel a 500 m tile spans about
+  // 150 basemap tiles. That is a lot of small requests and they are all cached
+  // by the browser afterwards; the cap is only here so a bad bbox cannot ask
+  // for ten thousand.
+  const need = (x1 - x0 + 1) * (y1 - y0 + 1);
+  if (need > 400) return null;
+  $('bootmsg').textContent = `No national orthophoto here — fetching ${need} basemap tiles…`;
+
+  const stitch = document.createElement('canvas');
+  stitch.width = (x1 - x0 + 1) * 256;
+  stitch.height = (y1 - y0 + 1) * 256;
+  const sctx = stitch.getContext('2d', { willReadFrequently: true });
+  const tiles = [];
+  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) tiles.push([x, y]);
+  const loaded = [];
+  // In batches, so a few hundred requests do not all land at once.
+  for (let i = 0; i < tiles.length; i += 24) {
+    const batch = tiles.slice(i, i + 24);
+    loaded.push(...await Promise.all(batch.map(([x, y]) => loadImage(ESRI(z, x, y), true))));
+    $('bootmsg').textContent = `Fetching basemap imagery… ${Math.min(i + 24, tiles.length)}/${tiles.length}`;
+  }
+  let got = 0;
+  loaded.forEach((img, i) => {
+    if (!img) return;
+    got++;
+    const [x, y] = tiles[i];
+    sctx.drawImage(img, (x - x0) * 256, (y - y0) * 256);
+  });
+  if (!got) return null;
+
+  // Inverse warp: for every output pixel, where in Mercator does it come from.
+  const src = sctx.getImageData(0, 0, stitch.width, stitch.height);
+  const out = document.createElement('canvas');
+  out.width = out.height = OUT;
+  const octx = out.getContext('2d');
+  const dst = octx.createImageData(OUT, OUT);
+  const { east: oe, north: on } = meta.origin;
+  const span = meta.tileMetres;
+  for (let row = 0; row < OUT; row++) {
+    const north = on + span - ((row + 0.5) / OUT) * span;
+    for (let col = 0; col < OUT; col++) {
+      const east = oe + ((col + 0.5) / OUT) * span;
+      const { lat, lon } = toWgs84(east, north);
+      const px = (lonToX(lon, z) - x0) * 256;
+      const py = (latToY(lat, z) - y0) * 256;
+      const sx = px | 0;
+      const sy = py | 0;
+      const di = (row * OUT + col) * 4;
+      if (sx < 0 || sy < 0 || sx >= src.width || sy >= src.height) { dst.data[di + 3] = 255; continue; }
+      const si = (sy * src.width + sx) * 4;
+      dst.data[di] = src.data[si];
+      dst.data[di + 1] = src.data[si + 1];
+      dst.data[di + 2] = src.data[si + 2];
+      dst.data[di + 3] = 255;
+    }
+  }
+  octx.putImageData(dst, 0, 0);
+  orthoSource = `Esri imagery, z${z} (no GUGiK photo here)`;
+  return out;
+}
+
+let ortho = await gugikOrtho();
+if (!ortho) {
+  $('bootmsg').textContent = 'No national orthophoto here — looking for basemap imagery…';
+  ortho = await esriOrtho();
+  if (!ortho) orthoSource = 'no imagery';
+}
 
 // ---------------------------------------------------------------- gl
 
@@ -132,7 +241,7 @@ uniform usampler2D uHeight;
 uniform usampler2D uKind;
 uniform mat4 uMVP;
 uniform int uN;
-uniform float uCell, uExag, uWallCut;
+uniform float uCell, uWallCut;
 out vec2 vUv;
 out float vWall, vSlope;
 flat out uint vKind;
@@ -161,13 +270,15 @@ void main() {
   uint kHere = texelFetch(uKind, ivec2(col, row), 0).r;
   vWall = kHere == 0u ? 0.0 : smoothstep(uWallCut * 0.6, uWallCut, step);
 
-  vNormal = normalize(vec3(-(hr - hl) * uExag, 2.0 * uCell, (hd - hu) * uExag));
+  vNormal = normalize(vec3(-(hr - hl), 2.0 * uCell, (hd - hu)));
   vKind = kHere;
   vUv = vec2(float(col) / float(uN - 1), float(row) / float(uN - 1));
 
   float x = float(col) * uCell - float(uN - 1) * uCell * 0.5;
   float z = float(row) * uCell - float(uN - 1) * uCell * 0.5;
-  gl_Position = uMVP * vec4(x, h * uExag, z, 1.0);
+    // 1:1. The whole point of this model is that the heights are measured,
+  // so a vertical exaggeration control would be a slider for lying.
+  gl_Position = uMVP * vec4(x, h, z, 1.0);
 }`;
 
 const fs = `#version 300 es
@@ -308,13 +419,21 @@ function mvp() {
 }
 
 let dragging = false, lastX = 0, lastY = 0, shift = false;
+// Capture is best effort: the browser drops it on its own when a system
+// gesture cancels the drag, and releasing one that is already gone throws.
+const capture = (e, on) => {
+  try { on ? canvas.setPointerCapture(e.pointerId) : canvas.releasePointerCapture(e.pointerId); }
+  catch { /* already released */ }
+};
 canvas.addEventListener('pointerdown', (e) => {
   dragging = true; shift = e.shiftKey; lastX = e.clientX; lastY = e.clientY;
-  canvas.classList.add('dragging'); canvas.setPointerCapture(e.pointerId);
+  canvas.classList.add('dragging'); capture(e, true);
 });
-canvas.addEventListener('pointerup', (e) => {
-  dragging = false; canvas.classList.remove('dragging'); canvas.releasePointerCapture(e.pointerId);
-});
+const endDrag = (e) => {
+  dragging = false; canvas.classList.remove('dragging'); capture(e, false);
+};
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
 canvas.addEventListener('pointermove', (e) => {
   if (!dragging) return;
   const dx = e.clientX - lastX, dy = e.clientY - lastY;
@@ -335,9 +454,9 @@ canvas.addEventListener('wheel', (e) => {
   draw();
 }, { passive: false });
 
-for (const [id, uni, live] of [['wallCut', 'uWallCut', true], ['exag', 'uExag', true]]) {
-  $(id).addEventListener('input', () => { gl.uniform1f(U(uni), Number($(id).value)); draw(); });
-}
+$('wallCut').addEventListener('input', () => {
+  gl.uniform1f(U('uWallCut'), Number($('wallCut').value)); draw();
+});
 $('showKind').addEventListener('change', () => {
   gl.uniform1i(U('uShowKind'), $('showKind').checked ? 1 : 0); draw();
 });
@@ -354,7 +473,6 @@ function draw() {
 addEventListener('resize', draw);
 
 gl.uniform1f(U('uWallCut'), Number($('wallCut').value));
-gl.uniform1f(U('uExag'), 1);
 gl.uniform1i(U('uShowKind'), 0);
 
 // ---------------------------------------------------------------- hud
@@ -371,9 +489,11 @@ $('stats').innerHTML = [
   ['vegetation', pct(meta.kinds.vegetation)],
   ['not measured', pct(meta.kinds.guessed)],
   ['download', `${((meta.gzipBytes + (meta.ortho?.bytes ?? 0)) / 1048576).toFixed(2)} MB`],
+  ['photo', orthoSource],
 ].map(([k2, v]) => `<dt>${k2}</dt><dd>${v}</dd>`).join('');
 
 $('boot').hidden = true;
 for (const id of ['hud', 'note', 'controls']) $(id).hidden = false;
+ready = true;
 draw();
 </script>

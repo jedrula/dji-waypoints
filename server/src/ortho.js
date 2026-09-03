@@ -15,6 +15,9 @@ import { TILE_M } from './ndsm.js';
 
 const WMS = 'https://mapy.geoportal.gov.pl/wss/service/PZGIK/ORTO/WMS/HighResolution';
 export const ORTHO_PX = 2048;               // ~24 cm per pixel over a 500 m tile
+// Below this the response carries no detail and is not a photograph of
+// anything. See the note in fetchOrtho.
+const BLANK_BYTES_PER_PX = 0.06;
 
 const inFlight = new Map();
 
@@ -49,6 +52,22 @@ export function createOrthoStore({ dir, fetchImpl = fetch }) {
         // explain later.
         if (!type.startsWith('image/')) {
           throw new Error(`orthophoto service returned ${type || 'no content type'}`);
+        }
+        // "HighResolution" advertises the whole country and covers the towns.
+        // Ask it for a forest in Zachodniopomorskie and it returns a perfectly
+        // valid JPEG that is blank white -- JPEG has no alpha, so no-data is
+        // indistinguishable from snow. Stored, that becomes a tile whose photo
+        // silently washes the entire model out.
+        //
+        // A blank JPEG compresses to almost nothing. Over Wroclaw this is
+        // 0.24 bytes per pixel; the blank one from Dominikowo is 0.027. It is
+        // a heuristic, and it only has to be right about the difference
+        // between a photograph and an empty rectangle.
+        const perPixel = body.length / (ORTHO_PX * ORTHO_PX);
+        if (perPixel < BLANK_BYTES_PER_PX) {
+          const err = new Error('no orthophoto coverage here');
+          err.blank = true;
+          throw err;
         }
         const tmp = `${file}.part`;
         await writeFile(tmp, body);

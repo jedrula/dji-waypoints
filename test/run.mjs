@@ -1542,6 +1542,96 @@ console.log('\ncontroller bridge');
   rmSync(root, { recursive: true, force: true });
 }
 
+// -- measured heights -------------------------------------------------------
+// The client that turns an assumed height into a measured one. Nothing here
+// touches the service: the tile is a Uint8Array this test writes by hand.
+{
+  console.log('\nmeasured heights');
+  globalThis.localStorage = { getItem: () => 'http://heights.test', setItem() {} };
+  const { measure, serviceUrl, _internals } = await import('../js/heights.js');
+  const { toPuwg92 } = await import('../js/puwg92.js');
+  ok('reads the service url from storage', serviceUrl() === 'http://heights.test');
+
+  const SIZE = 500, TILE = 500;
+  // A tile where one 40 m patch is 30 m tall, one is no-data, rest is flat.
+  const at = 51.1166299, on = 17.0308393;
+  const { east, north } = toPuwg92(at, on);
+  const tn = Math.floor(north / TILE), te = Math.floor(east / TILE);
+  const data = new Uint8Array(SIZE * SIZE);          // flat ground everywhere
+  const col = Math.floor(east - te * TILE);
+  const row = Math.floor(TILE - (north - tn * TILE));
+  for (let r = row - 20; r <= row + 20; r++) {
+    for (let c = col - 20; c <= col + 20; c++) data[r * SIZE + c] = 30;
+  }
+  // A blank patch 100 m to the east, standing in for water.
+  for (let r = row - 10; r <= row + 10; r++) {
+    for (let c = col + 90; c <= col + 110; c++) data[r * SIZE + c] = 255;
+  }
+
+  let tileCalls = 0;
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/v1/health')) {
+      return { ok: true, status: 200, json: async () => ({ tileMetres: TILE, size: SIZE }) };
+    }
+    tileCalls++;
+    if (url.endsWith(`/v1/tile/${tn}/${te}`)) {
+      return { status: 200, arrayBuffer: async () => data.buffer.slice(0) };
+    }
+    return { status: 202, json: async () => ({ status: 'building' }) };
+  };
+
+  const box = (lat, lon, span) => ({
+    north: lat + span / 2 / 111132, south: lat - span / 2 / 111132,
+    east: lon + span / 2 / (111320 * Math.cos((lat * Math.PI) / 180)),
+    west: lon - span / 2 / (111320 * Math.cos((lat * Math.PI) / 180)),
+    height: 24, label: 'thing', assumed: true,
+  });
+  const dLon = (m) => m / (111320 * Math.cos((at * Math.PI) / 180));
+
+  _internals.reset();
+  const tagged = { ...box(at, on, 20), height: 41, assumed: false, label: 'tagged' };
+  const res = await measure([box(at, on, 20), tagged], { fetchImpl, waitMs: 0 });
+  ok('measures an assumed height', res.obstacles[0].height === 30, String(res.obstacles[0].height));
+  ok('and marks it no longer assumed', res.obstacles[0].assumed === false);
+  ok('leaves a tagged height alone', res.obstacles[1].height === 41 && res.obstacles[1].assumed === false);
+  ok('counts what it measured', res.measured === 1, String(res.measured));
+
+  // The safety property: 255 is unknown, and unknown must not become zero.
+  _internals.reset();
+  const water = await measure([box(at, on + dLon(100), 10)], { fetchImpl, waitMs: 0 });
+  ok('no-data leaves the estimate standing', water.obstacles[0].height === 24 && water.obstacles[0].assumed === true);
+  ok('and is reported as blank, not measured', water.measured === 0 && water.blanked === 1);
+
+  // Degrading: a tile still building, the service missing, a place abroad.
+  _internals.reset();
+  const far = await measure([box(52.4, 16.9, 20)], { fetchImpl, waitMs: 0 });
+  ok('a tile that is not built yet leaves the estimate', far.measured === 0 && far.obstacles[0].height === 24);
+
+  _internals.reset();
+  const abroad = await measure([box(52.52, 13.405, 20)], { fetchImpl, waitMs: 0 });
+  ok('outside Poland is not even asked about', abroad.measured === 0 && abroad.tiles === 0, String(abroad.tiles));
+
+  _internals.reset();
+  const dead = await measure([box(at, on, 20)], {
+    fetchImpl: async () => { throw new Error('connection refused'); }, waitMs: 0,
+  });
+  ok('an unreachable service degrades to the estimate',
+     dead.measured === 0 && dead.obstacles[0].height === 24 && /refused/.test(dead.reason));
+
+  _internals.reset();
+  globalThis.localStorage = { getItem: () => '', setItem() {} };
+  const off = await measure([box(at, on, 20)], { fetchImpl, waitMs: 0 });
+  ok('no service configured means no round trip', off.reason === 'no service' && off.measured === 0);
+  globalThis.localStorage = { getItem: () => 'http://heights.test', setItem() {} };
+
+  // Tiles are fetched once each however many obstacles sit on them.
+  _internals.reset();
+  tileCalls = 0;
+  await measure([box(at, on, 20), box(at, on + dLon(30), 20), box(at, on + dLon(60), 20)],
+    { fetchImpl, waitMs: 0 });
+  ok('fetches each tile once, not once per obstacle', tileCalls === 1, `${tileCalls} calls`);
+}
+
 console.log(`\n${fails === 0 ? 'ALL PASS' : fails + ' FAILURES'}`);
 console.log(`sample kmz: ${kmzPath} (${bytes.length} bytes, ${m.exported.length} waypoints)`);
 process.exit(fails ? 1 : 0);

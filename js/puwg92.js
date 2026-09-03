@@ -68,4 +68,4 @@ export function toWgs84(east, north) {
 
 // Poland's PUWG92 envelope, give or take. Cheap way to answer "we have nothing
 // for you" without asking GUGiK.
-export const inPoland = (lat, lon) => lat > 48.9 && lat < 55.0 && lon > 14.0 && lon < 24.2;
+export const inPoland = (lat, lon) => lat > 48.9 && lat < 55.0 && lon > 13.9 && lon < 24.2;

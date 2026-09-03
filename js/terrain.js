@@ -1,3 +1,4 @@
+import { toPuwg92, inPoland } from './puwg92.js';
 // How the ground itself moves under a site.
 //
 // Every height in this app is above the TAKEOFF POINT, because that is what a
@@ -22,35 +23,9 @@ const NMT = 'https://services.gugik.gov.pl/nmt/';
 // takes x as NORTHING and y as EASTING -- the Polish convention, and the
 // opposite of the guess. Checked against Kasprowy Wierch, which comes back at
 // 1980.7 m one way round and 0 the other.
-export function toPuwg92(lat, lon) {
-  const a = 6378137;
-  const f = 1 / 298.257222101;
-  const e2 = f * (2 - f);
-  const k0 = 0.9993;
-  const lon0 = (19 * Math.PI) / 180;
-  const p = (lat * Math.PI) / 180;
-  const l = (lon * Math.PI) / 180;
-  const ep2 = e2 / (1 - e2);
-  const N = a / Math.sqrt(1 - e2 * Math.sin(p) ** 2);
-  const T = Math.tan(p) ** 2;
-  const C = ep2 * Math.cos(p) ** 2;
-  const A = (l - lon0) * Math.cos(p);
-  const M = a * ((1 - e2 / 4 - (3 * e2 ** 2) / 64 - (5 * e2 ** 3) / 256) * p
-    - ((3 * e2) / 8 + (3 * e2 ** 2) / 32 + (45 * e2 ** 3) / 1024) * Math.sin(2 * p)
-    + ((15 * e2 ** 2) / 256 + (45 * e2 ** 3) / 1024) * Math.sin(4 * p)
-    - ((35 * e2 ** 3) / 3072) * Math.sin(6 * p));
-  return {
-    east: 500000 + k0 * N * (A + ((1 - T + C) * A ** 3) / 6
-      + ((5 - 18 * T + T * T + 72 * C - 58 * ep2) * A ** 5) / 120),
-    north: -5300000 + k0 * (M + N * Math.tan(p) * ((A * A) / 2
-      + ((5 - T + 9 * C + 4 * C * C) * A ** 4) / 24
-      + ((61 - 58 * T + T * T + 600 * C - 330 * ep2) * A ** 6) / 720)),
-  };
-}
-
 // Roughly the bounding box of Poland. Asking outside it wastes a round trip and
 // gets an answer that looks like sea level rather than like "I do not know".
-export const inPoland = (lat, lon) => lat > 48.9 && lat < 55.0 && lon > 13.9 && lon < 24.2;
+export { toPuwg92, inPoland };
 
 async function heightAt(lat, lon, fetchImpl) {
   const p = toPuwg92(lat, lon);

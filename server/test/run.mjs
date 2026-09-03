@@ -5,7 +5,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { toPuwg92, toWgs84, inPoland } from '../src/puwg92.js';
+import { toPuwg92, toWgs84, inPoland } from '../../js/puwg92.js';
 import { findTiles } from '../src/gugik.js';
 import { createTile, tileOf, originOf, TILE_M, SIZE, NO_DATA, MAX_H } from '../src/ndsm.js';
 import { createStore, LISTS } from '../src/store.js';

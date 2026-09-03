@@ -24,7 +24,7 @@ import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { toPuwg92, toWgs84, inPoland } from './puwg92.js';
+import { toPuwg92, toWgs84, inPoland } from '../../js/puwg92.js';
 import { findTiles, createTileStore } from './gugik.js';
 import { createTile, tileOf, originOf, TILE_M, SIZE, NO_DATA } from './ndsm.js';
 import { createStore, LISTS } from './store.js';

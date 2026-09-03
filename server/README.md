@@ -44,6 +44,29 @@ npm test                          # offline, no network, ~1 s
 concurrency is 2, deliberately: GUGiK is a public agency doing us a favour,
 and every byte we take is cached so we never ask twice.
 
+## Trying it
+
+Two servers: the app on 8123 as usual, this one on 8130.
+
+```sh
+cd server && npm install && npm start
+```
+
+That is all the wiring there is. The app turns measurement on by itself when
+the page is on localhost, so open the app, pan to somewhere in Poland, and
+press **Import what is here** under Obstacles > Advanced. To point it at a
+service running anywhere else:
+
+```js
+localStorage['dji.heightsUrl'] = 'https://heights.example.com'   // '' to switch off
+```
+
+The first import over new ground is slow and says so -- the button counts
+tiles, and a toast warns that the survey is coming down. Over Cybulskiego at
+zoom 18 that was four tiles, 91 obstacles, **51 of them measured** where
+before every one of the 51 was an invented 24 m. Heights came back spread
+from 3 m to 40 m. The second import over the same ground is instant.
+
 ## The API
 
 ```

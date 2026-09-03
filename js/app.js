@@ -772,14 +772,30 @@ $('importOsm').addEventListener('click', async () => {
   try {
     const { fetchAround } = await import('./osm.js');
     const b = map.getBounds();
-    const found = await fetchAround({
+    const raw = await fetchAround({
       north: b.getNorth(), south: b.getSouth(), east: b.getEast(), west: b.getWest(),
     });
-    if (!found.length) { toast('Nothing mapped in this view.'); return; }
+    if (!raw.length) { toast('Nothing mapped in this view.'); return; }
+
+    // OpenStreetMap says where things are; it very often does not say how tall.
+    // If the heights service is reachable it says how tall, from the national
+    // LiDAR. If it is not, or has no survey here, the estimates stand and the
+    // import behaves exactly as it did before this existed.
+    const { measure, serviceUrl } = await import('./heights.js');
+    if (serviceUrl()) btn.textContent = 'Measuring heights…';
+    const { obstacles: found, measured, blanked } = await measure(raw, {
+      onWait: () => toast('First visit here — the survey is downloading, about a minute.'),
+      onProgress: (done, total) => { btn.textContent = `Measuring heights… ${done}/${total}`; },
+    });
+
     const guessed = found.filter((f) => f.assumed).length;
     site.addImported(found);
     history.commit();
-    toast(`${found.length} added${guessed ? ` — ${guessed} with an assumed height` : ''}.`);
+    const parts = [`${found.length} added`];
+    if (measured) parts.push(`${measured} measured`);
+    if (guessed) parts.push(`${guessed} still assumed`);
+    if (blanked) parts.push(`${blanked} over water or unsurveyed`);
+    toast(`${parts.join(' — ')}.`);
   } catch (e) {
     toast(`Import failed — ${e.message}`);
   } finally {

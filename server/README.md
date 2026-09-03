@@ -217,10 +217,20 @@ Each of these produced a confident wrong answer before it was caught.
 - **The WASM heap moves.** `getPoint` allocates as it decompresses, and when
   the heap grows the old `ArrayBuffer` is detached, so a cached `DataView`
   throws. It survives one file on heap headroom and dies on the third.
-- **Wires are not classified.** No class 13, 14, 15 or 16 in any tile sampled.
-  Power lines still come from OpenStreetMap geometry with an assumed height.
-  The single most dangerous thing in the sky is the thing this data does not
-  label, and no amount of LiDAR here changes that.
+- **Wires are not classified**, and cannot be recovered by rule either.
+  `tools/wire-spike.mjs` is a full attempt at it, kept as a negative: a wire is
+  a thin band with clear air beneath and a tree is a solid column, which is a
+  real distinction and still finds nothing but roof ridges and leafless
+  branches. A parapet passes the clearance test because the ground under it is
+  not "air"; a bare winter canopy passes the thinness test because it genuinely
+  is a set of threads with gaps. Filtering both out leaves zero candidates on
+  both tiles. Poland does record wires -- GESUT, aggregated nationally as KIUT
+  at `integracja.gugik.gov.pl` with a `przewod_elektroenergetyczny` layer --
+  but coverage is per-powiat and partial (Wroclaw yes, Dominikowo no), it is
+  WMS only with the vector service restricted to GUGiK's own address, and it is
+  a register of what is buried where: plan geometry, no heights, no reliable
+  overhead/underground split. So power lines still come from OpenStreetMap
+  geometry with an assumed height.
 
 ## The Worker
 

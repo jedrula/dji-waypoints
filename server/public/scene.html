@@ -51,7 +51,7 @@
   <dl id="stats"></dl>
   <div id="legend">
     <span><i style="background:#c7cdd4"></i>as photographed</span>
-    <span><i style="background:#8a6a4a"></i>wall (not seen)</span>
+    <span><i style="background:#8a6a4a"></i>building wall (not seen)</span>
     <span><i style="background:#3b6ea5"></i>water / filled</span>
   </div>
 </div>
@@ -63,7 +63,8 @@
 </div>
 
 <div class="panel" id="controls" hidden>
-  <label title="how big a step counts as a vertical face">walls <input type="range" id="wallCut" min="0.5" max="6" step="0.25" value="1.75"></label>
+  <label><input type="checkbox" id="showWalls" checked> mark walls</label>
+  <label title="how big a step counts as a vertical face">at <input type="range" id="wallCut" min="0.5" max="6" step="0.25" value="1.75"></label>
   <label><input type="checkbox" id="showKind"> classify</label>
   <span><kbd>drag</kbd> orbit · <kbd>wheel</kbd> zoom · <kbd>shift+drag</kbd> pan</span>
 </div>
@@ -85,7 +86,6 @@ const report = (msg) => {
 addEventListener('unhandledrejection', (e) => report(String(e.reason?.message ?? e.reason)));
 addEventListener('error', (e) => report(e.message));
 const params = new URLSearchParams(location.search);
-const { toWgs84 } = await import('/puwg92.js');
 
 // Cybulskiego 22 by default -- the address this whole thread started from.
 const lat = Number(params.get('lat') ?? 51.1166299);
@@ -138,90 +138,65 @@ async function gugikOrtho() {
   return loadImage(`/v1/scene/${tn}/${te}.jpg`);
 }
 
-const ESRI = (z, x, y) =>
-  `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
-const lonToX = (lon, z) => ((lon + 180) / 360) * 2 ** z;
-const latToY = (lat, z) => {
-  const r = (lat * Math.PI) / 180;
-  return ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * 2 ** z;
-};
+// GUGiK also publishes the orthophoto as WMTS, and that service is the one
+// with national coverage -- the WMS called "HighResolution" is the towns. Two
+// things make it strictly better than pulling a third-party basemap:
+//
+//   it is open data, so the result can be redistributed and cached; and
+//   its tile matrix is EPSG:2180, the same grid the geometry is on, so the
+//   tiles drop straight into place with no reprojection at all.
+//
+// A 500 m scene is 25 tiles at 26 cm a pixel.
+const WMTS = 'https://mapy.geoportal.gov.pl/wss/service/PZGIK/ORTO/WMTS/StandardResolution';
+const LEVEL = 14;
+const SCALE_DENOM = 944.9423660714286;
+const OGC_PX = 0.00028;                 // the standard pixel size a WMTS scale is defined against
+const TOP_N = 850000, TOP_E = 100000;   // the matrix origin, north then east as ever
 
-async function esriOrtho() {
+async function wmtsOrtho() {
   const OUT = 2048;
-  const b = meta.bounds;
-  // A zoom whose pixels are finer than the output, so the warp downsamples
-  // rather than inventing detail.
-  const z = Math.min(19, Math.ceil(Math.log2((360 * OUT)
-    / ((b.east - b.west) * 256)) ));
-  const x0 = Math.floor(lonToX(b.west, z));
-  const x1 = Math.floor(lonToX(b.east, z));
-  const y0 = Math.floor(latToY(b.north, z));
-  const y1 = Math.floor(latToY(b.south, z));
-  // At the zoom that matches a 24 cm output pixel a 500 m tile spans about
-  // 150 basemap tiles. That is a lot of small requests and they are all cached
-  // by the browser afterwards; the cap is only here so a bad bbox cannot ask
-  // for ten thousand.
-  const need = (x1 - x0 + 1) * (y1 - y0 + 1);
-  if (need > 400) return null;
-  $('bootmsg').textContent = `No national orthophoto here — fetching ${need} basemap tiles…`;
+  const px = SCALE_DENOM * OGC_PX;
+  const span = 512 * px;
+  const { east: e0, north: n0 } = meta.origin;
+  const size = meta.tileMetres;
 
-  const stitch = document.createElement('canvas');
-  stitch.width = (x1 - x0 + 1) * 256;
-  stitch.height = (y1 - y0 + 1) * 256;
-  const sctx = stitch.getContext('2d', { willReadFrequently: true });
-  const tiles = [];
-  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) tiles.push([x, y]);
-  const loaded = [];
-  // In batches, so a few hundred requests do not all land at once.
-  for (let i = 0; i < tiles.length; i += 24) {
-    const batch = tiles.slice(i, i + 24);
-    loaded.push(...await Promise.all(batch.map(([x, y]) => loadImage(ESRI(z, x, y), true))));
-    $('bootmsg').textContent = `Fetching basemap imagery… ${Math.min(i + 24, tiles.length)}/${tiles.length}`;
-  }
-  let got = 0;
-  loaded.forEach((img, i) => {
-    if (!img) return;
-    got++;
-    const [x, y] = tiles[i];
-    sctx.drawImage(img, (x - x0) * 256, (y - y0) * 256);
-  });
-  if (!got) return null;
+  const c0 = Math.floor((e0 - TOP_E) / span);
+  const c1 = Math.floor((e0 + size - TOP_E) / span);
+  const r0 = Math.floor((TOP_N - (n0 + size)) / span);
+  const r1 = Math.floor((TOP_N - n0) / span);
 
-  // Inverse warp: for every output pixel, where in Mercator does it come from.
-  const src = sctx.getImageData(0, 0, stitch.width, stitch.height);
+  const want = [];
+  for (let row = r0; row <= r1; row++) for (let col = c0; col <= c1; col++) want.push([row, col]);
+  $('bootmsg').textContent = `Fetching ${want.length} orthophoto tiles…`;
+
+  const url = (row, col) => `${WMTS}?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0`
+    + `&LAYER=ORTOFOTOMAPA&STYLE=default&FORMAT=image/jpeg`
+    + `&TILEMATRIXSET=EPSG:2180&TILEMATRIX=EPSG:2180:${LEVEL}&TILEROW=${row}&TILECOL=${col}`;
+
+  const imgs = await Promise.all(want.map(([row, col]) => loadImage(url(row, col), true)));
+  if (!imgs.some(Boolean)) return null;
+
   const out = document.createElement('canvas');
   out.width = out.height = OUT;
-  const octx = out.getContext('2d');
-  const dst = octx.createImageData(OUT, OUT);
-  const { east: oe, north: on } = meta.origin;
-  const span = meta.tileMetres;
-  for (let row = 0; row < OUT; row++) {
-    const north = on + span - ((row + 0.5) / OUT) * span;
-    for (let col = 0; col < OUT; col++) {
-      const east = oe + ((col + 0.5) / OUT) * span;
-      const { lat, lon } = toWgs84(east, north);
-      const px = (lonToX(lon, z) - x0) * 256;
-      const py = (latToY(lat, z) - y0) * 256;
-      const sx = px | 0;
-      const sy = py | 0;
-      const di = (row * OUT + col) * 4;
-      if (sx < 0 || sy < 0 || sx >= src.width || sy >= src.height) { dst.data[di + 3] = 255; continue; }
-      const si = (sy * src.width + sx) * 4;
-      dst.data[di] = src.data[si];
-      dst.data[di + 1] = src.data[si + 1];
-      dst.data[di + 2] = src.data[si + 2];
-      dst.data[di + 3] = 255;
-    }
-  }
-  octx.putImageData(dst, 0, 0);
-  orthoSource = `Esri imagery, z${z} (no GUGiK photo here)`;
+  const ctx = out.getContext('2d');
+  const perMetre = OUT / size;
+  imgs.forEach((img, i) => {
+    if (!img) return;
+    const [row, col] = want[i];
+    // Straight placement: both grids are PUWG92 metres, so this is arithmetic
+    // rather than a projection. Row counts south from the matrix origin, and
+    // the output's row 0 is the north edge, which is the same direction.
+    const x = (TOP_E + col * span - e0) * perMetre;
+    const y = ((n0 + size) - (TOP_N - row * span)) * perMetre;
+    ctx.drawImage(img, x, y, span * perMetre, span * perMetre);
+  });
+  orthoSource = `GUGiK orthophoto, ${px.toFixed(2)} m, open data`;
   return out;
 }
 
 let ortho = await gugikOrtho();
 if (!ortho) {
-  $('bootmsg').textContent = 'No national orthophoto here — looking for basemap imagery…';
-  ortho = await esriOrtho();
+  ortho = await wmtsOrtho();
   if (!ortho) orthoSource = 'no imagery';
 }
 
@@ -242,6 +217,7 @@ uniform usampler2D uKind;
 uniform mat4 uMVP;
 uniform int uN;
 uniform float uCell, uWallCut;
+uniform int uShowWalls;
 out vec2 vUv;
 out float vWall, vSlope;
 flat out uint vKind;
@@ -268,7 +244,16 @@ void main() {
   // measured in is the hole-filling showing through, and painting that as an
   // unseen surface points at the wrong thing entirely.
   uint kHere = texelFetch(uKind, ivec2(col, row), 0).r;
-  vWall = kHere == 0u ? 0.0 : smoothstep(uWallCut * 0.6, uWallCut, step);
+  // Only a BUILDING can have a wall worth marking.
+  //
+  // A tree crown has huge height variance from one half-metre cell to the
+  // next, so the step test fires all over it -- and a "wall" on a tree is
+  // meaningless. There is no flat vertical face there, nothing is being
+  // occluded from the camera in the way a facade is, and painting the canopy
+  // brown buries the one signal that actually matters. Cells nothing was
+  // measured in are excluded for the same reason as before: that step is the
+  // hole-filling showing through.
+  vWall = (uShowWalls == 1 && kHere == 2u) ? smoothstep(uWallCut * 0.6, uWallCut, step) : 0.0;
 
   vNormal = normalize(vec3(-(hr - hl), 2.0 * uCell, (hd - hu)));
   vKind = kHere;
@@ -457,6 +442,9 @@ canvas.addEventListener('wheel', (e) => {
 $('wallCut').addEventListener('input', () => {
   gl.uniform1f(U('uWallCut'), Number($('wallCut').value)); draw();
 });
+$('showWalls').addEventListener('change', () => {
+  gl.uniform1i(U('uShowWalls'), $('showWalls').checked ? 1 : 0); draw();
+});
 $('showKind').addEventListener('change', () => {
   gl.uniform1i(U('uShowKind'), $('showKind').checked ? 1 : 0); draw();
 });
@@ -474,6 +462,7 @@ addEventListener('resize', draw);
 
 gl.uniform1f(U('uWallCut'), Number($('wallCut').value));
 gl.uniform1i(U('uShowKind'), 0);
+gl.uniform1i(U('uShowWalls'), 1);
 
 // ---------------------------------------------------------------- hud
 

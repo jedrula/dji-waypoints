@@ -130,7 +130,26 @@ Water is the other honest gap. It returns almost nothing to a laser, so the
 river arrives as a hole; it is filled from its rim and flattened, and those
 cells keep class 0 so nothing downstream mistakes the fill for a measurement.
 
-### Colour, where there is any
+### Colour: WMTS, not WMS
+
+GUGiK publishes the orthophoto through two services and only one of them is
+national. `ORTO/WMS/HighResolution` advertises the whole country and covers the
+towns; over a forest it returns a blank white JPEG. `ORTO/WMTS/StandardResolution`
+is the one with national coverage, at 26 cm a pixel, and it is what the viewer
+uses.
+
+Its tile matrix is **EPSG:2180** -- the same grid the geometry is on -- so the
+tiles drop into place with arithmetic instead of a reprojection, and the viewer
+never has to leave the projection it was handed. A 500 m scene is 25 tiles.
+It sends `Access-Control-Allow-Origin: *`, so the browser fetches them directly.
+
+Do not reach for a third-party basemap here. Esri's World Imagery is reachable
+without a key and is not open data: its terms say the layer "is not intended to
+be used to export tiles for offline use", which is exactly what compositing it
+into a stored texture amounts to. GUGiK's is open, redistributable, higher
+resolution, already in the right projection, and needs a fifth as many requests.
+
+### The old blank-photo check
 
 GUGiK's "HighResolution" orthophoto advertises the whole country and covers the
 towns. Ask it for a forest in Zachodniopomorskie and it returns a **perfectly

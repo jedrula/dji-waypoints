@@ -412,14 +412,6 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { tile: { tn, te }, east, north }, origin);
     }
 
-    // The viewer needs the same projection the server uses -- one copy, and
-    // the client warps imagery with exactly the maths the tiles were cut on.
-    if (url.pathname === '/puwg92.js') {
-      const mod = await readFile(path.join(HERE, '..', '..', 'js', 'puwg92.js'));
-      res.writeHead(200, headers(origin, { 'Content-Type': 'text/javascript; charset=utf-8' }));
-      return res.end(mod);
-    }
-
     if (url.pathname === '/' || url.pathname === '/scene') {
       const page = await readFile(path.join(HERE, '..', 'public', 'scene.html'));
       res.writeHead(200, headers(origin, { 'Content-Type': 'text/html; charset=utf-8' }));

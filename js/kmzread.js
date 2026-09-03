@@ -20,7 +20,12 @@ async function inflateRaw(bytes) {
 
 // Enough of a zip reader to find one named entry. Central directory only --
 // local headers lie about sizes when a data descriptor is used.
-export async function unzip(bytes) {
+//
+// `only` skips the inflate for entries you did not ask for. A KMZ has two small
+// files in it and never needs this; a BDOT10k powiat package has eighty, one of
+// which is 182 MB of building polygons, and inflating that to reach the 4 MB of
+// power lines next to it is a minute and a gigabyte for nothing.
+export async function unzip(bytes, { only } = {}) {
   const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   let eocd = -1;
   for (let i = b.length - 22; i >= 0 && i > b.length - 66000; i--) {
@@ -42,6 +47,8 @@ export async function unzip(bytes) {
     const commentLen = u16(b, p + 32);
     const localOff = u32(b, p + 42) >>> 0;
     const name = dec.decode(b.subarray(p + 46, p + 46 + nameLen));
+
+    if (only && !only(name)) { p += 46 + nameLen + extraLen + commentLen; continue; }
 
     if (u32(b, localOff) !== 0x04034b50) throw new Error(`bad local header for ${name}`);
     const dataAt = localOff + 30 + u16(b, localOff + 26) + u16(b, localOff + 28);

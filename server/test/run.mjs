@@ -11,6 +11,7 @@ import { createTile, tileOf, originOf, TILE_M, SIZE, NO_DATA, MAX_H } from '../s
 import { createStore, LISTS } from '../src/store.js';
 import { createScene, GRID, CELL_M, KIND } from '../src/scene.js';
 import { createOrthoStore, ORTHO_PX } from '../src/ortho.js';
+import { createBdotStore, findPackage, LINE_KIND } from '../src/bdot.js';
 
 let fails = 0;
 const ok = (name, cond, extra = '') => {
@@ -291,6 +292,72 @@ console.log('\northophoto');
 
   ok('the blank threshold sits between the two', 115315 / (ORTHO_PX * ORTHO_PX) < 0.06
      && 985798 / (ORTHO_PX * ORTHO_PX) > 0.06);
+  rmSync(dir, { recursive: true, force: true });
+}
+
+console.log('\noverhead lines');
+{
+  // Tile 1196/577 -- Dominikowo. Local metres run 0..500 from its corner.
+  const E0 = 577 * 500, N0 = 1196 * 500;
+  const line = (rodzaj, kod, coords) => `<ot:OT_SULN_L>
+    <ot:x_kod>${kod}</ot:x_kod>
+    <ot:geometria><gml:Curve><gml:segments><gml:LineStringSegment>
+      <gml:posList>${coords.map(([e, n]) => `${E0 + e} ${N0 + n}`).join(' ')}</gml:posList>
+    </gml:LineStringSegment></gml:segments></gml:Curve></ot:geometria>
+    <ot:rodzaj>${rodzaj}</ot:rodzaj>
+  </ot:OT_SULN_L>`;
+
+  const gml = `<x>${[
+    line('SN', 'SULN03', [[100, 100], [400, 400]]),            // wholly inside
+    line('n/n', 'SULN04', [[-4000, 250], [4000, 250]]),        // crosses right through
+    line('WN', 'SULN02', [[9000, 9000], [9500, 9500]]),        // nowhere near
+    line('LTK', 'SULN05', [[250, -4000], [250, 4000]]),        // crosses the other way
+  ].join('')}</x>`;
+
+  // A one-entry zip holding that GML, built with the app's own writer so the
+  // reader is exercised for real rather than stubbed.
+  const { zip } = await import('../../js/zip.js');
+  const pkg = zip([{ name: 'PL/BDOT10k/PL__OT_SULN_L.xml', text: gml }]);
+
+  const fetchImpl = async (url) => {
+    if (url.includes('GetFeatureInfo')) {
+      return { ok: true, text: async () => '<a href="https://x/bdot10k/32/3202_GML.zip">p</a>' };
+    }
+    return { ok: true, body: new Blob([pkg]).stream() };
+  };
+
+  const dir = mkdtempSync(join(tmpdir(), 'bdot-'));
+  const store = createBdotStore({ dir, fetchImpl });
+  const out = await store.linesFor(1196, 577);
+
+  ok('resolves the powiat package from the index', out.powiat === '3202', String(out.powiat));
+  ok('ignores a line that is nowhere near', !out.lines.some((l) => l.kind === 'WN'));
+  ok('keeps the three that cross the tile', out.lines.length === 3, String(out.lines.length));
+
+  const inside = out.lines.find((l) => l.kind === 'SN');
+  ok('a line wholly inside keeps its shape', inside.points.length === 2
+     && Math.abs(inside.points[0][0] - 100) < 0.5 && Math.abs(inside.points[1][0] - 400) < 0.5);
+
+  // The one that matters: a SULN feature is often kilometres long, and drawn
+  // whole it leaves the model it belongs to.
+  const through = out.lines.find((l) => l.kind === 'n/n');
+  const xs = through.points.map((p) => p[0]);
+  ok('a line crossing the tile is clipped to it',
+     Math.min(...xs) >= -26 && Math.max(...xs) <= 526, `${Math.min(...xs)}..${Math.max(...xs)}`);
+  ok('and still crosses the whole width', Math.max(...xs) - Math.min(...xs) > 500);
+
+  // Voltage decides the height, the same way the OSM importer does it.
+  ok('medium voltage stands where the app says medium voltage stands',
+     inside.height === LINE_KIND.SN.height && inside.height > 10);
+  ok('low voltage stands lower', through.height === LINE_KIND['n/n'].height
+     && through.height < LINE_KIND.SN.height);
+  ok('every line is labelled by what it carries',
+     out.lines.every((l) => /voltage|telecom|overhead/.test(l.label)));
+
+  // The package is tens of megabytes and one entry of it is 182 MB inflated.
+  const again = await store.linesFor(1196, 577);
+  ok('the package is fetched once and kept', again.lines.length === out.lines.length);
+
   rmSync(dir, { recursive: true, force: true });
 }
 

@@ -53,6 +53,7 @@
     <span><i style="background:#c7cdd4"></i>as photographed</span>
     <span><i style="background:#8a6a4a"></i>building wall (not seen)</span>
     <span><i style="background:#3b6ea5"></i>water / filled</span>
+    <span><i style="background:#ff9c3d"></i>overhead line (BDOT10k)</span>
   </div>
 </div>
 
@@ -66,6 +67,7 @@
   <label><input type="checkbox" id="showWalls" checked> mark walls</label>
   <label title="how big a step counts as a vertical face">at <input type="range" id="wallCut" min="0.5" max="6" step="0.25" value="1.75"></label>
   <label><input type="checkbox" id="showKind"> classify</label>
+  <label><input type="checkbox" id="showWires" checked> wires</label>
   <span><kbd>drag</kbd> orbit · <kbd>wheel</kbd> zoom · <kbd>shift+drag</kbd> pan</span>
 </div>
 
@@ -193,6 +195,11 @@ async function wmtsOrtho() {
   orthoSource = `GUGiK orthophoto, ${px.toFixed(2)} m, open data`;
   return out;
 }
+
+// The wires. Not in the point cloud at any density -- see tools/wire-spike.mjs
+// for the attempt -- so they come from BDOT10k, which knows where they run and
+// not how high they are. The height is the one the voltage implies.
+const wires = await fetch(`/v1/lines/${tn}/${te}`).then((r) => r.json()).catch(() => ({ lines: [] }));
 
 let ortho = await gugikOrtho();
 if (!ortho) {
@@ -354,7 +361,8 @@ for (let r = 0; r < N - 1; r++) {
   }
 }
 const ibo = gl.createBuffer();
-gl.bindVertexArray(gl.createVertexArray());
+const surfaceVao = gl.createVertexArray();
+gl.bindVertexArray(surfaceVao);
 gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
 gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
 
@@ -368,6 +376,111 @@ gl.uniform1f(U('uCell'), CELL);
 
 gl.enable(gl.DEPTH_TEST);
 gl.clearColor(0.05, 0.066, 0.086, 1);
+
+// ------------------------------------------------------------------- wires
+
+// Ground, from the scene's own classification: the lowest surface height in
+// each 10 m cell that the survey called ground. A wire hung off the DSM would
+// ride up over every tree it crosses, which is precisely backwards -- the span
+// is level and the canopy beneath it is not.
+function groundModel() {
+  const C = 10, GN = Math.round((meta.tileMetres) / C), step = Math.round(C / meta.cellMetres);
+  const g = new Float32Array(GN * GN).fill(Infinity);
+  for (let row = 0; row < N; row++) {
+    for (let col = 0; col < N; col++) {
+      if (kind[row * N + col] !== 1) continue;
+      const h = height[row * N + col] * 0.01;
+      const gi = Math.min(GN - 1, (row / step) | 0) * GN + Math.min(GN - 1, (col / step) | 0);
+      if (h < g[gi]) g[gi] = h;
+    }
+  }
+  let lowest = Infinity;
+  for (const v of g) if (v !== Infinity && v < lowest) lowest = v;
+  for (let pass = 0; pass < GN; pass++) {
+    let holes = 0; const next = Float32Array.from(g);
+    for (let r = 0; r < GN; r++) for (let c = 0; c < GN; c++) {
+      const i = r * GN + c; if (g[i] !== Infinity) continue;
+      let sum = 0, k = 0;
+      for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+        const rr = r + dr, cc = c + dc;
+        if (rr < 0 || cc < 0 || rr >= GN || cc >= GN) continue;
+        const v = g[rr * GN + cc]; if (v !== Infinity) { sum += v; k++; }
+      }
+      if (k) next[i] = sum / k; else holes++;
+    }
+    g.set(next); if (!holes) break;
+  }
+  for (let i = 0; i < g.length; i++) if (g[i] === Infinity) g[i] = Number.isFinite(lowest) ? lowest : 0;
+  return (x, y) => {
+    // x east, y north, both tile-local metres
+    const col = Math.max(0, Math.min(GN - 1, (x / C) | 0));
+    const row = Math.max(0, Math.min(GN - 1, ((meta.tileMetres - y) / C) | 0));
+    return g[row * GN + col];
+  };
+}
+
+const WIRE_COLOR = {
+  WN:    [1.00, 0.30, 0.28],
+  SN:    [1.00, 0.62, 0.24],
+  'n/n': [1.00, 0.86, 0.35],
+  LTK:   [0.42, 0.70, 1.00],
+};
+
+const lineVs = `#version 300 es
+in vec3 aPos; in vec3 aCol; uniform mat4 uMVP; out vec3 vCol;
+void main(){ vCol = aCol; gl_Position = uMVP * vec4(aPos, 1.0); }`;
+const lineFs = `#version 300 es
+precision highp float; in vec3 vCol; out vec4 o;
+void main(){ o = vec4(vCol, 1.0); }`;
+
+const lineProg = gl.createProgram();
+gl.attachShader(lineProg, compile(gl.VERTEX_SHADER, lineVs, 'line vertex'));
+gl.attachShader(lineProg, compile(gl.FRAGMENT_SHADER, lineFs, 'line fragment'));
+gl.linkProgram(lineProg);
+if (!gl.getProgramParameter(lineProg, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(lineProg));
+
+let lineVao = null, lineCount = 0;
+function buildWires() {
+  const list = wires.lines ?? [];
+  if (!list.length) return;
+  const at = groundModel();
+  const half = (N - 1) * meta.cellMetres * 0.5;
+  const verts = [];
+  const push = (x, y, h, c) => { verts.push(x - half, h, (meta.tileMetres - y) - half, c[0], c[1], c[2]); };
+  for (const w of list) {
+    const c = WIRE_COLOR[w.kind] ?? [0.85, 0.85, 0.85];
+    for (let i = 1; i < w.points.length; i++) {
+      const [x0, y0] = w.points[i - 1], [x1, y1] = w.points[i];
+      // Subdivide so a long span follows the ground it crosses.
+      const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 5));
+      for (let k = 0; k < n; k++) {
+        const a = k / n, b = (k + 1) / n;
+        const ax = x0 + (x1 - x0) * a, ay = y0 + (y1 - y0) * a;
+        const bx = x0 + (x1 - x0) * b, by = y0 + (y1 - y0) * b;
+        push(ax, ay, at(ax, ay) + w.height, c);
+        push(bx, by, at(bx, by) + w.height, c);
+      }
+    }
+    // A dropper at each vertex, so the height reads as height rather than as a
+    // line floating at an unknowable distance.
+    for (const [x, y] of w.points) {
+      const gz = at(x, y);
+      push(x, y, gz, [c[0] * 0.5, c[1] * 0.5, c[2] * 0.5]);
+      push(x, y, gz + w.height, c);
+    }
+  }
+  const buf = gl.createBuffer();
+  lineVao = gl.createVertexArray();
+  gl.bindVertexArray(lineVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+  const pos = gl.getAttribLocation(lineProg, 'aPos');
+  const col = gl.getAttribLocation(lineProg, 'aCol');
+  gl.enableVertexAttribArray(pos); gl.vertexAttribPointer(pos, 3, gl.FLOAT, false, 24, 0);
+  gl.enableVertexAttribArray(col); gl.vertexAttribPointer(col, 3, gl.FLOAT, false, 24, 12);
+  lineCount = verts.length / 6;
+  gl.bindVertexArray(surfaceVao);
+}
 
 // ---------------------------------------------------------------- camera
 
@@ -445,6 +558,7 @@ $('wallCut').addEventListener('input', () => {
 $('showWalls').addEventListener('change', () => {
   gl.uniform1i(U('uShowWalls'), $('showWalls').checked ? 1 : 0); draw();
 });
+$('showWires').addEventListener('change', draw);
 $('showKind').addEventListener('change', () => {
   gl.uniform1i(U('uShowKind'), $('showKind').checked ? 1 : 0); draw();
 });
@@ -455,8 +569,17 @@ function draw() {
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.useProgram(prog);
+  gl.bindVertexArray(surfaceVao);
   gl.uniformMatrix4fv(U('uMVP'), false, mvp());
   gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_INT, 0);
+
+  if (lineCount && $('showWires').checked) {
+    gl.useProgram(lineProg);
+    gl.bindVertexArray(lineVao);
+    gl.uniformMatrix4fv(gl.getUniformLocation(lineProg, 'uMVP'), false, mvp());
+    gl.drawArrays(gl.LINES, 0, lineCount);
+  }
 }
 addEventListener('resize', draw);
 
@@ -480,6 +603,14 @@ $('stats').innerHTML = [
   ['download', `${((meta.gzipBytes + (meta.ortho?.bytes ?? 0)) / 1048576).toFixed(2)} MB`],
   ['photo', orthoSource],
 ].map(([k2, v]) => `<dt>${k2}</dt><dd>${v}</dd>`).join('');
+
+buildWires();
+const byKind = {};
+for (const w of wires.lines ?? []) byKind[w.label] = (byKind[w.label] ?? 0) + 1;
+if (wires.lines?.length) {
+  $('stats').insertAdjacentHTML('beforeend',
+    `<dt>wires</dt><dd>${Object.entries(byKind).map(([k, n]) => `${n} ${k.replace(' line','')}`).join(', ')}</dd>`);
+}
 
 $('boot').hidden = true;
 for (const id of ['hud', 'note', 'controls']) $(id).hidden = false;

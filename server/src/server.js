@@ -30,6 +30,7 @@ import { createTile, tileOf, originOf, TILE_M, SIZE, NO_DATA } from './ndsm.js';
 import { createStore, LISTS } from './store.js';
 import { createScene, GRID, CELL_M, KIND } from './scene.js';
 import { createOrthoStore, ORTHO_PX } from './ortho.js';
+import { createBdotStore } from './bdot.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = process.env.DATA_DIR ?? path.join(HERE, '..', 'var');
@@ -45,6 +46,8 @@ const syncStore = createStore({ dir: path.join(ROOT, 'sync') });
 const TILE_DIR = path.join(ROOT, 'tile');
 const SCENE_DIR = path.join(ROOT, 'scene');
 const orthoStore = createOrthoStore({ dir: path.join(ROOT, 'ortho') });
+const bdotStore = createBdotStore({ dir: path.join(ROOT, 'bdot') });
+const LINES_DIR = path.join(ROOT, 'lines');
 
 // ---------------------------------------------------------------- tile build
 
@@ -399,6 +402,27 @@ const server = http.createServer(async (req, res) => {
         'X-Scene-Meta': JSON.stringify(entry.meta).slice(0, 3900),
       }));
       return res.end(entry.body);
+    }
+
+    // Overhead lines over a tile. The one obstacle the point cloud cannot see
+    // and the one most likely to matter.
+    const lineMatch = url.pathname.match(/^\/v1\/lines\/(-?\d+)\/(-?\d+)$/);
+    if (lineMatch) {
+      const tn = Number(lineMatch[1]);
+      const te = Number(lineMatch[2]);
+      const cache = path.join(LINES_DIR, `${tn}_${te}.json`);
+      try {
+        const hit = JSON.parse(await readFile(cache, 'utf8'));
+        return send(res, 200, hit, origin, { 'Cache-Control': 'public, max-age=604800' });
+      } catch { /* build it */ }
+      try {
+        const out = await throttle(() => bdotStore.linesFor(tn, te));
+        await mkdir(LINES_DIR, { recursive: true });
+        await writeFile(cache, JSON.stringify(out));
+        return send(res, 200, out, origin, { 'Cache-Control': 'public, max-age=604800' });
+      } catch (err) {
+        return send(res, 502, { error: String(err.message ?? err) }, origin);
+      }
     }
 
     // Where is the nearest thing worth looking at, given a lat/lon.

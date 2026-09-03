@@ -181,6 +181,37 @@ about before flying there.
 /v1/scene/{tn}/{te}.jpg      the orthophoto
 ```
 
+## Wires
+
+`/v1/lines/{tn}/{te}` returns every overhead line crossing a tile, and `/scene`
+draws them.
+
+They do not come from the point cloud. ASPRS reserves classes 13-16 for
+conductors, no Polish tile uses them, and a detector built on the geometry of
+the returns finds roof ridges and leafless branches instead --
+`tools/wire-spike.mjs` is that attempt, kept as a negative. GESUT, the register
+that ought to have them, is partial by powiat and carries no heights.
+
+BDOT10k does. `OT_SULN_L` is overhead utility lines as plain polylines with a
+voltage class, free, national, downloadable per powiat:
+
+    SULN02  WN    high, 110 kV          12   in one rural powiat
+    SULN03  SN    medium, 15-30 kV     910
+    SULN04  n/n   low, 400 V         1,216
+    SULN05  LTK   telecom               70
+
+Five of them cross the Dominikowo tile, 1,354 m of wire. The package is
+resolved through the download index WMS, cached, and only the one entry that
+matters is inflated -- the buildings layer in the same zip is 182 MB.
+
+It still has no heights, so a span gets the height its voltage implies, the
+same table the OpenStreetMap importer already uses. Where they run was the half
+that could not be guessed.
+
+In the viewer a wire sits above **ground**, not above the surface: ground comes
+from the scene's own classification, because a line hung off the DSM rides up
+over every tree it crosses, which is exactly backwards.
+
 ## Decisions worth knowing
 
 **Heights round up.** 30.4 m stores as 31. This number decides how high to fly;

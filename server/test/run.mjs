@@ -9,6 +9,7 @@ import { toPuwg92, toWgs84, inPoland } from '../../js/puwg92.js';
 import { findTiles } from '../src/gugik.js';
 import { createTile, tileOf, originOf, TILE_M, SIZE, NO_DATA, MAX_H } from '../src/ndsm.js';
 import { createStore, LISTS } from '../src/store.js';
+import { createScene, GRID, CELL_M, KIND } from '../src/scene.js';
 
 let fails = 0;
 const ok = (name, cond, extra = '') => {
@@ -204,6 +205,53 @@ console.log('\nsync store');
   ok('rejects a box the size of a country', huge.length === 1);
 
   rmSync(dir, { recursive: true, force: true });
+}
+
+console.log('\nrough model');
+{
+  const t = createScene(0, 0);
+  ok('grid is half-metre', CELL_M === 0.5 && GRID === 1000);
+
+  // Ground at 100 m, a 20 m block, a tree, and a hole standing in for water.
+  for (let dy = 0; dy < 500; dy += 0.5) {
+    for (let dx = 0; dx < 500; dx += 0.5) {
+      if (dx > 200 && dx < 260 && dy > 200 && dy < 260) continue;   // the hole
+      t.addPoint(dx, dy, 100, 2);
+    }
+  }
+  for (let dy = 300; dy < 320; dy += 0.5) {
+    for (let dx = 300; dx < 320; dx += 0.5) t.addPoint(dx, dy, 120, 6);
+  }
+  t.addPoint(400, 400, 118, 5);
+  t.addPoint(50, 50, 1e5, 7);                                        // noise
+
+  const built = t.finish();
+  ok('produces a model', Boolean(built));
+  const { height, kind, stats } = built;
+  ok('one height and one class per cell',
+     height.length === GRID * GRID && kind.length === GRID * GRID);
+
+  const at = (dx, dy) => Math.floor((500 - dy) / CELL_M) * GRID + Math.floor(dx / CELL_M);
+  ok('base is the lowest measured point', Math.abs(stats.base - 100) < 0.01, String(stats.base));
+  ok('noise never becomes the base or the roof', stats.relief < 100, String(stats.relief));
+  ok('flat ground is zero above base', height[at(50, 100)] === 0, String(height[at(50, 100)]));
+  ok('a 20 m block reads as 20 m in centimetres',
+     height[at(310, 310)] === 2000, String(height[at(310, 310)]));
+
+  ok('a roof is classified as building', kind[at(310, 310)] === KIND.building);
+  ok('ground is classified as ground', kind[at(50, 100)] === KIND.ground);
+  ok('a tree is classified as vegetation', kind[at(400, 400)] === KIND.vegetation);
+
+  // The hole: filled so the mesh is continuous, but still marked unmeasured so
+  // the viewer can say so rather than presenting a guess as a measurement.
+  ok('a hole is filled rather than left as a canyon',
+     Math.abs(height[at(230, 230)] - 0) < 50, String(height[at(230, 230)]));
+  ok('and is still marked as not measured', kind[at(230, 230)] === KIND.none);
+  ok('the fill is flat, not a slope across the hole',
+     Math.abs(height[at(215, 230)] - height[at(245, 230)]) <= 2,
+     `${height[at(215, 230)]} vs ${height[at(245, 230)]}`);
+  ok('counts what it had to invent', stats.kinds.guessed > 10000, String(stats.kinds.guessed));
+  ok('and what it actually saw', stats.kinds.building > 1000 && stats.kinds.ground > 100000);
 }
 
 console.log(`\n${fails === 0 ? 'ALL PASS' : `${fails} FAILURES`}`);

@@ -100,6 +100,44 @@ precisely why it is blank. But an unsurveyed patch is blank in exactly the same
 way, so a client that reads 255 as zero is a client that flies into whatever
 the laser missed. Fall back to the OSM estimate there.
 
+## The rough model
+
+`/scene` is the other thing this data is good for. Open it and you get a
+textured 3D model of the place, built from the point cloud already on disk plus
+GUGiK's orthophoto -- **25 cm a pixel, open, national**, sharp enough to read
+individual cars.
+
+```
+geometry   1000 x 1000 at 0.5 m, uint16 cm above base + one class byte
+colour     2048 x 2048 JPEG, ~24 cm/px
+together   about 2.1 MB for a 500 m square
+```
+
+It is deliberately a worse model than the one you are going to fly for. That is
+what makes it useful: it is the **init**. Massing, roof heights, tree canopy and
+ground are right to within a metre before anyone leaves the house, and the
+class byte means it is a *semantic* init -- building, vegetation, ground and
+water are separated, not one undifferentiated mesh.
+
+**What it cannot know is walls.** Every return in it was measured from an
+aircraft looking straight down, and the orthophoto was taken the same way. The
+two datasets are blind in exactly the same direction. A 2.5D surface renders
+vertical faces as smeared roof-edge pixels, so rather than dress that up the
+grid marks them and the viewer paints them blank. The brown faces in the render
+are a picture of precisely what the drone is being sent to collect.
+
+Water is the other honest gap. It returns almost nothing to a laser, so the
+river arrives as a hole; it is filled from its rim and flattened, and those
+cells keep class 0 so nothing downstream mistakes the fill for a measurement.
+
+```
+/scene                       the viewer, default Cybulskiego 22
+/scene?lat=..&lon=..         anywhere in Poland with coverage
+/v1/scene/{tn}/{te}          the grid, gzipped
+/v1/scene/{tn}/{te}.json     what is in it
+/v1/scene/{tn}/{te}.jpg      the orthophoto
+```
+
 ## Decisions worth knowing
 
 **Heights round up.** 30.4 m stores as 31. This number decides how high to fly;

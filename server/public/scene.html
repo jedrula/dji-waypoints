@@ -1,0 +1,379 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rough model</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { color-scheme: dark; --ink:#e8edf2; --dim:#8b97a4; --line:#232a33; --bg:#0d1116; --panel:#141a21; }
+  * { box-sizing: border-box; }
+  /* An id selector that sets display outranks the UA rule for [hidden], so
+     hiding these needs to say so louder than #boot { display:grid } does. */
+  [hidden] { display: none !important; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font:13px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
+  canvas { display:block; width:100vw; height:100vh; cursor:grab; }
+  canvas.dragging { cursor:grabbing; }
+  .panel { position:fixed; background:color-mix(in srgb, var(--panel) 92%, transparent);
+    border:1px solid var(--line); border-radius:10px; backdrop-filter:blur(8px); }
+  #hud { top:12px; left:12px; padding:12px 14px; max-width:310px; }
+  #hud h1 { margin:0 0 2px; font-size:14px; font-weight:650; letter-spacing:-0.01em; }
+  #hud .sub { color:var(--dim); font-size:11.5px; margin-bottom:10px; }
+  #stats { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; font-size:11.5px;
+    font-variant-numeric:tabular-nums; }
+  #stats dt { color:var(--dim); } #stats dd { margin:0; }
+  #legend { margin-top:10px; padding-top:9px; border-top:1px solid var(--line);
+    display:flex; flex-wrap:wrap; gap:4px 11px; font-size:11px; color:var(--dim); }
+  #legend span { display:flex; align-items:center; gap:5px; }
+  #legend i { width:9px; height:9px; border-radius:2px; display:block; }
+  #controls { bottom:12px; left:12px; padding:9px 13px; display:flex; gap:14px;
+    align-items:center; font-size:11.5px; color:var(--dim); flex-wrap:wrap; }
+  #controls label { display:flex; align-items:center; gap:6px; color:var(--ink); }
+  #controls input[type=range] { width:90px; accent-color:#6aa9ff; }
+  #controls kbd { background:#1d242d; border:1px solid var(--line); border-radius:4px;
+    padding:1px 5px; font:inherit; font-size:10.5px; color:var(--ink); }
+  #note { position:fixed; top:12px; right:12px; padding:11px 13px; max-width:250px;
+    font-size:11.5px; color:var(--dim); }
+  #note b { color:var(--ink); font-weight:600; }
+  #boot { position:fixed; inset:0; display:grid; place-content:center; text-align:center; gap:8px;
+    background:var(--bg); z-index:9; }
+  #boot .big { font-size:15px; }
+  #boot .small { color:var(--dim); font-size:12px; max-width:340px; }
+  .bad { color:#ff8080; }
+</style>
+
+<canvas id="gl"></canvas>
+
+<div id="boot"><div class="big">Building the model…</div>
+  <div class="small" id="bootmsg">First visit to a tile pulls the point cloud from GUGiK. About a minute.</div></div>
+
+<div class="panel" id="hud" hidden>
+  <h1 id="title">Rough model</h1>
+  <div class="sub" id="where"></div>
+  <dl id="stats"></dl>
+  <div id="legend">
+    <span><i style="background:#c7cdd4"></i>as photographed</span>
+    <span><i style="background:#8a6a4a"></i>wall (not seen)</span>
+    <span><i style="background:#3b6ea5"></i>water / filled</span>
+  </div>
+</div>
+
+<div class="panel" id="note" hidden>
+  <b>This is the init, not the answer.</b> Every return here was measured looking
+  straight down, so roofs and ground are real and <b>walls are guesses</b> — drawn
+  blank on purpose. Filling them in is what the drone is for.
+</div>
+
+<div class="panel" id="controls" hidden>
+  <label>walls <input type="range" id="wallCut" min="0.5" max="6" step="0.25" value="1.75"></label>
+  <label>height <input type="range" id="exag" min="1" max="3" step="0.1" value="1"></label>
+  <label><input type="checkbox" id="showKind"> classify</label>
+  <span><kbd>drag</kbd> orbit · <kbd>wheel</kbd> zoom · <kbd>shift+drag</kbd> pan</span>
+</div>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+// A module with top-level await swallows its own failures: the promise rejects,
+// nothing catches it, and the page just sits on the loading screen looking like
+// a slow network. Say what actually went wrong, on the page.
+addEventListener('unhandledrejection', (e) => {
+  $('bootmsg').innerHTML = `<span class="bad">${String(e.reason?.message ?? e.reason)}</span>`;
+  $('boot').hidden = false;
+});
+addEventListener('error', (e) => {
+  $('bootmsg').innerHTML = `<span class="bad">${e.message}</span>`;
+  $('boot').hidden = false;
+});
+const params = new URLSearchParams(location.search);
+
+// Cybulskiego 22 by default -- the address this whole thread started from.
+const lat = Number(params.get('lat') ?? 51.1166299);
+const lon = Number(params.get('lon') ?? 17.0308393);
+
+const fail = (msg) => { $('bootmsg').innerHTML = `<span class="bad">${msg}</span>`; };
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `${r.status}`);
+  return r.json();
+}
+
+// ---------------------------------------------------------------- load
+
+const here = await getJSON(`/v1/locate?lat=${lat}&lon=${lon}`).catch((e) => { fail(e.message); throw e; });
+const { tn, te } = here.tile;
+
+$('bootmsg').textContent = 'Reading the point cloud and the orthophoto…';
+const meta = await getJSON(`/v1/scene/${tn}/${te}.json`).catch((e) => { fail(e.message); throw e; });
+
+const raw = await fetch(`/v1/scene/${tn}/${te}?wait=1`).then((r) => r.arrayBuffer());
+const N = meta.grid;
+const height = new Uint16Array(raw, 0, N * N);
+const kind = new Uint8Array(raw, N * N * 2, N * N);
+
+const ortho = await new Promise((resolve) => {
+  const img = new Image();
+  img.onload = () => resolve(img);
+  img.onerror = () => resolve(null);
+  img.src = `/v1/scene/${tn}/${te}.jpg`;
+});
+
+// ---------------------------------------------------------------- gl
+
+const canvas = $('gl');
+const gl = canvas.getContext('webgl2', { antialias: true });
+if (!gl) fail('This needs WebGL2.');
+
+const CELL = meta.cellMetres;
+const SPAN = meta.tileMetres;
+
+const vs = `#version 300 es
+precision highp float; precision highp int;
+precision highp usampler2D;
+uniform usampler2D uHeight;
+uniform usampler2D uKind;
+uniform mat4 uMVP;
+uniform int uN;
+uniform float uCell, uExag, uWallCut;
+out vec2 vUv;
+out float vWall, vSlope;
+flat out uint vKind;
+out vec3 vNormal;
+
+float hAt(ivec2 p) {
+  p = clamp(p, ivec2(0), ivec2(uN - 1));
+  return float(texelFetch(uHeight, p, 0).r) * 0.01;
+}
+void main() {
+  int col = gl_VertexID % uN;
+  int row = gl_VertexID / uN;
+  float h = hAt(ivec2(col, row));
+
+  // Neighbours give both the shading normal and the wall test. A vertical
+  // face in a 2.5D surface is just a very large step between two cells.
+  float hl = hAt(ivec2(col - 1, row));
+  float hr = hAt(ivec2(col + 1, row));
+  float hu = hAt(ivec2(col, row - 1));
+  float hd = hAt(ivec2(col, row + 1));
+  float step = max(max(abs(hr - hl), abs(hd - hu)) * 0.5, 0.0);
+  vSlope = step;
+  // Only measured ground can have a wall. A step between cells nothing was
+  // measured in is the hole-filling showing through, and painting that as an
+  // unseen surface points at the wrong thing entirely.
+  uint kHere = texelFetch(uKind, ivec2(col, row), 0).r;
+  vWall = kHere == 0u ? 0.0 : smoothstep(uWallCut * 0.6, uWallCut, step);
+
+  vNormal = normalize(vec3(-(hr - hl) * uExag, 2.0 * uCell, (hd - hu) * uExag));
+  vKind = kHere;
+  vUv = vec2(float(col) / float(uN - 1), float(row) / float(uN - 1));
+
+  float x = float(col) * uCell - float(uN - 1) * uCell * 0.5;
+  float z = float(row) * uCell - float(uN - 1) * uCell * 0.5;
+  gl_Position = uMVP * vec4(x, h * uExag, z, 1.0);
+}`;
+
+const fs = `#version 300 es
+precision highp float;
+uniform sampler2D uOrtho;
+uniform int uHasOrtho, uShowKind;
+in vec2 vUv; in float vWall, vSlope; in vec3 vNormal;
+flat in uint vKind;
+out vec4 outColor;
+
+const vec3 SUN = normalize(vec3(0.45, 0.8, 0.35));
+
+void main() {
+  vec3 base = uHasOrtho == 1 ? texture(uOrtho, vUv).rgb : vec3(0.55);
+
+  if (uShowKind == 1) {
+    vec3 c = vec3(0.45);                                  // unknown / filled
+    if (vKind == 1u) c = vec3(0.62, 0.56, 0.44);          // ground
+    if (vKind == 2u) c = vec3(0.83, 0.44, 0.36);          // building
+    if (vKind == 3u) c = vec3(0.35, 0.62, 0.38);          // vegetation
+    if (vKind == 4u) c = vec3(0.23, 0.43, 0.65);          // water
+    base = mix(base, c, 0.78);
+  }
+
+  // Cells nothing was measured in -- the river, mostly -- read as a flat
+  // sheet, and saying so is better than pretending the photo is ground truth.
+  if (vKind == 0u) base = mix(base, vec3(0.26, 0.45, 0.63), 0.22);
+
+  // A wall is a smear: the nadir photo has no pixels for a vertical surface,
+  // so whatever lands there is the roof edge stretched down the side. Paint it
+  // as unknown instead of dressing it up.
+  base = mix(base, vec3(0.54, 0.42, 0.29), vWall * 0.88);
+
+  float lambert = 0.42 + 0.58 * max(dot(normalize(vNormal), SUN), 0.0);
+  outColor = vec4(base * lambert, 1.0);
+}`;
+
+const compile = (type, src, name) => {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    throw new Error(`${name} shader: ${gl.getShaderInfoLog(s)}`);
+  }
+  return s;
+};
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs, 'vertex'));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs, 'fragment'));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+// Heights live in a texture and the vertex shader reads them by index, so the
+// only per-vertex memory is the index buffer -- no million-element position
+// array to build, upload and keep.
+const tex = (unit, fmt, ifmt, type, w, h, data) => {
+  const t = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, w, h, 0, fmt, type, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+};
+gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+tex(0, gl.RED_INTEGER, gl.R16UI, gl.UNSIGNED_SHORT, N, N, height);
+tex(1, gl.RED_INTEGER, gl.R8UI, gl.UNSIGNED_BYTE, N, N, kind);
+
+if (ortho) {
+  const t = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE2);
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, ortho);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+}
+
+const idx = new Uint32Array((N - 1) * (N - 1) * 6);
+let k = 0;
+for (let r = 0; r < N - 1; r++) {
+  for (let c = 0; c < N - 1; c++) {
+    const a = r * N + c, b = a + 1, d = a + N, e = d + 1;
+    idx[k++] = a; idx[k++] = d; idx[k++] = b;
+    idx[k++] = b; idx[k++] = d; idx[k++] = e;
+  }
+}
+const ibo = gl.createBuffer();
+gl.bindVertexArray(gl.createVertexArray());
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+
+const U = (n) => gl.getUniformLocation(prog, n);
+gl.uniform1i(U('uHeight'), 0);
+gl.uniform1i(U('uKind'), 1);
+gl.uniform1i(U('uOrtho'), 2);
+gl.uniform1i(U('uHasOrtho'), ortho ? 1 : 0);
+gl.uniform1i(U('uN'), N);
+gl.uniform1f(U('uCell'), CELL);
+
+gl.enable(gl.DEPTH_TEST);
+gl.clearColor(0.05, 0.066, 0.086, 1);
+
+// ---------------------------------------------------------------- camera
+
+const cam = { yaw: -0.5, pitch: 0.62, dist: SPAN * 0.95, tx: 0, tz: 0, ty: 0 };
+const mul = (a, b) => {
+  const o = new Float32Array(16);
+  for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+    o[i * 4 + j] = a[i * 4] * b[j] + a[i * 4 + 1] * b[4 + j] + a[i * 4 + 2] * b[8 + j] + a[i * 4 + 3] * b[12 + j];
+  }
+  return o;
+};
+function mvp() {
+  const asp = canvas.width / canvas.height;
+  const f = 1 / Math.tan(0.5 * 0.9);
+  const near = 1, far = SPAN * 8;
+  const P = new Float32Array([f / asp, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) / (near - far), -1,
+    0, 0, (2 * far * near) / (near - far), 0]);
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+  const eye = [cam.tx + cam.dist * cp * sy, cam.ty + cam.dist * sp, cam.tz + cam.dist * cp * cy];
+  const c = [cam.tx, cam.ty, cam.tz];
+  let zx = eye[0] - c[0], zy = eye[1] - c[1], zz = eye[2] - c[2];
+  const zl = Math.hypot(zx, zy, zz); zx /= zl; zy /= zl; zz /= zl;
+  let xx = zz * 0 - zy * 0 + (0 * zz - 1 * zy), xy = 1 * zx - 0 * zz, xz = 0 * zy - 1 * zx;
+  // up = (0,1,0): x = up X z
+  xx = 1 * zz - 0 * zy; xy = 0 * zx - 0 * zz; xz = 0 * zy - 1 * zx;
+  const xl = Math.hypot(xx, xy, xz) || 1; xx /= xl; xy /= xl; xz /= xl;
+  const yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+  const V = new Float32Array([xx, yx, zx, 0, xy, yy, zy, 0, xz, yz, zz, 0,
+    -(xx * eye[0] + xy * eye[1] + xz * eye[2]),
+    -(yx * eye[0] + yy * eye[1] + yz * eye[2]),
+    -(zx * eye[0] + zy * eye[1] + zz * eye[2]), 1]);
+  return mul(V, P);
+}
+
+let dragging = false, lastX = 0, lastY = 0, shift = false;
+canvas.addEventListener('pointerdown', (e) => {
+  dragging = true; shift = e.shiftKey; lastX = e.clientX; lastY = e.clientY;
+  canvas.classList.add('dragging'); canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointerup', (e) => {
+  dragging = false; canvas.classList.remove('dragging'); canvas.releasePointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (!dragging) return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  if (shift || e.shiftKey) {
+    const s = cam.dist / 600;
+    cam.tx -= (dx * Math.cos(cam.yaw) + dy * Math.sin(cam.yaw) * Math.sin(cam.pitch)) * s;
+    cam.tz += (dx * Math.sin(cam.yaw) - dy * Math.cos(cam.yaw) * Math.sin(cam.pitch)) * s;
+  } else {
+    cam.yaw -= dx * 0.006;
+    cam.pitch = Math.max(0.04, Math.min(1.5, cam.pitch + dy * 0.005));
+  }
+  draw();
+});
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  cam.dist = Math.max(25, Math.min(SPAN * 3, cam.dist * (1 + Math.sign(e.deltaY) * 0.11)));
+  draw();
+}, { passive: false });
+
+for (const [id, uni, live] of [['wallCut', 'uWallCut', true], ['exag', 'uExag', true]]) {
+  $(id).addEventListener('input', () => { gl.uniform1f(U(uni), Number($(id).value)); draw(); });
+}
+$('showKind').addEventListener('change', () => {
+  gl.uniform1i(U('uShowKind'), $('showKind').checked ? 1 : 0); draw();
+});
+
+function draw() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.uniformMatrix4fv(U('uMVP'), false, mvp());
+  gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_INT, 0);
+}
+addEventListener('resize', draw);
+
+gl.uniform1f(U('uWallCut'), Number($('wallCut').value));
+gl.uniform1f(U('uExag'), 1);
+gl.uniform1i(U('uShowKind'), 0);
+
+// ---------------------------------------------------------------- hud
+
+const pct = (n) => `${((100 * n) / (N * N)).toFixed(0)}%`;
+$('title').textContent = `Tile ${tn}/${te}`;
+$('where').textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)} — ${meta.sources.map((s) => `${s.year}, ${s.density}`)[0] ?? ''}`;
+$('stats').innerHTML = [
+  ['ground', `${meta.base.toFixed(1)} m`],
+  ['relief', `${meta.relief.toFixed(1)} m`],
+  ['grid', `${N}×${N} at ${CELL} m`],
+  ['returns', meta.measured.toLocaleString()],
+  ['buildings', pct(meta.kinds.building)],
+  ['vegetation', pct(meta.kinds.vegetation)],
+  ['not measured', pct(meta.kinds.guessed)],
+  ['download', `${((meta.gzipBytes + (meta.ortho?.bytes ?? 0)) / 1048576).toFixed(2)} MB`],
+].map(([k2, v]) => `<dt>${k2}</dt><dd>${v}</dd>`).join('');
+
+$('boot').hidden = true;
+for (const id of ['hud', 'note', 'controls']) $(id).hidden = false;
+draw();
+</script>

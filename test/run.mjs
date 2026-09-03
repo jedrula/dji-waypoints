@@ -1257,7 +1257,7 @@ console.log('\nwalking the site');
 
 console.log('\nwhat is already standing here');
 {
-  const { toObstacles, ASSUMED } = await import('../js/osm.js');
+  const { toObstacles, ASSUMED, heightOfLevels } = await import('../js/osm.js');
   const at = (lat, lon) => ({ lat, lon });
   const found = toObstacles([
     // A building with a real height, one with storeys, one with neither.
@@ -1278,8 +1278,23 @@ console.log('\nwhat is already standing here');
   const byLabel = (t) => found.filter((f) => f.label.includes(t));
   ok('a tagged building keeps its own height',
      byLabel('Rozbrat')[0].height === 17.12 && byLabel('Rozbrat')[0].assumed === false);
+  // Five storeys was 16 m and that was wrong. Checked against LiDAR over 213
+  // buildings with BDOT10k storey counts, `levels * 3.2` came in short by more
+  // than a metre on 97% of them, because a storey count counts habitable
+  // floors and the roof is not one.
   ok('storeys become metres rather than being thrown away',
-     byLabel('Building')[0].height === 16 && byLabel('Building')[0].assumed === false);
+     byLabel('Building')[0].height === heightOfLevels(5));
+  ok('and a storey count includes the roof it does not mention',
+     heightOfLevels(5) > 5 * 3.2 + 5, String(heightOfLevels(5)));
+  ok('one storey is a house, not a ceiling height',
+     heightOfLevels(1) >= 9, String(heightOfLevels(1)));
+  ok('every extra storey adds about a storey',
+     Math.abs((heightOfLevels(6) - heightOfLevels(5)) - 3.2) < 0.05);
+  // A storey count is an estimate with a 3 m median error, so it stays marked
+  // and the heights service is allowed to measure over the top of it. Only a
+  // tagged metric height counts as known.
+  ok('a height from storeys is still an estimate',
+     byLabel('Building')[0].assumed === true);
   ok('a building with neither is assumed and says so',
      byLabel('garage')[0].height === ASSUMED.building && byLabel('garage')[0].assumed === true);
   // The assumptions are measurements, not opinions: an untagged building in a

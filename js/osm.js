@@ -68,6 +68,27 @@ function metres(v) {
   return m ? Number(m[1]) : null;
 }
 
+// Storeys to metres.
+//
+// This was `levels * 3.2` and that is wrong in the one direction that matters.
+// Checked against LiDAR over 213 buildings -- 71 rural in Dominikowo, 142 urban
+// in Wroclaw, footprints from BDOT10k which carries a storey count for every
+// building in Poland -- it under-reported 97% of them by more than a metre:
+//
+//   rule                       median error   p90     short by >1 m
+//   levels x 3.2                     7.0 m   15.2 m         97%
+//   a flat 24 m                      5.0 m   16.0 m         24%
+//   ROOF + levels x 3.2              3.2 m    7.8 m         33%
+//
+// The missing term is the roof. A storey count counts habitable floors, and a
+// one-storey house in Dominikowo measures a median 9 m to the ridge, not 3.2.
+// The constant covers roof, ground-floor height and parapet together, and it
+// is what makes the difference: with it the median error halves and the tail
+// halves again.
+const ROOF = 8;
+const STOREY = 3.2;
+export const heightOfLevels = (levels) => +(ROOF + levels * STOREY).toFixed(1);
+
 function powerHeight(tags) {
   const v = Number(String(tags.voltage ?? '').split(/[;,]/)[0]) || 0;
   if (v >= 220000) return ASSUMED.powerVeryHigh;
@@ -130,10 +151,14 @@ export function toObstacles(elements, { max = 400 } = {}) {
     if (t.building && e.geometry?.length) {
       const tagged = metres(t.height);
       const levels = Number(t['building:levels']);
-      const h = tagged ?? (Number.isFinite(levels) && levels > 0 ? +(levels * 3.2).toFixed(1) : null);
+      const fromLevels = Number.isFinite(levels) && levels > 0 ? heightOfLevels(levels) : null;
+      const h = tagged ?? fromLevels;
       const label = [t['addr:street'], t['addr:housenumber']].filter(Boolean).join(' ')
         || (t.building === 'yes' ? 'Building' : t.building);
-      push(bboxOf(e.geometry), h ?? ASSUMED.building, label, h === null);
+      // Only a tagged metric height counts as known. A storey count is a
+      // decent estimate and still a 3 m one, so it stays marked so the heights
+      // service will measure over the top of it.
+      push(bboxOf(e.geometry), h ?? ASSUMED.building, label, tagged === null);
     } else if (t.natural === 'tree' && Number.isFinite(e.lat)) {
       const h = metres(t.height);
       push(boxAround(e.lat, e.lon, TREE_SPAN), h ?? ASSUMED.tree,

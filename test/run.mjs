@@ -1647,6 +1647,72 @@ console.log('\ncontroller bridge');
   ok('fetches each tile once, not once per obstacle', tileCalls === 1, `${tileCalls} calls`);
 }
 
+// -- overhead lines as obstacles --------------------------------------------
+{
+  console.log('\noverhead lines as obstacles');
+  globalThis.localStorage = { getItem: () => 'http://heights.test', setItem() {} };
+  const { fetchLines, lineToObstacles, tilesFor, _internals } = await import('../js/lines.js');
+  const { toPuwg92 } = await import('../js/puwg92.js');
+  const { isImported, isEstimated, labelOf } = await import('../js/site.js');
+
+  const TILE = 500;
+  const { east, north } = toPuwg92(53.2076, 15.8355);
+  const tn = Math.floor(north / TILE);
+  const te = Math.floor(east / TILE);
+
+  // A 300 m span across the tile at medium voltage.
+  const line = { kind: 'SN', label: 'medium voltage line', height: 16,
+                 points: [[100, 250], [400, 250]] };
+  const boxes = lineToObstacles(line, { tn, te, tileMetres: TILE });
+  ok('a span becomes many boxes, not one', boxes.length > 8, String(boxes.length));
+  ok('every box stands at the height the voltage implies', boxes.every((b) => b.height === 16));
+  ok('and every one is marked an estimate', boxes.every((b) => b.assumed === true));
+  ok('and marked as coming from BDOT10k', boxes.every((b) => b.source === 'bdot'));
+  const widest = Math.max(...boxes.map((b) => (b.north - b.south) * 111132));
+  ok(`no box is wider than a span is (${widest.toFixed(0)} m)`, widest < 30);
+  // The reason for chopping at all: one box round a 300 m line walls off a
+  // 300 m square of sky.
+  const spanEW = Math.max(...boxes.map((b) => b.east)) - Math.min(...boxes.map((b) => b.west));
+  ok('the boxes together cover the whole span', spanEW * 111320 * Math.cos(53.2 * Math.PI / 180) > 280);
+
+  // What the site model makes of one.
+  const named = `${isEstimated({ name: '~x' }) ? '' : ''}~${boxes[0].label} (${boxes[0].source})`;
+  ok('the site model counts it as imported', isImported({ name: named }));
+  ok('and as an estimate', isEstimated({ name: named }));
+  ok('and the label says which survey it came from', labelOf({ name: named }).endsWith('(bdot)'));
+
+  ok('a view spanning two tiles asks for both',
+     tilesFor({ south: 53.2050, north: 53.2098, west: 15.8320, east: 15.8392 }, TILE).length >= 2);
+
+  // Degrading. The app planned flights before this existed.
+  _internals.reset();
+  const dead = await fetchLines({ south: 53.205, north: 53.21, west: 15.832, east: 15.839 },
+    { fetchImpl: async () => { throw new Error('connection refused'); } });
+  ok('an unreachable service yields nothing and says why',
+     dead.obstacles.length === 0 && /refused/.test(dead.reason));
+
+  _internals.reset();
+  const abroad = await fetchLines({ south: 52.51, north: 52.53, west: 13.39, east: 13.42 },
+    { fetchImpl: async () => { throw new Error('should not be called'); } });
+  ok('outside Poland is not even asked about', abroad.reason === 'outside Poland');
+
+  _internals.reset();
+  let calls = 0;
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/v1/health')) return { ok: true, json: async () => ({ tileMetres: TILE }) };
+    calls++;
+    return { ok: true, json: async () => ({ lines: [line] }) };
+  };
+  const got = await fetchLines({ south: 53.2050, north: 53.2098, west: 15.8320, east: 15.8392 }, { fetchImpl });
+  ok('every covering tile is asked once', calls === got.tiles && calls >= 2, `${calls} calls`);
+  ok('and the lines come back as obstacles', got.obstacles.length > got.lines);
+
+  globalThis.localStorage = { getItem: () => '', setItem() {} };
+  _internals.reset();
+  const off = await fetchLines({ south: 53.205, north: 53.21, west: 15.832, east: 15.839 }, { fetchImpl });
+  ok('no service means no round trip', off.reason === 'no service' && off.obstacles.length === 0);
+}
+
 console.log(`\n${fails === 0 ? 'ALL PASS' : fails + ' FAILURES'}`);
 console.log(`sample kmz: ${kmzPath} (${bytes.length} bytes, ${m.exported.length} waypoints)`);
 process.exit(fails ? 1 : 0);

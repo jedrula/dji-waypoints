@@ -42,10 +42,10 @@ export const ASSUMED = {
 // A tree's crown, and how wide a box a power span gets. Neither is in OSM
 // (0 of 9908 trees carried a crown diameter), so both are conventions.
 const TREE_SPAN = 7;
-const LINE_SPAN = 8;
+export const LINE_SPAN = 8;
 // Spans are chopped into pieces so that a diagonal run does not become one
 // enormous axis-aligned box: a 200 m diagonal would block a 200 m square.
-const LINE_STEP = 25;
+export const LINE_STEP = 25;
 
 const M_PER_DEG_LAT = 111132;
 const mPerDegLon = (lat) => 111320 * Math.cos((lat * Math.PI) / 180);
@@ -99,7 +99,7 @@ function powerHeight(tags) {
 
 // A span cut into pieces of at most LINE_STEP, each becoming one box. Returns
 // the boxes rather than the points, because the caller only wants obstacles.
-function spanBoxes(geometry, span) {
+export function spanBoxes(geometry, span) {
   const out = [];
   for (let i = 1; i < geometry.length; i++) {
     const a = geometry[i - 1];

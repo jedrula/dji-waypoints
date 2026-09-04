@@ -83,6 +83,7 @@ const layers = {
   footprint: L.polygon([], { color: '#4da3ff', weight: 1.5, dashArray: '5,4',
                              fill: true, fillOpacity: 0.05, interactive: false }).addTo(map),
   obsBoxes: L.layerGroup().addTo(map),
+  wires: L.layerGroup().addTo(map),
   path: L.layerGroup().addTo(map),
   dots: L.layerGroup().addTo(map),
   devicePath: L.layerGroup().addTo(map),
@@ -531,6 +532,50 @@ map.on('dblclick', () => { clearTimeout(pendingTap); pendingTap = null; });
 const pointMarkers = new Map();
 let draggingKey = null;
 
+
+// Overhead lines on the map.
+//
+// They arrive as obstacle boxes like everything else, because that is what the
+// collision check understands, and drawn that way they are twenty identical
+// amber dots that look exactly like a row of trees. A wire is a line. Drawing
+// it as one is the difference between the data being present and it being
+// visible, and the whole reason to have gone and got it was to be able to see
+// the thing you would otherwise fly into.
+const WIRE_STYLE = {
+  WN: { color: '#ff5d5d', weight: 3 },
+  SN: { color: '#ff9c3d', weight: 2.5 },
+  'n/n': { color: '#ffd85e', weight: 2 },
+  LTK: { color: '#6aa9ff', weight: 1.5, dashArray: '4,4' },
+};
+const WIRES_KEY = 'dji.wires';
+
+function drawWires(paths) {
+  layers.wires.clearLayers();
+  for (const w of paths ?? []) {
+    const style = WIRE_STYLE[w.kind] ?? { color: '#ff9c3d', weight: 2 };
+    L.polyline(w.path.map((q) => [q.lat, q.lon]), {
+      ...style, opacity: 0.95, interactive: true,
+    }).bindTooltip(`${w.label} — assumed ${w.height} m`, { sticky: true })
+      .addTo(layers.wires);
+  }
+}
+
+function rememberWires(paths) {
+  try {
+    const keep = (paths ?? []).map((w) => ({ kind: w.kind, label: w.label, height: w.height,
+      path: w.path.map((q) => [+q.lat.toFixed(6), +q.lon.toFixed(6)]) }));
+    localStorage.setItem(WIRES_KEY, JSON.stringify(keep));
+  } catch { /* a full or blocked store is not worth failing an import over */ }
+}
+
+function restoreWires() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(WIRES_KEY) ?? '[]');
+    if (!Array.isArray(raw) || !raw.length) return;
+    drawWires(raw.map((w) => ({ ...w, path: w.path.map(([lat, lon]) => ({ lat, lon })) })));
+  } catch { /* nothing drawn is the right failure */ }
+}
+
 function renderPoints() {
   layers.obsBoxes.clearLayers();
 
@@ -541,9 +586,18 @@ function renderPoints() {
   for (const o of site.obstacles()) {
     const grade = struck.has(o.id)
       ? (state.hazard.obstacles.find((x) => x.id === o.id)?.grade ?? 'clear') : 'clear';
+    // A span is drawn as the line it is. Its boxes are still the geometry the
+    // collision check uses, but giving each one a draggable numbered dot buries
+    // the line under its own footprint and invites you to nudge a piece of a
+    // power cable, which is not a thing you can do.
+    const isWire = labelOf(o).endsWith(' (bdot)');
     L.rectangle([[o.south, o.west], [o.north, o.east]], {
-      color: OBSTACLE_COLOR[grade], weight: 1, fillOpacity: 0.12, interactive: false,
+      color: OBSTACLE_COLOR[grade], weight: 1,
+      fillOpacity: isWire && grade === 'clear' ? 0 : 0.12,
+      opacity: isWire && grade === 'clear' ? 0 : 1,
+      interactive: false,
     }).addTo(layers.obsBoxes);
+    if (isWire && grade === 'clear') continue;
     wanted.add(syncPoint('obstacle', o.id, pointOf(o), o.height, grade !== 'clear'));
   }
   for (const p of site.capture()) wanted.add(syncPoint('capture', p.id, p, p.height, false));
@@ -788,11 +842,25 @@ $('importOsm').addEventListener('click', async () => {
       onProgress: (done, total) => { btn.textContent = `Measuring heights… ${done}/${total}`; },
     });
 
+    // And the wires. OpenStreetMap has the pylons and hardly any of the
+    // distribution; BDOT10k has the lot, nationally, which is the difference
+    // between knowing about the 400 V run across a field and not.
+    const { fetchLines } = await import('./lines.js');
+    if (serviceUrl()) btn.textContent = 'Looking for overhead lines…';
+    const wires = await fetchLines(
+      { north: b.getNorth(), south: b.getSouth(), east: b.getEast(), west: b.getWest() },
+      { onProgress: (d, t) => { btn.textContent = `Overhead lines… ${d}/${t}`; } },
+    );
+
+    drawWires(wires.paths);
+    rememberWires(wires.paths);
+    const all = [...found, ...wires.obstacles];
     const guessed = found.filter((f) => f.assumed).length;
-    site.addImported(found);
+    site.addImported(all);
     history.commit();
-    const parts = [`${found.length} added`];
+    const parts = [`${all.length} added`];
     if (measured) parts.push(`${measured} measured`);
+    if (wires.lines) parts.push(`${wires.lines} overhead line${wires.lines === 1 ? '' : 's'}`);
     if (guessed) parts.push(`${guessed} still assumed`);
     if (blanked) parts.push(`${blanked} over water or unsurveyed`);
     toast(`${parts.join(' — ')}.`);
@@ -805,6 +873,8 @@ $('importOsm').addEventListener('click', async () => {
 });
 
 $('clearOsm').addEventListener('click', () => {
+  layers.wires.clearLayers();
+  rememberWires([]);
   const gone = site.clearImported();
   history.commit();
   toast(gone ? `Removed ${gone} imported obstacle${gone === 1 ? '' : 's'}.` : 'Nothing imported to remove.');
@@ -1527,6 +1597,7 @@ setMode('capture');
 setShowRoute(showRoute);
 setView(activeView);   // put the map's own controls where this view wants them
 if (fromHash) applyPlan(fromHash);
+restoreWires();
 renderPoints();
 renderReadout();
 renderIdentity();

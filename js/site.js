@@ -54,8 +54,14 @@ export const labelOf = (o) => String(o.name ?? '').replace(/^~/, '');
 // Imported obstacles are flown around and checked against, never orbited. You
 // tapped a thing because you care about it; the importer only described the
 // surroundings, and eighty street trees would otherwise be eighty domes.
+// Where an imported obstacle came from. It matters on the label because the
+// two sources are not interchangeable: OpenStreetMap is whatever anyone
+// happened to map, and BDOT10k is the national survey, which is the only one
+// of the two that reliably knows about the wire over the field.
 export const IMPORTED = 'osm';
-export const isImported = (o) => labelOf(o).endsWith(` (${IMPORTED})`);
+export const SOURCES = ['osm', 'bdot'];
+const IMPORT_RE = new RegExp(`\\((${SOURCES.join('|')})\\)$`);
+export const isImported = (o) => IMPORT_RE.test(labelOf(o));
 
 let nextId = 1;
 const newId = () => `p${nextId++}${Math.random().toString(36).slice(2, 6)}`;
@@ -203,7 +209,7 @@ export function createSite({ onChange = () => {}, onSync = () => {}, storage, fe
         obstacles.put({
           ...rect,
           height: Math.max(0, f.height),
-          name: `${f.assumed ? EST_PREFIX : ''}${f.label} (${IMPORTED})`,
+          name: `${f.assumed ? EST_PREFIX : ''}${f.label} (${f.source ?? IMPORTED})`,
         });
         added += 1;
       }

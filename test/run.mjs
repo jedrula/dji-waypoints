@@ -123,7 +123,11 @@ ok('line spacing = across-footprint x (1 - side overlap)',
    near(m.stats.sideSpacing, footprint(cam, 40).across * 0.3, 1e-6));
 ok('shot spacing = along-footprint x (1 - front overlap)',
    near(m.stats.fwdSpacing, footprint(cam, 40).along * 0.2, 1e-6));
-ok('four passes present', m.passes.length === 4, JSON.stringify(m.passes.map(p => p.name)));
+ok('five passes present', m.passes.length === 5, JSON.stringify(m.passes.map(p => p.name)));
+// 200 x 150 m and low: no detail ring round anything that small ever holds the
+// whole site in frame, which is the case the capture SOP opens with.
+ok('a wide flat site earns an establishing orbit',
+   m.passes.some((x) => x.name === 'Establishing orbit'));
 ok('nadir pitch is -90', m.waypoints.filter(w => w.pass === 'nadir').every(w => w.pitch === -90));
 ok('oblique pitch is -45', m.waypoints.filter(w => w.pass === 'oblique').every(w => w.pitch === -45));
 // Transits are the climb out of one dome and across to the next; they belong to
@@ -314,7 +318,7 @@ ok('interval mode keeps the whole orbit ring',
    iv.exported.filter(w => w.pass === 'orbit').length === iv.waypoints.filter(w => w.pass === 'orbit').length);
 ok('export indices are 0..n-1 contiguous',
    iv.exported.every((w, i) => w.exportIndex === i));
-const nadirOnly = planMission(site(rect), { oblique: false, orbit: false, surround: false }, cam);
+const nadirOnly = planMission(site(rect), { oblique: false, orbit: false, surround: false, establish: false }, cam);
 ok('passes can be switched off', nadirOnly.passes.length === 1 && nadirOnly.waypoints.every(w => w.pass === 'nadir'));
 ok('higher altitude -> fewer photos', planMission(site(rect), { altitude: 80 }, cam).stats.photos < m.stats.photos);
 
@@ -361,7 +365,7 @@ for (const [label, opts] of [
 
 const tr = planMission(site(houseRect), {
   altitude: 5, subjectHeight: 3, transect: true,
-  nadir: false, oblique: false, orbit: false, surround: false,
+  nadir: false, oblique: false, orbit: false, surround: false, establish: false,
 }, cam);
 const tPts = tr.waypoints.filter(w => w.pass === 'transect');
 ok('cross passes are planned', tPts.length > 0);
@@ -418,11 +422,12 @@ console.log('\nsurround ring');
   const hfovDeg = (fov(cam).h * 180) / Math.PI;
   const vfovDeg = (fov(cam).v * 180) / Math.PI;
 
-  const sr = planMission(site(rect), { altitude: 40, nadir: false, oblique: false, orbit: false }, cam);
+  const sr = planMission(site(rect), { altitude: 40, nadir: false, oblique: false, orbit: false, establish: false }, cam);
   const sp = sr.waypoints.filter(w => w.pass === 'surround');
   ok('the surround ring is on by default', sp.length > 0);
   ok('it can be switched off', planMission(site(rect),
-     { altitude: 40, nadir: false, oblique: false, orbit: false, surround: false }, cam).waypoints.length === 0);
+     { altitude: 40, nadir: false, oblique: false, orbit: false, surround: false, establish: false },
+     cam).waypoints.length === 0);
 
   // Facing OUT is the whole point: every camera must look away from the centre.
   const centre = sr.centre;
@@ -448,24 +453,24 @@ console.log('\nsurround ring');
   ok(`the frame's top edge sits just above the horizon (+${topEdge.toFixed(1)}°)`,
      topEdge > 0 && topEdge < 8, `${topEdge.toFixed(1)}`);
   ok('and the pitch does not chase the altitude the way the orbit does',
-     planMission(site(rect), { altitude: 100, nadir: false, oblique: false, orbit: false }, cam)
+     planMission(site(rect), { altitude: 100, nadir: false, oblique: false, orbit: false, establish: false }, cam)
        .waypoints[0].pitch === sp[0].pitch);
 
   // Cost has to be flat: a fixed number of looks, whatever the box is.
   const big = planMission(site({ south: 50.06, north: 50.065, west: 19.93, east: 19.94 }),
-     { altitude: 40, nadir: false, oblique: false, orbit: false }, cam);
+     { altitude: 40, nadir: false, oblique: false, orbit: false, establish: false }, cam);
   ok(`the ring costs the same on a big box as a small one (${sp.length} vs ${big.waypoints.length} wp)`,
      big.waypoints.length === sp.length);
 
   // It is the only pass left that laps the whole site: the orbit is a dome per
   // thing now, so the surround ring stands alone at the footprint's own reach.
-  const both = planMission(site(rect), { altitude: 40, nadir: false, oblique: false }, cam);
+  const both = planMission(site(rect), { altitude: 40, nadir: false, oblique: false, establish: false }, cam);
   const radiusOfPass = (m, pass) => Math.max(...m.waypoints.filter(w => w.pass === pass)
      .map(w => { const l = m.frame.toLocal(w.lat, w.lon); return Math.hypot(l.x, l.y); }));
   ok('the surround ring laps the whole footprint',
      radiusOfPass(both, 'surround') >= both.stats.reachM);
 
-  const two = planMission(site(rect), { altitude: 40, surroundRings: 2, nadir: false, oblique: false, orbit: false }, cam);
+  const two = planMission(site(rect), { altitude: 40, surroundRings: 2, nadir: false, oblique: false, orbit: false, establish: false }, cam);
   ok('2 rings doubles the stations at two distinct heights',
      two.waypoints.length === 2 * sp.length && new Set(two.waypoints.map(w => w.alt)).size === 2);
   ok('the extra ring sits below the set altitude', Math.min(...two.waypoints.map(w => w.alt)) < 40);
@@ -706,8 +711,12 @@ const covRect = { south: 50.06, north: 50.06 + 17 / 111132,
                   west: 19.93, east: 19.93 + 25 / (111412 * Math.cos((50 * Math.PI) / 180)) };
 // The surround ring is off throughout: it looks away from the proxy on purpose,
 // so it can only ever add cameras that see none of it.
+// These weigh one pass against another, so nothing else may be flying. The
+// establishing ring is off here for the same reason the grids are: it would
+// add views to every case and flatten the comparison the tests exist to make.
 const covOf = (o) => scoreCoverage(planMission(site(covRect, 3),
-  { orbitPad: 0, nadir: false, oblique: false, orbit: true, surround: false, ...o }, cam)).summary;
+  { orbitPad: 0, nadir: false, oblique: false, orbit: true, surround: false, establish: false, ...o },
+  cam)).summary;
 
 // The scorer models the site as the cubes you tapped, so these are points now.
 const proxyPts = [
@@ -1711,6 +1720,97 @@ console.log('\ncontroller bridge');
   _internals.reset();
   const off = await fetchLines({ south: 53.205, north: 53.21, west: 15.832, east: 15.839 }, { fetchImpl });
   ok('no service means no round trip', off.reason === 'no service' && off.obstacles.length === 0);
+}
+
+// -- the capture SOP ---------------------------------------------------------
+// Volugraph's aerial capture SOP and general capture guide, turned into
+// assertions. Two rules there are concrete enough to check: consecutive frames
+// must share 60-80% of the scene, and every flight pattern opens with "fly at
+// a distance where the entire site can be seen at once" -- whose opposite they
+// name as the first failure mode, "camera view not showing the full location
+// in frame".
+{
+  console.log('\ncapture SOP');
+  const { fov } = await import('../js/camera.js');
+  const view = fov(cam);
+  const M = 111132;
+  // A degree of longitude is shorter than a degree of latitude everywhere but
+  // the equator, so a "square" built from the same offset in both is 100 m by
+  // 63 m at this latitude -- and every measurement taken off it is of a site
+  // that is not the size it claims.
+  const COS = Math.cos((51 * Math.PI) / 180);
+  const square = (side, h) => {
+    const dLat = side / 2 / M;
+    const dLon = side / 2 / (M * COS);
+    return { points: [
+      { lat: 51 - dLat, lon: 17 - dLon, height: h }, { lat: 51 - dLat, lon: 17 + dLon, height: h },
+      { lat: 51 + dLat, lon: 17 + dLon, height: h }, { lat: 51 + dLat, lon: 17 - dLon, height: h },
+    ], obstacles: [], shape: 'hull' };
+  };
+  const metres = (a, b) => Math.hypot(
+    (a.lon - b.lon) * M * Math.cos(51 * Math.PI / 180), (a.lat - b.lat) * M, (a.alt ?? 0) - (b.alt ?? 0),
+  );
+
+  // Rule 3: 60-80% overlap between consecutive photos.
+  let worst = 1;
+  for (const [side, h] of [[10, 6], [30, 25], [60, 15], [150, 8]]) {
+    const m = planMission(square(side, h), DEFAULTS, cam);
+    const orbit = m.exported.filter((w) => w.pass === 'orbit');
+    for (let i = 1; i < orbit.length; i++) {
+      // Only frames that follow each other ALONG a ring. The pair that spans
+      // the jump from the top of one ring to the bottom of the next is not two
+      // consecutive photographs of anything, and counting it reads as a 55%
+      // overlap failure that is not happening.
+      if (orbit[i].lineStart) continue;
+      const step = metres(orbit[i - 1], orbit[i]);
+      const range = Math.hypot(
+        (orbit[i].lon - 17) * M * COS, (orbit[i].lat - 51) * M, orbit[i].alt - h / 2,
+      );
+      const frame = 2 * range * Math.tan(view.h / 2);
+      worst = Math.min(worst, 1 - step / frame);
+    }
+  }
+  ok(`orbit frames overlap by at least 60% (worst ${(100 * worst).toFixed(0)}%)`, worst >= 0.6,
+     `${(100 * worst).toFixed(0)}%`);
+
+  // Rule 3.1/3.2/3.3: the whole site in frame, somewhere in the plan.
+  const widestInward = (m, side, h) => {
+    let widest = 0;
+    for (const w of m.exported) {
+      if (!w.photo || w.pass === 'surround') continue;
+      const range = Math.hypot((w.lon - 17) * M * COS, (w.lat - 51) * M, w.alt - h / 2);
+      widest = Math.max(widest, 2 * range * Math.tan(view.h / 2));
+    }
+    return widest;
+  };
+  for (const [side, h] of [[30, 25], [100, 10], [150, 8], [200, 5]]) {
+    const m = planMission(square(side, h), DEFAULTS, cam);
+    const diag = side * Math.SQRT2;
+    ok(`a ${side} m site is wholly in frame somewhere`, widestInward(m, side, h) >= diag,
+       `${widestInward(m, side, h).toFixed(0)} m vs ${diag.toFixed(0)} m diagonal`);
+  }
+
+  // And it is not a ring for nothing: round a tall thing the detail rings
+  // already stand far enough back, so none is added.
+  const tall = planMission(square(30, 25), DEFAULTS, cam);
+  ok('no establishing ring where the detail rings already do it',
+     !tall.passes.some((x) => x.name === 'Establishing orbit'));
+  const flat = planMission(square(200, 5), DEFAULTS, cam);
+  const est = flat.passes.find((x) => x.name === 'Establishing orbit');
+  ok('and one where they never will', Boolean(est));
+  ok('which costs a couple of dozen frames, not a second flight',
+     est.count <= 28, String(est.count));
+
+  // The honest bit: past a certain size no legal altitude frames the whole
+  // site, and the plan has to say so rather than half do it.
+  const huge = planMission(square(600, 5), { ...DEFAULTS, establish: true }, cam);
+  const hugeEst = huge.passes.find((x) => x.name === 'Establishing orbit');
+  ok('a site too big for the ceiling says how much it did fit',
+     !hugeEst || /whole site|% of the site/.test(hugeEst.detail), hugeEst?.detail);
+
+  // Rule: 3.1 says repeat the orbit at different altitudes, low to top.
+  const rings = new Set(tall.exported.filter((w) => w.pass === 'orbit').map((w) => Math.round(w.alt)));
+  ok('the subject is orbited from more than one height', rings.size >= 3, `${rings.size} heights`);
 }
 
 console.log(`\n${fails === 0 ? 'ALL PASS' : fails + ' FAILURES'}`);

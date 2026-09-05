@@ -43,7 +43,7 @@ import { sampleTerrain, verdict as terrainVerdict } from './terrain.js';
 const cam = CAMERAS.mini5pro;
 const $ = (id) => document.getElementById(id);
 
-const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff', surround: '#ff6fb5' };
+const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff', surround: '#ff6fb5', establish: '#7ee0a0' };
 const OBSTACLE_COLOR = { clear: '#ffb84d', near: '#ff9f4d', strike: '#ff5d5d' };
 const CLEARANCE_KEY = 'dji.clearance';
 
@@ -315,7 +315,7 @@ const controls = {
   speed: { el: $('speed'), val: (v) => +v, fmt: (v) => `${(+v).toFixed(1)} m/s` },
   orbitPad: { el: $('orbitPad'), val: (v) => +v, fmt: (v) => `${v > 0 ? '+' : ''}${v} m` },
 };
-const PASS_IDS = ['nadir', 'oblique', 'orbit', 'transect', 'surround'];
+const PASS_IDS = ['nadir', 'oblique', 'orbit', 'transect', 'surround', 'establish'];
 const PICK_IDS = ['photoMode', 'profile', 'shotsPerStop', 'orbitRings', 'surroundRings', 'shape'];
 
 for (const [name, spec] of Object.entries(SHAPES)) {
@@ -1580,7 +1580,7 @@ applyUiValues({
   shotsPerStop: DEFAULTS.shotsPerStop,
   orbitRings: DEFAULTS.orbitRings,
   surroundRings: DEFAULTS.surroundRings,
-  nadir: true, oblique: true, orbit: true, surround: true, transect: false,
+  nadir: true, oblique: true, orbit: true, surround: true, transect: false, establish: true,
 });
 try {
   const c = localStorage.getItem(CLEARANCE_KEY);

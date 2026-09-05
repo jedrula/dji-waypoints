@@ -6,7 +6,7 @@ import { createTileCache, pickZoom, tileRange, tileBounds, TILE_PX } from './til
 // WebGL library would be more dependency than drawing. Coordinates are local
 // ENU metres: x east, y north, z up.
 
-const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff', surround: '#ff6fb5' };
+const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff', surround: '#ff6fb5', establish: '#7ee0a0' };
 // Obstacles are the world, not the plan, so they get their own family of
 // colours rather than borrowing a pass's: slate while the flight stays clear of
 // them, and the grade of the trouble once it does not.

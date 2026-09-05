@@ -35,6 +35,9 @@ export const DEFAULTS = {
   // number here is the honest version: the height of the tallest thing under
   // the ring plus the clearance you are willing to fly at, so the low ring
   // skims the site rather than guessing at it.
+  // One high ring with the whole site in every frame. Emitted only where the
+  // detail passes do not already manage it, which over a tall subject they do.
+  establish: true,
   surround: true,        // outward-facing ring: the landscape, not the subject
   surroundRings: 1,      // >1 adds vertical parallax on whatever stands nearby
   transect: false,       // crossing lines THROUGH the site, camera side-on
@@ -291,6 +294,7 @@ export function subjectsOf(local, hull, avoid = [], f, { all = false } = {}) {
 export const SUBJECT_SPAN = 6;
 
 const FILL = 1.35;              // leave a margin around the thing in frame
+const ESTABLISH_MARGIN = 1.1;   // the establishing ring only has to CONTAIN the site
 const MIN_PER_RING_OBJ = 12;    // every 30 deg, the floor for a small thing
 const MAX_PER_RING_OBJ = 32;    // every 11 deg, past which frames stop earning
 
@@ -411,6 +415,74 @@ function objectPass(g) {
 // the landscape beyond it, from the far side of the same ring, which both
 // triangulates that landscape and keeps the two image sets connected in SfM.
 // The pass is worth much more with the orbit on than without it.
+
+// The establishing orbit: one ring far enough out that the WHOLE site is in
+// every frame.
+//
+// Volugraph's capture SOP opens all three of its flight patterns with the same
+// sentence -- "fly at a distance where the entire site can be seen at once" --
+// and names the opposite as its first failure mode: "camera view not showing
+// the full location in frame". Measured against this planner, sites up to
+// about a hundred metres across already satisfy it by accident, because a
+// detail ring round a tall thing stands well back. A 150 m site never does,
+// and a 200 m one is not close.
+//
+// This does not replace the detail rings and must not be confused with them.
+// Framing the whole width for DETAIL is the wrong trade and the objectPass
+// comment says why: a 200 m site three metres tall would get a 260 m standoff
+// and resolve nothing. The two passes want opposite things, so they are two
+// passes. This one is cheap -- twenty-odd frames -- and what it buys is the
+// long tie-in that lets a reconstruction agree with itself across the whole
+// site rather than solving each end separately.
+function establishPass(g) {
+  const { halfX, halfY, subjectHeight, f, cam, frontOverlap, ceiling = 120, minAlt } = g;
+  const view = fov(cam);
+  const diag = 2 * Math.hypot(halfX, halfY);
+  const aimZ = (subjectHeight ?? 0) / 2;
+
+  // Far enough that the diagonal fits across the frame. FILL is the detail
+  // rings' margin and it is the wrong one here: it exists so a subject is not
+  // clipped by a frame meant to resolve it, and this frame only has to CONTAIN
+  // the site. A tenth is enough to keep the corners off the edge, and on a
+  // 150 m site the difference between a tenth and a third is a minute of
+  // flying -- which decides whether the ring survives one battery at all.
+  const range = (diag * ESTABLISH_MARGIN) / (2 * Math.tan(view.h / 2));
+  // Looking down at about forty degrees: steep enough to see into the site
+  // rather than across it, shallow enough to keep the far side from stacking
+  // up behind the near side. Where that would exceed the ceiling, the ring
+  // flies at the ceiling and moves out instead, which is the same picture from
+  // a shallower angle.
+  const wanted = aimZ + range * Math.sin((40 * Math.PI) / 180);
+  const alt = Math.max(minAlt ?? 0, Math.min(ceiling, wanted));
+  const rise = Math.max(1, alt - aimZ);
+  const r = Math.max(Math.hypot(halfX, halfY) + 5, Math.sqrt(Math.max(1, range * range - rise * rise)));
+
+  const frameW = 2 * Math.hypot(r, rise) * Math.tan(view.h / 2);
+  const step = Math.max(1, frameW * (1 - frontOverlap));
+  const n = Math.max(10, Math.min(28, Math.ceil((2 * Math.PI * r) / step)));
+
+  const centre = f.toLatLon(0, 0);
+  const pitch = Math.round(Math.max(cam.minGimbalPitch, Math.min(cam.maxGimbalPitch,
+    -((Math.atan2(rise, r) * 180) / Math.PI))) * 10) / 10;
+
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const ang = (2 * Math.PI * i) / n;
+    pts.push({
+      ...f.toLatLon(r * Math.sin(ang), r * Math.cos(ang)),
+      alt, pitch,
+      heading: { mode: 'towardPOI', poi: centre },
+      photo: true,
+      pass: 'establish',
+      lineStart: i === 0,
+    });
+  }
+  // `covers` is the honest bit: past a certain size the whole site cannot be
+  // framed from under the ceiling at all, and the plan should say so rather
+  // than fly a ring that half does it.
+  return { pts, r, alt, n, frameW, diag, covers: frameW >= diag };
+}
+
 function surroundPass(g) {
   const { halfX, halfY, pad, f, alt, rings, cam, frontOverlap } = g;
   const r = Math.max(3, (g.reach ?? Math.hypot(halfX, halfY)) + pad);
@@ -751,6 +823,40 @@ export function planMission(site, opts, cam) {
     });
   }
 
+  // The establishing ring, but only where the plan does not already satisfy the
+  // rule by accident. Round a tall thing the detail rings stand well back and
+  // the whole site is in every frame already; over a wide flat one nothing ever
+  // sees more than a slice, and that is the case worth spending twenty frames
+  // on. Measured rather than guessed: ask what the widest inward-facing frame
+  // in the plan actually covers.
+  if (p.establish) {
+    const view = fov(cam);
+    const diag = 2 * Math.hypot(halfX, halfY);
+    const aimZ = (p.subjectHeight ?? 0) / 2;
+    let widest = 0;
+    for (const w of waypoints) {
+      if (!w.photo || w.pass === 'surround') continue;
+      const l = f.toLocal(w.lat, w.lon);
+      const range = Math.hypot(l.x, l.y, w.alt - aimZ);
+      const wdt = 2 * range * Math.tan(view.h / 2);
+      if (wdt > widest) widest = wdt;
+    }
+    if (widest < diag) {
+      const r = establishPass({
+        halfX, halfY, subjectHeight: p.subjectHeight, f, cam,
+        frontOverlap: p.frontOverlap, minAlt: p.altitude,
+      });
+      add(r.pts);
+      passes.push({
+        name: 'Establishing orbit',
+        count: r.pts.length,
+        detail: r.covers
+          ? `whole site in frame, r = ${r.r.toFixed(0)} m at ${r.alt.toFixed(0)} m`
+          : `${((100 * r.frameW) / r.diag).toFixed(0)}% of the site in frame — the ceiling stops it framing all of it`,
+      });
+    }
+  }
+
   // Where each camera actually points. followWayline aims along the leg to the
   // next waypoint; towardPOI aims at the box centre. Needed by both the map
   // pose ticks and the 3D frustums, so it belongs in the plan, not the view.
@@ -911,9 +1017,9 @@ export function proposePlan(site, base, cam, budget = {}) {
   const step = hasHeight ? 1 : 5;
 
   // Lowest altitude (best GSD) that fits, for one shutter mode and ring count.
-  const lowestFit = (photoMode, orbitRings, surround) => {
+  const lowestFit = (photoMode, orbitRings, surround, establish = true) => {
     for (let alt = floorAlt; alt <= 120; alt += step) {
-      const m = planMission(site, { ...base, altitude: alt, photoMode, orbitRings, surround }, cam);
+      const m = planMission(site, { ...base, altitude: alt, photoMode, orbitRings, surround, establish }, cam);
       if (fits(m)) return m;
     }
     return null;
@@ -922,9 +1028,9 @@ export function proposePlan(site, base, cam, budget = {}) {
   // Waypoint-per-photo is the only shutter mode every DJI Fly build is known to
   // honour, so exhaust it before considering the distance trigger -- a worse
   // GSD that definitely flies beats a better one that might not.
-  const pick = (photoMode, surround) => {
+  const pick = (photoMode, surround, establish = true) => {
     const options = ringChoices
-      .map((r) => ({ rings: r, mission: lowestFit(photoMode, r, surround) }))
+      .map((r) => ({ rings: r, mission: lowestFit(photoMode, r, surround, establish) }))
       .filter((o) => o.mission);
     if (!options.length) return null;
     // Rings cost waypoints, which pushes altitude up. Never trade a lot of
@@ -949,19 +1055,49 @@ export function proposePlan(site, base, cam, budget = {}) {
   // that is the usual outcome: the ring is 900 m of flying at 140 m radius, a
   // quarter of the battery, and none of it spent on the subject.
   const wantSurround = base.surround ?? DEFAULTS.surround;
-  const full = pick('waypoint', wantSurround);
-  const trimmed = !full && wantSurround ? pick('waypoint', false) : null;
-  const primary = full ?? trimmed;
-  const fallback = pick('interval', wantSurround);
+  const wantEstablish = base.establish ?? DEFAULTS.establish;
+
+  // What gets given up, and in what order, before the shutter does.
+  //
+  // The surround ring goes first: it is the only pass pointed away from the
+  // subject, so a capture without it is still the capture that was asked for.
+  // The establishing ring goes next -- it is a wide circuit that costs minutes
+  // rather than waypoints, and giving it up means nothing in the plan holds
+  // the whole site in one frame, which the capture SOP calls its first failure
+  // mode. Both go before the photo mode, because a plan missing a pass is
+  // still a plan and one flown on a trigger nobody has seen work on this
+  // airframe might be nothing at all.
+  // Ordered by what is kept, most valuable first -- and every combination is
+  // tried, not just a chain of removals. On a big site the establishing orbit
+  // is the wider circuit of the two and costs minutes the surround ring does
+  // not, so "surround only" can fit where "establish only" will not; leaving
+  // that rung out threw away a ring that would have flown.
+  const ladder = [
+    { surround: wantSurround, establish: wantEstablish, lost: null },
+    ...(wantSurround ? [{ surround: false, establish: wantEstablish, lost: 'surround' }] : []),
+    ...(wantEstablish ? [{ surround: wantSurround, establish: false, lost: 'establish' }] : []),
+    ...(wantSurround && wantEstablish ? [{ surround: false, establish: false, lost: 'both' }] : []),
+  ];
+  let chosen = null;
+  for (const rung of ladder) {
+    const m = pick('waypoint', rung.surround, rung.establish);
+    if (m) { chosen = { mission: m, lost: rung.lost }; break; }
+  }
+  const primary = chosen?.mission ?? null;
+  const trimmed = chosen?.lost ? chosen.mission : null;
+  const LOST_NOTE = {
+    surround: 'One battery does not cover the surround ring as well, so it is off — the subject passes come first. Turn it back on and accept a longer flight, or a split.',
+    establish: 'One battery does not stretch to the establishing orbit — over a site this size it is a kilometre of flying — so it is off. Nothing in the plan now holds the whole site in one frame, which is the usual reason a reconstruction will not join up across a big site. Turn it back on and accept a longer flight, or a split.',
+    both: 'One battery does not cover the surround ring or the establishing orbit, so both are off and the passes that photograph the subject keep the whole battery. Nothing now holds the whole site in one frame. Turn them back on and accept a longer flight, or a split.',
+  };
+  const fallback = pick('interval', wantSurround, wantEstablish);
 
   if (primary) {
     const better = fallback && fallback.params.altitude < primary.params.altitude - 5;
     return {
       mission: primary,
       fits: true,
-      note: trimmed
-        ? `One battery does not cover the surround ring as well, so it is off — the subject passes come first. Turn it back on and accept a longer flight, or a split.`
-        : null,
+      note: chosen?.lost ? LOST_NOTE[chosen.lost] : null,
       alternative: better
         ? `Distance-interval shutter would fit at ${fallback.params.altitude} m (${fallback.stats.gsdCm.toFixed(2)} cm/px vs ${primary.stats.gsdCm.toFixed(2)}), but that trigger is unverified on this airframe.`
         : null,

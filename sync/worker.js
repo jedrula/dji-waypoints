@@ -1,3 +1,5 @@
+import { mergeRecords } from './policy.js';
+
 // Storage for the two lists this app keeps: the plans you saved, and the
 // obstacles you drew on the map. A plan is a ~200 character code (js/share.js)
 // and an obstacle is a rectangle plus a height, so the whole store for one
@@ -103,16 +105,13 @@ const LISTS = {
 // Last write wins per id, and a tombstone is a write like any other -- which is
 // what makes a delete on the phone reach the Mac. On an equal timestamp the
 // incoming write wins, since it is the one that just travelled.
-function merge(a, b, max = 500) {
-  const by = new Map();
-  for (const p of [...a, ...b]) {
-    const prev = by.get(p.id);
-    if (!prev || p.updatedAt >= prev.updatedAt) by.set(p.id, p);
-  }
-  return [...by.values()]
-    .sort((x, y) => y.updatedAt - x.updatedAt || x.id.localeCompare(y.id))
-    .slice(0, max);
-}
+//
+// The rule lives in sync/policy.js because the client and the Node service
+// apply it too, and because the cap in it has already eaten someone's data
+// once: it used to bound the whole list, tombstones included, so two rounds of
+// importing and clearing four hundred obstacles pushed the hand-placed ones off
+// the end. Evicted, not deleted, with nothing to undo.
+const merge = (a, b, max = 500) => mergeRecords(a, b, max);
 
 export default {
   async fetch(request, env) {

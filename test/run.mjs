@@ -1049,12 +1049,15 @@ console.log('\nsaved plans');
   ok('and reports what arrived', res.pulled === 1);
 
   // The client and the Worker have to agree, or a plan flickers between devices.
-  const older = { id: 'x', name: 'old', code: 'v1.o', updatedAt: 100 };
-  const newer = { id: 'x', name: 'new', code: 'v1.n', updatedAt: 200 };
+  // Real timestamps, because retention is part of the rule now: a tombstone
+  // dated 1970 is one the store is entitled to have forgotten.
+  const T = Date.now();
+  const older = { id: 'x', name: 'old', code: 'v1.o', updatedAt: T - 2000 };
+  const newer = { id: 'x', name: 'new', code: 'v1.n', updatedAt: T - 1000 };
   ok('client merge is last-write-wins', clientMerge([older], [newer])[0].name === 'new');
   ok('worker merge is last-write-wins', workerMerge([newer], [older])[0].name === 'new');
   ok('a tombstone beats an older edit',
-     workerMerge([older], [{ id: 'x', deleted: true, updatedAt: 300 }])[0].deleted === true);
+     workerMerge([older], [{ id: 'x', deleted: true, updatedAt: T }])[0].deleted === true);
 
   ok('worker rejects a plan with no code', clean({ id: 'abcdef', updatedAt: 1, name: 'x' }) === null);
   ok('worker rejects a forged id', clean({ id: '../etc', updatedAt: 1, name: 'x', code: 'v1.a' }) === null);
@@ -1420,8 +1423,11 @@ console.log('\nsync worker');
     body: JSON.stringify(body),
   }), env);
 
-  const plan = { id: 'planaa', name: 'Yard', code: 'v1.aaa', updatedAt: 1000 };
-  const box = { id: 'boxaaa', name: 'Shed', height: 4, updatedAt: 1000,
+  // Real times: a tombstone is only kept for a window now, and one dated 1970
+  // is one the store is entitled to have forgotten.
+  const NOW = Date.now();
+  const plan = { id: 'planaa', name: 'Yard', code: 'v1.aaa', updatedAt: NOW - 4000 };
+  const box = { id: 'boxaaa', name: 'Shed', height: 4, updatedAt: NOW - 4000,
                 north: 50.001, south: 50, east: 19.001, west: 19 };
 
   let res = await post('/sync', { plans: [plan] });
@@ -1451,12 +1457,12 @@ console.log('\nsync worker');
   ok('a body of the wrong shape is refused', res.status === 400);
 
   // Last write wins, across the wire, the way two devices actually meet.
-  await post('/obstacles', { obstacles: [{ ...box, height: 9, updatedAt: 2000 }] });
-  res = await post('/obstacles', { obstacles: [{ ...box, height: 2, updatedAt: 1500 }] });
+  await post('/obstacles', { obstacles: [{ ...box, height: 9, updatedAt: NOW - 3000 }] });
+  res = await post('/obstacles', { obstacles: [{ ...box, height: 2, updatedAt: NOW - 3500 }] });
   body = await res.json();
   ok('an older edit loses to a newer one already stored', body.obstacles[0].height === 9);
 
-  res = await post('/obstacles', { obstacles: [{ id: 'boxaaa', deleted: true, updatedAt: 3000 }] });
+  res = await post('/obstacles', { obstacles: [{ id: 'boxaaa', deleted: true, updatedAt: NOW - 2000 }] });
   body = await res.json();
   ok('and a tombstone travels like any other write', body.obstacles[0].deleted === true);
 
@@ -1811,6 +1817,101 @@ console.log('\ncontroller bridge');
   // Rule: 3.1 says repeat the orbit at different altitudes, low to top.
   const rings = new Set(tall.exported.filter((w) => w.pass === 'orbit').map((w) => Math.round(w.alt)));
   ok('the subject is orbited from more than one height', rings.size >= 3, `${rings.size} heights`);
+}
+
+// -- what a list is allowed to forget ----------------------------------------
+{
+  console.log('\nrecord retention');
+  const { mergeRecords, TOMBSTONE_MS, MAX_TOMBSTONES } = await import('../sync/policy.js');
+  const now = Date.now();
+  const live = (id, age = 0, extra = {}) => ({ id, updatedAt: now - age, name: id, ...extra });
+  const dead = (id, age = 0) => ({ id, deleted: true, updatedAt: now - age });
+
+  // The bug, exactly as it happened: a hand-placed record and then rounds of
+  // bulk import followed by bulk delete.
+  let store = mergeRecords([], [live('mineAAA', 1e6)], 800, now);
+  for (let round = 0; round < 5; round++) {
+    const imp = [], tmb = [];
+    for (let i = 0; i < 400; i++) {
+      const id = `r${round}${String(i).padStart(4, '0')}`;
+      imp.push(live(id, -round * 1000 - i));
+      tmb.push(dead(id, -round * 1000 - 500 - i));
+    }
+    store = mergeRecords(mergeRecords(store, imp, 800, now), tmb, 800, now);
+  }
+  ok('bulk import and delete cannot evict a hand-placed record',
+     store.some((r) => r.id === 'mineAAA' && !r.deleted));
+  ok('and the dead are bounded on their own',
+     store.filter((r) => r.deleted).length <= MAX_TOMBSTONES,
+     String(store.filter((r) => r.deleted).length));
+
+  // The cap still does its job -- on the living.
+  const many = Array.from({ length: 60 }, (_, i) => live(`p${i}`, i * 1000));
+  const capped = mergeRecords([], many, 20, now);
+  ok('the cap bounds live records', capped.filter((r) => !r.deleted).length === 20);
+  ok('and keeps the newest of them', capped.some((r) => r.id === 'p0') && !capped.some((r) => r.id === 'p59'));
+
+  // Tombstones travel, then stop.
+  // The tombstone has to be NEWER than the record it deletes, or last-write-wins
+  // is right to keep the record and this tests nothing.
+  const fresh = mergeRecords([live('a', 2000)], [dead('a', 1000)], 100, now);
+  ok('a fresh tombstone is kept, so the other device hears about the delete',
+     fresh.some((r) => r.id === 'a' && r.deleted));
+  const stale = mergeRecords([], [dead('b', TOMBSTONE_MS + 1000)], 100, now);
+  ok('a tombstone older than the window is forgotten', stale.length === 0);
+  const justInside = mergeRecords([], [dead('c', TOMBSTONE_MS - 1000)], 100, now);
+  ok('and one just inside it is not', justInside.length === 1);
+
+  // The property that matters most: nothing a person made is ever dropped to
+  // make room for a record that no longer exists.
+  const tombs = Array.from({ length: 500 }, (_, i) => dead(`t${i}`, i));
+  const withMine = mergeRecords([live('mine', 5e6)], tombs, 10, now);
+  ok('five hundred deletions do not push out the one live record',
+     withMine.some((r) => r.id === 'mine' && !r.deleted));
+}
+
+// -- what never leaves the device --------------------------------------------
+{
+  console.log('\nlocal-only records');
+  const { createObstacleStore } = await import('../js/obstacles.js');
+  const { isImported } = await import('../js/site.js');
+  const mem = () => { const m = new Map(); return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, v) }; };
+
+  let sent = null;
+  const storage = mem();
+  const store = createObstacleStore({
+    storage, endpoint: 'http://sync.test', local: isImported,
+    fetchImpl: async (u, o) => {
+      sent = JSON.parse(o.body).obstacles;
+      return { ok: true, status: 200, json: async () => ({ obstacles: sent }) };
+    },
+  });
+
+  const rect = { north: 51.001, south: 51, east: 17.001, west: 17 };
+  const mine = store.put({ ...rect, name: 'the gate post', height: 4 });
+  const osm = store.put({ ...rect, name: '~Building (osm)', height: 24 });
+  const wire = store.put({ ...rect, name: '~low voltage line (bdot)', height: 10 });
+  ok('all three are stored locally', store.list().length === 3);
+
+  await store.sync();
+  ok('only the hand-placed one is sent', sent.length === 1 && sent[0].id === mine.id,
+     JSON.stringify(sent.map((r) => r.name)));
+  ok('and the imported ones are still here afterwards', store.list().length === 3);
+
+  // Clearing an import must not write tombstones into a shared list.
+  store.remove(osm.id);
+  store.remove(wire.id);
+  await store.sync();
+  ok('clearing an import leaves no tombstone to travel', sent.every((r) => !r.deleted),
+     JSON.stringify(sent));
+  ok('and it really is gone locally', store.list().length === 1);
+
+  // A hand-placed delete still travels, because the other device has it.
+  store.remove(mine.id);
+  await store.sync();
+  ok('deleting your own obstacle still tells the other device',
+     sent.some((r) => r.id === mine.id && r.deleted));
 }
 
 console.log(`\n${fails === 0 ? 'ALL PASS' : fails + ' FAILURES'}`);

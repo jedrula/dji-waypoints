@@ -96,7 +96,14 @@ export function spanMOf(o) {
 export function createSite({ onChange = () => {}, onSync = () => {}, storage, fetchImpl, endpoint } = {}) {
   // Capture points are the plan; obstacles are the world the plan flies through.
   let capture = [];
-  const obstacles = createObstacleStore({ storage, fetchImpl, endpoint });
+  // Imported obstacles never leave this device. They come from OpenStreetMap
+  // and BDOT10k, they are re-fetchable in a second from the button that made
+  // them, and they are not anybody's work -- while the things you placed by
+  // hand are exactly that. Keeping them out of the sync also removes the churn
+  // that made a capped list dangerous: importing three hundred obstacles and
+  // clearing them again used to write six hundred records into a shared list
+  // and quietly push a hand-placed one off the end.
+  const obstacles = createObstacleStore({ storage, fetchImpl, endpoint, local: isImported });
 
   // One round trip at a time and in order: a save followed by a delete has to
   // reach the service in that order, or the delete is the one that gets lost.

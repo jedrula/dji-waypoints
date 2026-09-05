@@ -1,3 +1,4 @@
+import { mergeRecords } from '../sync/policy.js';
 // One person, a few devices, and a list of things worth keeping. Plans were the
 // first such list; the obstacles you draw on the map are the second, and the
 // rule for keeping them in step is the same one -- local first, last write wins
@@ -29,18 +30,16 @@ function newId() {
   return btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-// Last write wins per id; a tombstone is a write like any other. Same rule as
-// the Worker, deliberately -- two copies of one rule is bad, but a client that
-// merges differently from the server is worse. Ties go to whatever came later
-// in the arguments, which is the write that just arrived.
-export function merge(a, b) {
-  const by = new Map();
-  for (const r of [...a, ...b]) {
-    const prev = by.get(r.id);
-    if (!prev || r.updatedAt >= prev.updatedAt) by.set(r.id, r);
-  }
-  return [...by.values()].sort((x, y) => y.updatedAt - x.updatedAt);
-}
+// Last write wins per id; a tombstone is a write like any other. The rule is
+// imported rather than written again -- a client that merges differently from
+// the server is worse than one rule in one file, and that includes how long
+// each of them keeps a tombstone. If the client hoarded deletions the server
+// had already forgotten, it would hand them back on every sync forever.
+//
+// No cap on the client: the browser is storing a few kilobytes and the server
+// is the one with a list length to defend. Passing Infinity says that on
+// purpose rather than by leaving an argument off.
+export const merge = (a, b) => mergeRecords(a, b, Infinity);
 
 // Every write on a device gets a timestamp strictly later than every write
 // before it. Date.now() alone is not enough: two saves inside one millisecond
@@ -53,9 +52,14 @@ function stamp(records) {
 
 // `collection` is the JSON key on the wire and `path` the Worker route; the two
 // together are all that separates one list from another.
+// `local` marks records that live on this device and are never sent. Anything
+// derived from a public dataset belongs here: it is re-fetchable, it is not
+// anybody's work, and syncing it is how a list of four hundred imported
+// obstacles and then four hundred tombstones for them ends up shoving
+// hand-placed records out of a capped list.
 export function createSyncedStore({
   collection, path, storageKey, shape = (r) => r,
-  storage, fetchImpl, endpoint,
+  storage, fetchImpl, endpoint, local = () => false,
 } = {}) {
   const store = storage ?? globalThis.localStorage;
   const http = fetchImpl ?? globalThis.fetch?.bind(globalThis);
@@ -86,6 +90,14 @@ export function createSyncedStore({
 
     remove(id) {
       const records = readAll();
+      // A record no other device ever heard about needs no tombstone. Writing
+      // one anyway is pure cost: it travels, it takes a slot, and there is
+      // nothing anywhere for it to delete.
+      const gone = records.find((r) => r.id === id);
+      if (gone && local(gone)) {
+        writeAll(records.filter((r) => r.id !== id));
+        return;
+      }
       writeAll(merge(records, [{ id, deleted: true, updatedAt: stamp(records) }]));
     },
 
@@ -98,10 +110,11 @@ export function createSyncedStore({
       const to = url();
       if (!to) throw new Error('no sync service configured');
       const before = readAll();
+      const send = before.filter((r) => !local(r));
       const res = await http(`${to.replace(/\/$/, '')}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Sync-Key': SYNC_KEY },
-        body: JSON.stringify({ [collection]: before }),
+        body: JSON.stringify({ [collection]: send }),
       });
       const body = await res.json().catch(() => ({}));
       // A 404 is the one failure with a specific cause: the service is up but

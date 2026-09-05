@@ -169,16 +169,19 @@ console.log('\nsync store');
   const key = 'andrzej-H5rGhCrCRmPXoRSFUA8etg';
   const plans = LISTS['/sync'];
 
-  const a = await store.put(plans, key, [{ id: 'aaaaaa', updatedAt: 10, name: 'one', code: 'v2.x' }]);
+  // Real times, because a tombstone is only kept for a window now and one dated
+  // 1970 is one the store is entitled to have already forgotten.
+  const T = Date.now();
+  const a = await store.put(plans, key, [{ id: 'aaaaaa', updatedAt: T - 40, name: 'one', code: 'v2.x' }]);
   ok('stores a plan', a.length === 1 && a[0].name === 'one');
-  const b = await store.put(plans, key, [{ id: 'aaaaaa', updatedAt: 20, name: 'two', code: 'v2.y' }]);
+  const b = await store.put(plans, key, [{ id: 'aaaaaa', updatedAt: T - 30, name: 'two', code: 'v2.y' }]);
   ok('last write wins per id', b.length === 1 && b[0].name === 'two');
-  const c = await store.put(plans, key, [{ id: 'aaaaaa', updatedAt: 15, name: 'stale', code: 'v2.z' }]);
+  const c = await store.put(plans, key, [{ id: 'aaaaaa', updatedAt: T - 35, name: 'stale', code: 'v2.z' }]);
   ok('an older write does not win', c[0].name === 'two');
-  const d = await store.put(plans, key, [{ id: 'aaaaaa', deleted: true, updatedAt: 30 }]);
+  const d = await store.put(plans, key, [{ id: 'aaaaaa', deleted: true, updatedAt: T - 20 }]);
   ok('a tombstone travels like any other write', d[0].deleted === true);
   ok('rejects a record with no usable id',
-     (await store.put(plans, key, [{ id: '!!', updatedAt: 40, name: 'x', code: 'y' }])).length === 1);
+     (await store.put(plans, key, [{ id: '!!', updatedAt: T - 10, name: 'x', code: 'y' }])).length === 1);
   ok('separate keys are separate lists',
      (await store.get(plans, 'someone-else-0123456789abcdef')).length === 0);
 
@@ -188,21 +191,21 @@ console.log('\nsync store');
   const store2 = createStore({ dir });
   const key2 = 'concurrent-0123456789abcdefgh';
   await Promise.all([
-    store2.put(plans, key2, [{ id: 'p1aaaa', updatedAt: 1, name: 'first', code: 'a' }]),
-    store2.put(plans, key2, [{ id: 'p2aaaa', updatedAt: 2, name: 'second', code: 'b' }]),
-    store2.put(plans, key2, [{ id: 'p3aaaa', updatedAt: 3, name: 'third', code: 'c' }]),
+    store2.put(plans, key2, [{ id: 'p1aaaa', updatedAt: T - 3, name: 'first', code: 'a' }]),
+    store2.put(plans, key2, [{ id: 'p2aaaa', updatedAt: T - 2, name: 'second', code: 'b' }]),
+    store2.put(plans, key2, [{ id: 'p3aaaa', updatedAt: T - 1, name: 'third', code: 'c' }]),
   ]);
   const all = await store2.get(plans, key2);
   ok('concurrent syncs do not lose records', all.length === 3, `kept ${all.length} of 3`);
 
   const obstacles = LISTS['/obstacles'];
   const good = await store.put(obstacles, key, [{
-    id: 'obsaaa', updatedAt: 5, name: '~building',
+    id: 'obsaaa', updatedAt: T - 5, name: '~building',
     north: 51.12, south: 51.11, east: 17.04, west: 17.03, height: 24,
   }]);
   ok('stores an obstacle', good.length === 1 && good[0].height === 24);
   const huge = await store.put(obstacles, key, [{
-    id: 'obsbbb', updatedAt: 6, north: 52, south: 51, east: 18, west: 17, height: 24,
+    id: 'obsbbb', updatedAt: T - 4, north: 52, south: 51, east: 18, west: 17, height: 24,
   }]);
   ok('rejects a box the size of a country', huge.length === 1);
 

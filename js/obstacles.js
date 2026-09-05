@@ -27,7 +27,7 @@ export const DEFAULT_HEIGHT = 10;
 
 export const DEFAULT_CLEARANCE = 5;
 
-export function createObstacleStore({ storage, fetchImpl, endpoint } = {}) {
+export function createObstacleStore({ storage, fetchImpl, endpoint, local } = {}) {
   const base = createSyncedStore({
     collection: 'obstacles',
     path: '/obstacles',
@@ -43,7 +43,7 @@ export function createObstacleStore({ storage, fetchImpl, endpoint } = {}) {
       west: +(+west).toFixed(6),
       height: Math.round(Math.max(0, Math.min(1000, +height)) * 10) / 10,
     }),
-    storage, fetchImpl, endpoint,
+    storage, fetchImpl, endpoint, local,
   });
   return base;
 }

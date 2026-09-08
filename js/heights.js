@@ -12,6 +12,7 @@
 // to a blank map.
 
 import { toPuwg92, inPoland } from './puwg92.js';
+import { insideRing } from './prism.js';
 
 // Off unless the page is itself local, so the deployed app does not spend a
 // round trip on a service that is only ever running on someone's laptop. Set
@@ -68,33 +69,60 @@ async function fetchTile(tn, te, { fetchImpl, signal, waitMs, onWait }) {
   }
 }
 
+// The obstacle's outline in the survey's own coordinates, so a cell can be
+// asked whether it is on the building or merely near it.
+const ringPuwg = (rect) => (Array.isArray(rect.poly) && rect.poly.length >= 3
+  ? rect.poly.map(([lat, lon]) => {
+    const p = toPuwg92(lat, lon);
+    return { x: p.east, y: p.north };
+  })
+  : null);
+
 // The tallest measured cell under a footprint. A building is what its roof is,
 // not what its average is, and the whole point of measuring is to stop being
 // optimistic about the thing you are flying at.
+//
+// Over the FOOTPRINT, though, not over the rectangle round it. This was the
+// worst of the bounding box, worse than the wasted sky: at a median 1.9x too
+// big, the rectangle round a building routinely covers the neighbour's roof, so
+// a single-storey garage beside a 24 m block measured 24 m -- and `assumed`
+// went false, which is the app stating as measured fact a number belonging to a
+// different building. The one thing js/osm.js says it must never do.
 function sampleMax(rect, { tileMetres, size }, get) {
   const cell = tileMetres / size;
   const sw = toPuwg92(rect.south, rect.west);
   const ne = toPuwg92(rect.north, rect.east);
-  let best = null;
-  let blank = 0;
-  let seen = 0;
-  for (let north = Math.floor(sw.north); north <= Math.ceil(ne.north); north += cell) {
-    for (let east = Math.floor(sw.east); east <= Math.ceil(ne.east); east += cell) {
-      const tn = Math.floor(north / tileMetres);
-      const te = Math.floor(east / tileMetres);
-      const data = get(tn, te);
-      if (!data) continue;
-      const col = Math.min(size - 1, Math.floor((east - te * tileMetres) / cell));
-      const row = Math.min(size - 1, Math.floor((tileMetres - (north - tn * tileMetres)) / cell));
-      const v = data[row * size + col];
-      seen++;
-      // 255 is NOT zero. It is water, or ground the survey missed, and reading
-      // it as "nothing here" is how you fly into whatever the laser missed.
-      if (v === 255) { blank++; continue; }
-      if (best === null || v > best) best = v;
+  const ring = ringPuwg(rect);
+  const sweep = (step) => {
+    let best = null;
+    let blank = 0;
+    let seen = 0;
+    for (let north = Math.floor(sw.north); north <= Math.ceil(ne.north); north += step) {
+      for (let east = Math.floor(sw.east); east <= Math.ceil(ne.east); east += step) {
+        if (ring && !insideRing({ x: east, y: north }, ring)) continue;
+        const tn = Math.floor(north / tileMetres);
+        const te = Math.floor(east / tileMetres);
+        const data = get(tn, te);
+        if (!data) continue;
+        const col = Math.min(size - 1, Math.floor((east - te * tileMetres) / cell));
+        const row = Math.min(size - 1, Math.floor((tileMetres - (north - tn * tileMetres)) / cell));
+        const v = data[row * size + col];
+        seen++;
+        // 255 is NOT zero. It is water, or ground the survey missed, and reading
+        // it as "nothing here" is how you fly into whatever the laser missed.
+        if (v === 255) { blank++; continue; }
+        if (best === null || v > best) best = v;
+      }
     }
-  }
-  return { height: best, blank, seen };
+    return { height: best, blank, seen };
+  };
+  const got = sweep(cell);
+  // A footprint smaller than the grid, or unluckily placed on it, can fall
+  // between lattice points. Asking again at quarter steps is cheaper than
+  // reporting "no survey here" for a shed that is plainly on the map -- and far
+  // better than the old answer, which was whatever stood next to it.
+  if (ring && !got.seen) return sweep(cell / 4);
+  return got;
 }
 
 // Which tiles a set of rectangles touches, so they are fetched once each

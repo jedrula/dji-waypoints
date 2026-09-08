@@ -1914,6 +1914,46 @@ console.log('\ncontroller bridge');
   ok('leaves a tagged height alone', res.obstacles[1].height === 41 && res.obstacles[1].assumed === false);
   ok('counts what it measured', res.measured === 1, String(res.measured));
 
+  // The worst thing the bounding box ever did, and the reason the footprint
+  // had to reach this file. The rectangle round a real building is a median
+  // 1.9x too big, so it routinely covers the neighbour's roof -- and a measured
+  // height clears the `~` mark, which means the app states as fact a number
+  // belonging to a different building.
+  //
+  // An L wrapped along the south and west of the 30 m patch: its rectangle
+  // covers the patch, its outline is nowhere near it.
+  const mEast = (mm) => on + dLon(mm);
+  const mNorth = (mm) => at + mm / 111132;
+  const ell = [[-40, -40], [40, -40], [40, -25], [-25, -25], [-25, 40], [-40, 40]]
+    .map(([e, n]) => [mNorth(n), mEast(e)]);
+  const ellRecord = {
+    north: mNorth(40), south: mNorth(-40), east: mEast(40), west: mEast(-40),
+    height: 24, label: 'L block', assumed: true, poly: ell,
+  };
+  _internals.reset();
+  const asBoxHeight = await measure([{ ...ellRecord, poly: undefined }], { fetchImpl, waitMs: 0 });
+  ok('the rectangle round the L measures the neighbour, 30 m away',
+     asBoxHeight.obstacles[0].height === 30 && asBoxHeight.obstacles[0].assumed === false,
+     String(asBoxHeight.obstacles[0].height));
+  _internals.reset();
+  const asShapeHeight = await measure([ellRecord], { fetchImpl, waitMs: 0 });
+  ok('the outline measures the L itself, which is flat ground',
+     asShapeHeight.obstacles[0].height === 0, String(asShapeHeight.obstacles[0].height));
+  ok('and a measured flat roof is still a measurement, not a guess',
+     asShapeHeight.obstacles[0].assumed === false && asShapeHeight.measured === 1);
+
+  // A footprint smaller than the survey grid must not read as "no survey here".
+  _internals.reset();
+  const tiny = await measure([{
+    north: mNorth(0.25), south: mNorth(-0.25), east: mEast(0.25), west: mEast(-0.25),
+    height: 24, label: 'shed', assumed: true,
+    poly: [[mNorth(-0.25), mEast(-0.25)], [mNorth(-0.25), mEast(0.25)],
+           [mNorth(0.25), mEast(0.25)], [mNorth(0.25), mEast(-0.25)]],
+  }], { fetchImpl, waitMs: 0 });
+  ok('a footprint smaller than one grid cell is still measured',
+     tiny.obstacles[0].height === 30 && tiny.measured === 1,
+     `${tiny.obstacles[0].height} / ${tiny.measured}`);
+
   // The safety property: 255 is unknown, and unknown must not become zero.
   _internals.reset();
   const water = await measure([box(at, on + dLon(100), 10)], { fetchImpl, waitMs: 0 });

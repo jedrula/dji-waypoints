@@ -1,8 +1,8 @@
 import { frame, distM, bearing } from './geo.js';
 import { footprint, gsdCm, fov } from './camera.js';
 import { footprintOf, bounds, centroid, circumradius, polygonArea, clipSegment, DEFAULT_SHAPE } from './shape.js';
-import { checkObstacles } from './collide.js';
-import { localPrisms, ringDist } from './prism.js';
+import { checkObstacles, aabbGap, pathBounds } from './collide.js';
+import { localPrisms, localOutline, ringWithin } from './prism.js';
 
 // A 3DGS-oriented capture over the points you tapped. Three passes, in this order:
 //   1. nadir grid         - metric backbone, gimbal -90
@@ -271,27 +271,17 @@ export function subjectsOf(local, hull, avoid = [], f, { all = false } = {}) {
       span,
       spanX: o.spanX ?? span,
       spanY: o.spanY ?? span,
-      // The convex pieces of its outline, when it has one. `span` still says
-      // how far out a ring must stand; this says where the ring has to climb.
-      // Null rather than an empty list when the outline was refused: an empty
-      // one would read as "no piece is anywhere near" and quietly stop the
-      // thing raising the ring at all.
-      ring: ringsOf(o, f),
+      // Its whole outline and the box round it, when it has one. `span` still
+      // says how far out an orbit must stand; this says where that orbit has to
+      // climb. Not cut into convex pieces: nothing here runs a search that
+      // needs convexity, and cutting an outline up per candidate plan was
+      // seconds of the auto-fit search's time.
+      outline: localOutline(o, f),
       height: o.height,
       kind: 'obstacle',
     });
   }
   return out;
-}
-
-// The convex pieces of an obstacle's outline, or null if it has none the maths
-// can use. js/prism.js falls back to the bounding box in that case, which comes
-// back here without a `poly`, and a list of nothing is not the same answer as
-// no list at all.
-function ringsOf(o, f) {
-  if (!o.poly) return null;
-  const rings = localPrisms(o, f).map((q) => q.poly).filter(Boolean);
-  return rings.length ? rings : null;
 }
 
 // One dome around ONE thing.
@@ -349,15 +339,46 @@ function objectPass(g) {
   // something five metres tall. The tree is only near one arc of that ring.
   // So the ring stays a closed loop and rises over the obstacle where it has
   // to, like flying over a hedge, and keeps its low viewpoints everywhere else.
+  // Every station of every ring of this dome lies within r of the subject --
+  // rings PULL IN as they rise, they never bulge out -- so a neighbour whose own
+  // box is further than that from the centre cannot be near any of them, and
+  // can be dropped once instead of dismissed at every station. With a city
+  // block imported this is a handful of neighbours per orbit instead of ninety.
+  //
+  // Only the outer bound. Dropping what sits well INSIDE the ring looks just as
+  // safe and is not: the highest ring can pull in to little more than the
+  // subject's own span, so it passes much closer to the middle than r does.
+  const reach = r + clearance;
+  const inReach = others.filter((o) => {
+    const bx = o.outline ? o.outline.min.x : o.x - (o.spanX ?? o.span) / 2;
+    const bX = o.outline ? o.outline.max.x : o.x + (o.spanX ?? o.span) / 2;
+    const by = o.outline ? o.outline.min.y : o.y - (o.spanY ?? o.span) / 2;
+    const bY = o.outline ? o.outline.max.y : o.y + (o.spanY ?? o.span) / 2;
+    // How near the box gets to the centre of the rings.
+    const nx = Math.max(bx - cx, 0, cx - bX);
+    const ny = Math.max(by - cy, 0, cy - bY);
+    return Math.hypot(nx, ny) <= reach;
+  });
+
+  // Called for every point of every orbit, so the cheap question comes first:
+  // almost nothing is ever within the clearance of anything. An outline is
+  // asked about at all only once its own box says the point is close enough to
+  // be worth asking -- without that, one city block of import turned the
+  // altitude search into 37 seconds of edge distances.
   const floorAt = (x, y) => {
     let z = 0;
-    for (const o of others) {
-      // A ring, when the neighbour has one: a ring that raises the arc it
-      // actually stands under, rather than the arc its bounding box covers.
-      const gap = o.ring
-        ? Math.min(...o.ring.map((r) => ringDist({ x, y }, r)))
-        : Math.hypot(Math.max(Math.abs(x - o.x) - (o.spanX ?? o.span) / 2, 0),
-                     Math.max(Math.abs(y - o.y) - (o.spanY ?? o.span) / 2, 0));
+    for (const o of inReach) {
+      if (o.outline) {
+        const { min, max, ring } = o.outline;
+        if (x < min.x - clearance || x > max.x + clearance
+            || y < min.y - clearance || y > max.y + clearance) continue;
+        // The outline, so an orbit climbs over the arc the thing actually
+        // stands under rather than the arc its bounding box covers.
+        if (ringWithin({ x, y }, ring, clearance)) z = Math.max(z, o.height + clearance);
+        continue;
+      }
+      const gap = Math.hypot(Math.max(Math.abs(x - o.x) - (o.spanX ?? o.span) / 2, 0),
+                             Math.max(Math.abs(y - o.y) - (o.spanY ?? o.span) / 2, 0));
       if (gap < clearance) z = Math.max(z, o.height + clearance);
     }
     return z;
@@ -999,20 +1020,26 @@ export function proposePlan(site, base, cam, budget = {}) {
   // collision warning appears, the app has already recommended the flight.
   const clearance = base.subjectClearance ?? DEFAULTS.subjectClearance ?? 2;
   const boxes = (site.obstacles ?? []).filter((o) => (o.height ?? 0) > 0);
-  const hits = (m) => {
-    if (!boxes.length) return false;
-    // The SAME footprint the app's own collision check uses. Squaring a box
-    // off here made auto-fit measure a 40 x 12 m building as a 12 m square,
-    // bless an altitude, and hand back a plan the check then reported ten
-    // strikes against.
-    const local = boxes.flatMap((o, i) => {
-      // The outline when the obstacle has one, for the same reason the check
-      // uses it: the box round a real building is a median 1.9x too big, and
-      // blessing an altitude against the box means refusing altitudes that are
-      // clear -- or worse, measuring a diagonal building as the square it sits
-      // in and getting the whole answer somewhere else.
-      if (o.poly) return localPrisms({ ...o, id: `a${i}` }, m.frame);
-      const c = m.frame.toLocal(o.lat, o.lon);
+
+  // The SAME geometry the app's own collision check uses. Squaring a box off
+  // here made auto-fit measure a 40 x 12 m building as a 12 m square, bless an
+  // altitude, and hand back a plan the check then reported ten strikes
+  // against -- so an obstacle with an outline is cut into the same convex
+  // pieces here as there.
+  //
+  // Cut ONCE, though. This runs for every altitude the search tries, and every
+  // candidate shares a frame: the frame comes from the taps, and the search is
+  // only ever varying altitude, rings and shutter mode. Rebuilding the pieces
+  // per candidate was seconds of the search's time for the same answer, and the
+  // frame is checked rather than assumed.
+  let cut = null;
+  let cutFrame = null;
+  const piecesIn = (f) => {
+    if (cut && cutFrame.lat0 === f.lat0 && cutFrame.lon0 === f.lon0) return cut;
+    cutFrame = f;
+    cut = boxes.flatMap((o, i) => {
+      if (o.poly) return localPrisms({ ...o, id: `a${i}` }, f);
+      const c = f.toLocal(o.lat, o.lon);
       const hx = (o.spanX ?? o.span ?? SUBJECT_SPAN) / 2;
       const hy = (o.spanY ?? o.span ?? SUBJECT_SPAN) / 2;
       return [{
@@ -1021,7 +1048,23 @@ export function proposePlan(site, base, cam, budget = {}) {
         max: { x: c.x + hx, y: c.y + hy, z: Math.max(0.1, o.height) },
       }];
     });
-    return checkObstacles(m, local, { clearance }).strikes > 0;
+    return cut;
+  };
+
+  const hits = (m) => {
+    if (!boxes.length) return false;
+    // Only what this flight could possibly reach. One box round the whole
+    // flight rejects the rest of the import in six subtractions each, and it
+    // cannot reject anything real: the box contains every leg, so a piece
+    // further from it than the clearance is further than the clearance from
+    // every leg. An import can be a thousand obstacles over half a kilometre
+    // and a site is seventy metres across.
+    const reach = pathBounds(m);
+    if (!reach) return false;
+    const near = piecesIn(m.frame).filter((b) => aabbGap(reach, b) < clearance);
+    return near.length
+      ? checkObstacles(m, near, { clearance, verdictOnly: true }).strikes > 0
+      : false;
   };
   const fits = (m) => m.stats.waypoints <= maxWp && m.stats.minutes <= maxMin && !hits(m);
 

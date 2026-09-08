@@ -186,25 +186,66 @@ function pointSegDist(p, a, b) {
   return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
 }
 
-// Horizontal distance from a point to a CONVEX ring; zero inside it. This is
-// the whole of the new geometry: a convex prism is a convex polygon crossed
-// with a height range, so its distance to a point separates into the flat part
-// and the vertical part, and the two go together with a hypot exactly as the
-// three sides of a box always did.
+// Horizontal distance from a point to a ring; zero inside it. This is the
+// whole of the new geometry: a convex prism is a convex polygon crossed with a
+// height range, so its distance to a point separates into the flat part and the
+// vertical part, and the two go together with a hypot exactly as the three
+// sides of a box always did.
+//
+// The inside test is the crossing-number one, so this is right for any simple
+// ring and not only a convex one. That does not make it safe to hand a
+// non-convex solid to js/collide.js -- what needs convexity there is the
+// DISTANCE FUNCTION being convex, not this -- but it means the planner can ask
+// the same question of a whole outline without cutting it up first.
 export function ringDist(p, ring) {
-  let inside = true;
-  for (let i = 0; i < ring.length && inside; i++) {
-    const a = ring[i];
-    const b = ring[(i + 1) % ring.length];
-    if (cross(a, b, p) < -EPS) inside = false;
-  }
-  if (inside) return 0;
   let best = Infinity;
-  for (let i = 0; i < ring.length; i++) {
-    const d = pointSegDist(p, ring[i], ring[(i + 1) % ring.length]);
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i];
+    const b = ring[j];
+    const d = pointSegDist(p, a, b);
     if (d < best) best = d;
+    if ((a.y > p.y) !== (b.y > p.y)
+        && p.x < a.x + ((p.y - a.y) / (b.y - a.y)) * (b.x - a.x)) inside = !inside;
   }
-  return best;
+  return inside ? 0 : best;
+}
+
+// Is the point within `limit` of the ring or inside it? The same walk, but it
+// stops the moment the answer is yes -- which is what the planner wants of it,
+// and what makes asking a hundred-edge outline about every point of every orbit
+// affordable. `ringDist` would have to finish the loop to say how far.
+export function ringWithin(p, ring, limit) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i];
+    const b = ring[j];
+    if (pointSegDist(p, a, b) < limit) return true;
+    if ((a.y > p.y) !== (b.y > p.y)
+        && p.x < a.x + ((p.y - a.y) / (b.y - a.y)) * (b.x - a.x)) inside = !inside;
+  }
+  return inside;
+}
+
+// The obstacle's whole outline in local metres, with the box round it. The box
+// is what makes asking about the outline affordable in a loop: a point that is
+// not even near the box cannot be near the outline inside it, and that is four
+// comparisons against a hundred edge distances.
+// Remembered per obstacle, because the planner asks for the same outline in the
+// same frame a few hundred times over: the altitude search re-plans for every
+// candidate, and the frame comes from the taps rather than from the candidate.
+// A record is replaced wholesale whenever anything about it changes, so the key
+// being the object itself is also the answer to staleness.
+const outlines = new WeakMap();
+
+export function localOutline(o, frame) {
+  if (!Array.isArray(o.poly) || o.poly.length < 3) return null;
+  const had = outlines.get(o);
+  if (had && had.lat0 === frame.lat0 && had.lon0 === frame.lon0) return had.outline;
+  const ring = localRing(o, frame);
+  const outline = { ring, ...boundsOf(ring, o.height ?? 0) };
+  outlines.set(o, { lat0: frame.lat0, lon0: frame.lon0, outline });
+  return outline;
 }
 
 // Inside a ring that may have reflex corners, by crossing number. The convex
@@ -221,4 +262,62 @@ export function insideRing(p, ring) {
     }
   }
   return inside;
+}
+
+// Does the ray from (px,py,pz) along (dx,dy,dz), for tMax of it, enter the
+// solid? A boolean, not a distance, and far cheaper than one: clip the ray
+// against the solid's own planes -- the six of a box, or the ground, the roof
+// and one per edge of a convex outline -- and see whether any of it is left.
+//
+// Exact, and it is the only question two callers ever ask. js/collide.js asks
+// it of a leg when the altitude search wants a verdict rather than a
+// clearance; js/coverage.js asks it of a line of sight. Scalars rather than
+// points because both ask it millions of times and an allocation per call is
+// the whole budget.
+//
+// Convex only. For a box that is free; for an outline it is what js/prism.js
+// hands out anyway.
+export function rayClipsSolid(b, px, py, pz, dx, dy, dz, tMax) {
+  let t0 = 0;
+  let t1 = tMax;
+  // The bounding box first, always. It contains the solid, so a ray that
+  // misses it misses the solid -- six subtractions that reject nearly
+  // everything before an edge is looked at.
+  const lo = [b.min.x, b.min.y, b.min.z];
+  const hi = [b.max.x, b.max.y, b.max.z];
+  const p = [px, py, pz];
+  const d = [dx, dy, dz];
+  for (let k = 0; k < 3; k++) {
+    if (Math.abs(d[k]) < 1e-12) {
+      if (p[k] < lo[k] || p[k] > hi[k]) return false;
+      continue;
+    }
+    let ta = (lo[k] - p[k]) / d[k];
+    let tb = (hi[k] - p[k]) / d[k];
+    if (ta > tb) { const sw = ta; ta = tb; tb = sw; }
+    if (ta > t0) t0 = ta;
+    if (tb < t1) t1 = tb;
+    if (t0 > t1) return false;
+  }
+  if (b.poly) {
+    for (let i = 0; i < b.poly.length; i++) {
+      const a = b.poly[i];
+      const c = b.poly[(i + 1) % b.poly.length];
+      // Anticlockwise, so inside is left of every edge and (dy, -dx) points out.
+      const nx = c.y - a.y;
+      const ny = a.x - c.x;
+      const den = nx * dx + ny * dy;
+      const num = nx * (px - a.x) + ny * (py - a.y);
+      if (Math.abs(den) < 1e-12) {
+        if (num > 0) return false;        // parallel to this wall and outside
+        continue;
+      }
+      const t = -num / den;
+      if (den > 0) { if (t < t1) t1 = t; } else if (t > t0) t0 = t;
+      if (t0 > t1) return false;
+    }
+  }
+  // Something of it is inside, rather than the ray merely grazing the surface
+  // where it starts. A leg is tens of metres, so this is under a millimetre.
+  return t1 > 1e-4;
 }

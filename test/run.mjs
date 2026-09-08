@@ -254,6 +254,50 @@ ok('two taps outline nothing, so they are two things',
      `${alts.filter((z) => z < 8).length} of ${alts.length}`);
 }
 
+// The same rule against a block with a notch in it. The old answer put a box
+// round the whole thing, so the orbit climbed over the notch as well -- which is
+// a courtyard, and air. It has to climb over the limbs and stay low over the
+// gap, and the two are ten metres apart.
+{
+  const { ringDist, localRing } = await import('../js/prism.js');
+  const CLEAR = 5;
+  const M = 111132;
+  const MLON = 111320 * Math.cos((50.06 * Math.PI) / 180);
+  const at = (x, y) => [50.06 + y / M, 19.93 + x / MLON];
+  // 24 x 24 m with the north-east 12 x 12 m quadrant bitten out, and a bush
+  // standing in the bite.
+  const ell = [at(-12, -12), at(12, -12), at(12, 0), at(0, 0), at(0, 12), at(-12, 12)];
+  const bushInNotch = planMission(
+    { points: [{ lat: at(6, 6)[0], lon: at(6, 6)[1], height: 3 }],
+      obstacles: [{ lat: 50.06, lon: 19.93, height: 20, span: 24, spanX: 24, spanY: 24,
+                    poly: ell }] },
+    { altitude: 30, subjectClearance: CLEAR, nadir: false, oblique: false, surround: false }, cam);
+  const f2 = bushInNotch.frame;
+  const ring = localRing({ poly: ell }, f2);
+  const block = bushInNotch.subjects.find((q) => q.height === 20);
+  const stations = bushInNotch.waypoints.filter((w) => w.pass !== 'grid');
+
+  const overBlock = stations.filter((w) => {
+    const l = f2.toLocal(w.lat, w.lon);
+    return ringDist(l, ring) < CLEAR;
+  });
+  ok('a station beside the block is still lifted over it',
+     overBlock.length > 0 && overBlock.every((w) => w.alt >= block.height + CLEAR - 1e-6),
+     `${overBlock.length} beside it`);
+
+  // And the point of the outline: stations the BOX would have lifted, over a
+  // notch that has nothing in it.
+  const inBoxOnly = stations.filter((w) => {
+    const l = f2.toLocal(w.lat, w.lon);
+    const gapX = Math.max(Math.abs(l.x - block.x) - block.spanX / 2, 0);
+    const gapY = Math.max(Math.abs(l.y - block.y) - block.spanY / 2, 0);
+    return Math.hypot(gapX, gapY) < CLEAR && ringDist(l, ring) >= CLEAR;
+  });
+  ok('a station over the notch is not lifted, because the notch is air',
+     inBoxOnly.length > 0 && inBoxOnly.some((w) => w.alt < block.height),
+     `${inBoxOnly.length} over the notch`);
+}
+
 // Nothing tall means nothing to orbit. A flat field is a grid job, and a ring
 // round it would photograph the horizon at a cost of a quarter of the battery.
 ok('a flat site gets no orbit at all',

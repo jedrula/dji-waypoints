@@ -200,12 +200,33 @@ export function createView3D(canvas) {
     }
   }
 
-  // The five faces of a box that can ever be seen from above the ground: four
-  // walls and a roof. Each carries its outward normal, which is what decides
+  // The faces of a solid that can ever be seen from above the ground: one wall
+  // per side and a roof. Each carries its outward normal, which is what decides
   // whether it is facing the camera at all.
+  //
+  // A solid with an outline gets that outline: a wall per edge and a roof the
+  // shape of the building. This is where an imported block stops looking like
+  // the square it sits in. The view is handed whole solids rather than the
+  // convex pieces the maths uses -- drawing the pieces would put a seam down
+  // the middle of every L -- and a roof with a reflex corner fills correctly
+  // because it is still a simple polygon.
   function boxFaces(bx) {
     const { min, max } = bx;
     const q = (pts, n) => ({ pts, n });
+    if (bx.poly) {
+      const out = [q(bx.poly.map((v) => ({ x: v.x, y: v.y, z: max.z })), { x: 0, y: 0, z: 1 })];
+      for (let i = 0; i < bx.poly.length; i++) {
+        const a = bx.poly[i];
+        const c = bx.poly[(i + 1) % bx.poly.length];
+        const len = Math.hypot(c.x - a.x, c.y - a.y) || 1;
+        // Anticlockwise, so (dy, -dx) points away from the building.
+        out.push(q([
+          { x: a.x, y: a.y, z: 0 }, { x: c.x, y: c.y, z: 0 },
+          { x: c.x, y: c.y, z: max.z }, { x: a.x, y: a.y, z: max.z },
+        ], { x: (c.y - a.y) / len, y: (a.x - c.x) / len, z: 0 }));
+      }
+      return out;
+    }
     return [
       q([{ x: min.x, y: min.y, z: max.z }, { x: max.x, y: min.y, z: max.z },
          { x: max.x, y: max.y, z: max.z }, { x: min.x, y: max.y, z: max.z }], { x: 0, y: 0, z: 1 }),
@@ -232,7 +253,10 @@ export function createView3D(canvas) {
         // Back-face cull against the eye, not against a fixed direction: this
         // is a perspective view, and a wall can face away at one end of a big
         // box and towards you at the other.
-        const mid = face.pts.reduce((a, p) => add(a, p, 0.25), { x: 0, y: 0, z: 0 });
+        // The middle of the face, whatever many corners it has: a roof is four
+        // of them on a box and as many as the building has on an outline.
+        const mid = face.pts.reduce((a, p) => add(a, p, 1 / face.pts.length),
+          { x: 0, y: 0, z: 0 });
         if (dot(face.n, sub(mid, b.eye)) >= 0) continue;
         const vs = face.pts.map((p) => toView(p, b));
         if (vs.some((v) => v.z <= NEAR)) continue;   // straddling the eye plane

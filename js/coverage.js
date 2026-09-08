@@ -1,4 +1,5 @@
 import { fov, orientation } from './camera.js';
+import { insideRing, rayClipsSolid } from './prism.js';
 
 // Geometric coverage scoring. Published capture guidance is written in terms of
 // geometry -- every surface in at least three frames, from a spread of
@@ -52,12 +53,48 @@ export function buildProxy(subjects = []) {
     });
 }
 
+// One bounding box standing in front of however many convex pieces an obstacle
+// was cut into. The pieces share the obstacle's id (see js/prism.js), so this
+// puts the building's own box between a ray and the building's triangles: a ray
+// that misses the block never touches any of them.
+//
+// This is not a nicety. A city block's worth of import is 7841 pieces, and
+// scoring one plan against them one at a time took 12.5 seconds of blocked main
+// thread. It is also a straight win for the boxes that were here before, which
+// were being tested one at a time for the same reason.
+function shieldOccluders(list) {
+  const groups = [];
+  const byId = new Map();
+  for (const b of list) {
+    if (!b.poly || b.id === undefined) { groups.push({ min: b.min, max: b.max, parts: [b] }); continue; }
+    let g = byId.get(b.id);
+    if (!g) {
+      g = { min: { ...b.min }, max: { ...b.max }, parts: [] };
+      byId.set(b.id, g);
+      groups.push(g);
+    }
+    g.parts.push(b);
+    for (const ax of ['x', 'y', 'z']) {
+      if (b.min[ax] < g.min[ax]) g.min[ax] = b.min[ax];
+      if (b.max[ax] > g.max[ax]) g.max[ax] = b.max[ax];
+    }
+  }
+  return groups;
+}
+
+const inGroupBox = (x, y, g) => x > g.min.x && x < g.max.x && y > g.min.y && y < g.max.y;
+
 // `boxes` are the surfaces being scored; `occluders` is everything solid,
 // which is those plus whatever you drew. There is no ground under either.
-function sampleSurfaces(halfX, halfY, boxes, occluders, cfg) {
+function sampleSurfaces(halfX, halfY, boxes, shields, cfg) {
   const out = [];
-  const inABox = (x, y) => occluders.some((b) =>
-    x > b.min.x && x < b.max.x && y > b.min.y && y < b.max.y);
+  // Ground that is not ground, because something is standing on it. An
+  // occluder with an outline is asked about its outline: the yard inside an
+  // L-shaped block is ground, and scoring it as roof made a good plan look bad.
+  const inABox = (x, y) => shields.some((g) => inGroupBox(x, y, g)
+    && g.parts.some((b) => (b.poly
+      ? insideRing({ x, y }, b.poly)
+      : inGroupBox(x, y, b))));
 
   // ground
   for (let x = -halfX; x <= halfX; x += cfg.groundStep) {
@@ -93,26 +130,16 @@ function sampleSurfaces(halfX, halfY, boxes, occluders, cfg) {
   return out;
 }
 
-// Slab test. Returns true if the segment from `p` towards `dir` for `maxT`
-// metres enters the box.
-function raySegmentHitsBox(p, dir, maxT, b) {
-  let t0 = 0;
-  let t1 = maxT;
-  for (const ax of ['x', 'y', 'z']) {
-    const d = dir[ax];
-    if (Math.abs(d) < 1e-9) {
-      if (p[ax] < b.min[ax] || p[ax] > b.max[ax]) return false;
-      continue;
-    }
-    let ta = (b.min[ax] - p[ax]) / d;
-    let tb = (b.max[ax] - p[ax]) / d;
-    if (ta > tb) { const s = ta; ta = tb; tb = s; }
-    if (ta > t0) t0 = ta;
-    if (tb < t1) t1 = tb;
-    if (t0 > t1) return false;
-  }
-  return t1 > 1e-4;
-}
+// Is anything of this solid in the way? The clipping lives in js/prism.js,
+// because js/collide.js asks the same question of a flight leg and the rule
+// should exist once.
+const raySegmentHitsBox = (p, dir, maxT, b) =>
+  rayClipsSolid(b, p.x, p.y, p.z, dir.x, dir.y, dir.z, maxT);
+
+// Anything in this group in the way? The group's own box is the first question,
+// and for most rays it is the only one.
+const rayHitsGroup = (p, dir, maxT, g) => raySegmentHitsBox(p, dir, maxT, g)
+  && g.parts.some((b) => (b.poly ? raySegmentHitsBox(p, dir, maxT, b) : true));
 
 // `opts.boxes` are the obstacles you drew, in the mission's local frame. They
 // block the view of everything behind them, and they are never sampled: a tree
@@ -124,6 +151,7 @@ export function scoreCoverage(mission, opts = {}) {
   const halfY = mission.sizeY / 2;
   const boxes = buildProxy(mission.subjects ?? []);
   const occluders = [...boxes, ...(opts.boxes ?? [])];
+  const shields = shieldOccluders(occluders);
   // Sample density follows site size: a 20 m playground needs finer steps than
   // a 400 m block, and a fixed step would either under-sample one or bury the
   // other in millions of rays.
@@ -132,7 +160,7 @@ export function scoreCoverage(mission, opts = {}) {
     groundStep: opts.groundStep ?? Math.max(1, Math.min(6, Math.min(halfX, halfY) / 6)),
     faceStep: opts.faceStep ?? Math.max(0.4, Math.min(2.5, Math.min(halfX, halfY) / 12)),
   };
-  const samples = sampleSurfaces(halfX, halfY, boxes, occluders, scaleCfg);
+  const samples = sampleSurfaces(halfX, halfY, boxes, shields, scaleCfg);
 
   // One camera per frame: a stop with a 3-pitch fan is three cameras.
   const f = fov(mission.cam);
@@ -176,7 +204,7 @@ export function scoreCoverage(mission, opts = {}) {
       if (Math.abs(dot(v, c.up) / z) > tanV) continue;
 
       const start = { x: s.p.x + s.n.x * 0.02, y: s.p.y + s.n.y * 0.02, z: s.p.z + s.n.z * 0.02 };
-      if (occluders.some((b) => raySegmentHitsBox(start, dir, dist - 0.05, b))) continue;
+      if (shields.some((g) => rayHitsGroup(start, dir, dist - 0.05, g))) continue;
 
       dirs.push(dir);
       passes.add(c.pass);

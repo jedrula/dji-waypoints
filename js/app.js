@@ -34,7 +34,7 @@ import { createBasemaps } from './basemap.js';
 import { createSite, pointOf, spanMOf, spansOf, isEstimated, isImported, labelOf,
   DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS } from './site.js';
 import { overlaps } from './obstacles.js';
-import { localPrisms, localSolid } from './prism.js';
+import { localPrisms, localSolid, ringLatLon } from './prism.js';
 import { checkObstacles, clearingAltitude } from './collide.js';
 import { createHistory } from './history.js';
 import { judgeFix, parseHeight, MAX_ACCURACY } from './walk.js';
@@ -608,7 +608,9 @@ function renderPoints() {
     // the line under its own footprint and invites you to nudge a piece of a
     // power cable, which is not a thing you can do.
     const isWire = labelOf(o).endsWith(' (bdot)');
-    L.rectangle([[o.south, o.west], [o.north, o.east]], {
+    // The outline the thing actually has, when the source knew it. A tapped
+    // obstacle's outline IS its rectangle, so this is one call for both.
+    L.polygon(ringLatLon(o).map((v) => [v.lat, v.lon]), {
       color: OBSTACLE_COLOR[grade], weight: 1,
       fillOpacity: isWire && grade === 'clear' ? 0 : 0.12,
       opacity: isWire && grade === 'clear' ? 0 : 1,
@@ -963,7 +965,13 @@ function computePlan() {
   // Last score stays on screen only if it belongs to this many waypoints;
   // otherwise the tile says so until the new one lands.
   if (state.coverage?.forWaypoints !== state.mission.stats.waypoints) state.coverage = null;
-  state.hazard = checkObstacles(state.mission, prisms, { clearance: clearance() });
+  // No distances: nothing on screen says "clear by 18 m", and finding that out
+  // for every obstacle that came nowhere near costs an exact measurement each
+  // -- 600 ms of a replan with a city block imported. Grades, counts and
+  // flagged legs all come from obstacles the flight did come near, which are
+  // measured regardless. Turn it back on the day the readout wants the number.
+  state.hazard = checkObstacles(state.mission, prisms,
+    { clearance: clearance(), distances: false });
   state.clearAlt = (state.hazard.strikes || state.hazard.near)
     ? clearingAltitude(state.mission, prisms, { clearance: clearance() })
     : null;

@@ -1780,16 +1780,18 @@ console.log('\ncontroller bridge');
   const line = { kind: 'SN', label: 'medium voltage line', height: 16,
                  points: [[100, 250], [400, 250]] };
   const boxes = lineToObstacles(line, { tn, te, tileMetres: TILE });
-  ok('a span becomes many boxes, not one', boxes.length > 8, String(boxes.length));
+  // One strip per straight run, whichever importer found the wire: the rule
+  // lives in osm.js and this is the other caller of it.
+  ok('a span is one strip, not a row of boxes', boxes.length === 1, String(boxes.length));
   ok('every box stands at the height the voltage implies', boxes.every((b) => b.height === 16));
   ok('and every one is marked an estimate', boxes.every((b) => b.assumed === true));
   ok('and marked as coming from BDOT10k', boxes.every((b) => b.source === 'bdot'));
-  const widest = Math.max(...boxes.map((b) => (b.north - b.south) * 111132));
-  ok(`no box is wider than a span is (${widest.toFixed(0)} m)`, widest < 30);
-  // The reason for chopping at all: one box round a 300 m line walls off a
-  // 300 m square of sky.
-  const spanEW = Math.max(...boxes.map((b) => b.east)) - Math.min(...boxes.map((b) => b.west));
-  ok('the boxes together cover the whole span', spanEW * 111320 * Math.cos(53.2 * Math.PI / 180) > 280);
+  const wireAcross = Math.hypot(
+    (boxes[0].poly[3][1] - boxes[0].poly[0][1]) * 111320 * Math.cos(53.2 * Math.PI / 180),
+    (boxes[0].poly[3][0] - boxes[0].poly[0][0]) * 111132);
+  ok(`the strip is as wide as the wire (${wireAcross.toFixed(1)} m)`, near(wireAcross, 8, 0.2));
+  const spanEW = boxes[0].east - boxes[0].west;
+  ok('and covers the whole span', spanEW * 111320 * Math.cos(53.2 * Math.PI / 180) > 280);
 
   // What the site model makes of one.
   const named = `${isEstimated({ name: '~x' }) ? '' : ''}~${boxes[0].label} (${boxes[0].source})`;
@@ -1821,7 +1823,8 @@ console.log('\ncontroller bridge');
   };
   const got = await fetchLines({ south: 53.2050, north: 53.2098, west: 15.8320, east: 15.8392 }, { fetchImpl });
   ok('every covering tile is asked once', calls === got.tiles && calls >= 2, `${calls} calls`);
-  ok('and the lines come back as obstacles', got.obstacles.length > got.lines);
+  ok('and each line comes back as one strip', got.obstacles.length === got.lines,
+     `${got.obstacles.length} for ${got.lines}`);
 
   globalThis.localStorage = { getItem: () => '', setItem() {} };
   _internals.reset();

@@ -1170,6 +1170,60 @@ console.log('\nobstacles');
                      height: 'tall' }) === null);
   ok('a tombstone needs nothing but an id and a time',
      cleanObstacle({ id: 'abcdef', updatedAt: 1, deleted: true }).deleted === true);
+
+  // A footprint is the shape the thing actually is. It rides along on the
+  // record, it is optional, and every way of getting it wrong has to land back
+  // on the box -- yesterday's behaviour -- rather than on a wrong answer.
+  const ring = [[50.0600, 19.9300], [50.0610, 19.9300], [50.0610, 19.9320], [50.0600, 19.9320]];
+  const bbox = { north: 50.0610, south: 50.0600, east: 19.9320, west: 19.9300, height: 12 };
+  const withPoly = store.put({ ...bbox, name: 'Block (osm)', poly: ring });
+  ok('a footprint survives being stored', withPoly.poly?.length === 4);
+  ok('and comes back off the disk with the record',
+     store.list().find((o) => o.id === withPoly.id).poly.length === 4);
+  // The rectangle is the broad phase for the footprint inside it, so a point
+  // outside it could hide from every check that starts with the rectangle.
+  ok('a ring reaching outside its own rectangle is refused',
+     store.put({ ...bbox, name: 'Liar (osm)', poly: [...ring.slice(1), [50.2, 19.9310]] }).poly
+     === undefined);
+  ok('a ring of two points is not a ring',
+     store.put({ ...bbox, name: 'Line (osm)', poly: ring.slice(0, 2) }).poly === undefined);
+  ok('a ring with a point that is not a number is refused',
+     store.put({ ...bbox, name: 'Junk (osm)', poly: [...ring.slice(1), ['x', 19.931]] }).poly
+     === undefined);
+  ok('an absurd number of points falls back to the box',
+     store.put({ ...bbox, name: 'Curve (osm)',
+       poly: Array.from({ length: 201 }, (_, i) => [50.0605 + i * 1e-7, 19.9310]) }).poly
+     === undefined);
+  ok('a ring closed by repeating its first point is not stored twice',
+     store.put({ ...bbox, name: 'Closed (osm)', poly: [...ring, ring[0]] }).poly.length === 4);
+
+  // The whole reason this is safe: a ring is never on the wire, so the record
+  // the Worker validates has not changed and an old build cannot round-trip a
+  // footprint away. See `local: isImported` in js/site.js.
+  let sentLocal = null;
+  const mem2 = new Map();
+  const localStore = createObstacleStore({
+    storage: {
+      getItem: (k) => (mem2.has(k) ? mem2.get(k) : null),
+      setItem: (k, v) => mem2.set(k, v),
+      removeItem: (k) => mem2.delete(k),
+    },
+    endpoint: 'https://sync.example',
+    local: (o) => /\((osm|bdot)\)$/.test(o.name ?? ''),
+    fetchImpl: async (url, opt) => {
+      sentLocal = JSON.parse(opt.body);
+      return { ok: true, json: async () => ({ obstacles: [] }) };
+    },
+  });
+  localStore.put({ ...bbox, name: 'Block (osm)', poly: ring });
+  localStore.put({ ...bbox, name: 'Oak', height: 8 });
+  await localStore.sync();
+  ok('an imported footprint is not sent anywhere',
+     sentLocal.obstacles.length === 1 && sentLocal.obstacles[0].name === 'Oak');
+  ok('and the hand-placed one that is sent carries no ring',
+     sentLocal.obstacles.every((o) => o.poly === undefined));
+  ok('the Worker strips a footprint that somehow reached it',
+     cleanObstacle({ id: 'abcdef', updatedAt: 1, ...bbox, poly: ring }).poly === undefined);
 }
 
 console.log('\nwalking the site');

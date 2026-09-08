@@ -1,7 +1,8 @@
 // Saved plans, local first. Every plan is a name plus the ~200 character code
 // from share.js, so the whole library fits in localStorage and works with no
-// server at all. Sync sits on top and needs no setting up: every device runs
-// under one hardcoded key, so a plan saved on the phone is on the Mac already.
+// server at all. Sync sits on top: the key this device made up (js/service.js)
+// names the library, and copying it into a second device is what puts a plan
+// saved on the phone onto the Mac.
 //
 // The local-first list, the merge and the round trip are the same ones the
 // obstacle list uses and live in synced.js; what is left here is what a plan

@@ -6,13 +6,18 @@
 // server validates what arrives. A client that merges differently from a server
 // is how a record comes back from the dead, or fails to.
 //
-// There are no accounts. The client sends one key, hardcoded in js/synced.js so
-// that two devices share a list with nothing to set up, and the store
-// namespaces by its SHA-256 -- so a dump of the storage does not hand anyone
-// the keys. The key itself is public, since it ships in a public app; it is a
-// name, not a secret. When there is more than one person the key becomes the
-// user id and a real login sits in front of it, and nothing about the storage
-// shape has to change.
+// There are no accounts. The client sends one key and the store namespaces by
+// its SHA-256 -- so a dump of the storage does not hand anyone the keys -- and
+// the key is the user id in all but name. It is still not a secret: anyone who
+// has yours can read and write your library, so a real login will one day sit
+// in front of it. Nothing about the storage shape has to change when it does.
+//
+// That key was a constant compiled into the app until 2026-09-09, so that two
+// devices shared a list with nothing to set up. One person is the only number
+// that worked for: the cap below is applied to the *merged* list, so a second
+// user's plans would have silently and permanently evicted the first's. Each
+// install generates its own now (js/service.js), and sharing a library between
+// your own devices is a key copied once.
 //
 // This used to live inside sync/worker.js, and the Node service imported it
 // from there -- which had the only Cloudflare-specific file in the repo owning
@@ -79,6 +84,13 @@ export function cleanObstacle(o) {
 // cost of being wrong is bounded and known: a device that was offline for the
 // whole window, still holding the record alive, will put it back on its next
 // sync. That is the standard trade for not growing a list forever.
+// What a key may look like. Both sides have to agree: the client sends it on
+// every request and the server refuses anything else, so this lives here with
+// the rest of the rules rather than being spelled out at each end and drifting.
+// The shape is the whole check -- there is no list of valid keys, and the
+// server never compares against a value.
+export const KEY_OK = /^[A-Za-z0-9_-]{16,128}$/;
+
 export const TOMBSTONE_MS = 30 * 24 * 60 * 60 * 1000;
 
 // And a hard ceiling, so a pathological month cannot fill the store with

@@ -1052,21 +1052,33 @@ it, Export it as KMZ without disturbing what is on screen, or delete it. Naming
 and saving happen where the plan is, not here. That alone needs no server and no
 account.
 
-Sync adds the other device, and there is nothing to set up: no login, no key to
-copy. Every device runs under one **sync key** hardcoded in `js/synced.js`, and
-saving syncs by itself — save on the phone, open the panel on the Mac, the plan
-is there. The Sync button is only for a page that was already open. Both devices
-push to the service in `server/`, which namespaces storage by the key's
+Sync adds the other device. Each install makes up its own **sync key** the first
+time it needs one (`js/service.js`) and that key is the library: saving syncs by
+itself, and the Sync button is only for a page that was already open. Both
+devices push to the service in `server/`, which namespaces storage by the key's
 SHA-256 — what is stored cannot be turned back into a key. Merging is
 last-write-wins per plan id, with deletions as timestamped tombstones so
 removing a plan on the phone removes it on the Mac. Client and server run the
-same merge on purpose, from `sync/protocol.js`.
+same merge on purpose, from `sync/protocol.js`, and agree on what a key may
+look like from there too.
 
-The key ships in a public app, so it is a name and not a secret: anyone reading
-the source can read and write that plan list. For one person's saved boxes that
-is the right trade against copying a key between devices. When there is more
-than one person, the key becomes the user id and a real login goes in front of
-the same storage; nothing about the shape has to change.
+To share one library between **your own** devices, copy the key — it is shown in
+the Plans panel, and touching the field selects it — and paste it into the
+other device. Whatever that device already had merges in. That is one step more
+than it used to be, and it buys the thing that matters: two people no longer
+share a library.
+
+Until 2026-09-09 the key was a single constant compiled into the app, so there
+was nothing to copy. That worked for exactly one person. The cap below is
+applied to the **merged** list, so a second user's plans would have silently and
+permanently evicted the first's — the newest 500 live records survive and the
+rest are dropped without a tombstone or a word. Isolation was the fix, and the
+server needed no part of it: it checks the *shape* of a key and never a value.
+
+The key is still a name and not a password — anyone who has yours can read and
+write those lists, which is the trade for having nothing to sign up for. A real
+login replaces the generated key with an account id and sits in front of the
+same storage; nothing about the shape has to change.
 
 Obstacles are the second list and ride the same machinery: same key, same
 last-write-wins merge, its own route (`POST /obstacles`) and its own file, so

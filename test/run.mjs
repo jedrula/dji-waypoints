@@ -13,7 +13,8 @@ import { encodePlan, decodePlan } from '../js/share.js';
 import { readKmz } from '../js/kmzread.js';
 import { routeFromRead, inferPass } from '../js/route.js';
 import { createPlanStore, merge as clientMerge } from '../js/plans.js';
-import { SERVICE_KEY } from '../js/service.js';
+import { serviceKey, setServiceKey, serviceHeaders, KEY_STORE } from '../js/service.js';
+import { KEY_OK } from '../sync/protocol.js';
 import { merge, clean, cleanObstacle } from '../sync/protocol.js';
 import { createObstacleStore, normalizeRect, overlaps } from '../js/obstacles.js';
 import { checkObstacles, clearingAltitude, segmentBoxDist, pointBoxDist } from '../js/collide.js';
@@ -1064,8 +1065,8 @@ console.log('\nsaved plans');
 
   remotePlans = [{ id: 'remote1', name: 'From the phone', code: 'v1.ddd', updatedAt: Date.now() + 1000 }];
   const res = await store.sync();
-  ok('sync sends the hardcoded key in a header, with nothing to set up', lastRequest.key === SERVICE_KEY);
-  ok('and it is the shape the service checks for', /^[A-Za-z0-9_-]{16,128}$/.test(SERVICE_KEY));
+  ok('sync sends this device\u2019s key in a header, with nothing to set up', lastRequest.key === serviceKey());
+  ok('and it is the shape the service checks for', KEY_OK.test(serviceKey()));
   ok('sync sends tombstones too, so a delete propagates',
      lastRequest.body.plans.some((p) => p.deleted));
   ok('sync pulls the other device\'s plans in', store.list().some((p) => p.name === 'From the phone'));
@@ -1787,6 +1788,51 @@ console.log('\nground imagery');
 
   for (let i = 0; i < 8; i++) cache.get(19, i, 9);
   ok('the cache does not grow without bound', cache.size() <= 4);
+}
+
+console.log('\nwho you are to the service');
+{
+  // The key was one constant compiled into the app, which meant every install
+  // shared one library: a second user would have read and written the first's
+  // plans, and the 500 cap is applied to the merged list, so the newest 500
+  // survive and a quiet user's plans would have been evicted for good. Each
+  // install has to make up its own.
+  const fake = () => {
+    const mem = new Map();
+    return {
+      getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+      setItem: (k, v) => mem.set(k, String(v)),
+      removeItem: (k) => mem.delete(k),
+    };
+  };
+  const real = globalThis.localStorage;
+
+  globalThis.localStorage = fake();
+  const first = serviceKey();
+  ok('a device with no key makes one up', KEY_OK.test(first));
+  ok('and keeps it, or every reload would be a new library', serviceKey() === first);
+
+  globalThis.localStorage = fake();
+  const second = serviceKey();
+  ok('a second install is a different library, which is the whole point', second !== first);
+
+  ok('a key the service would refuse is refused here, not sent',
+     (() => { try { setServiceKey('too-short'); return false; } catch { return true; } })());
+  ok('and the working key is still the working key after a bad paste',
+     serviceKey() === second);
+
+  // Pasting the other device's key is how two devices become one library.
+  setServiceKey(first);
+  ok('pasting a key moves this device to that library', serviceKey() === first);
+  ok('whitespace round a pasted key is not part of it', setServiceKey(`  ${second}  `) === second);
+
+  globalThis.localStorage = fake();
+  const stored = serviceKey();
+  ok('the key is what goes on the wire', serviceHeaders()['X-Sync-Key'] === stored);
+  ok('and it is kept where the app can find it again',
+     globalThis.localStorage.getItem(KEY_STORE) === stored);
+
+  if (real === undefined) delete globalThis.localStorage; else globalThis.localStorage = real;
 }
 
 console.log('\nundo');

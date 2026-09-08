@@ -5,6 +5,38 @@ learned, what broke, what state something was left in. What *changed in the code
 is already in `git log` and does not belong here twice; what is still open is in
 `TODO.md`. A line earns its place if you would not find it in either.
 
+## 2026-09-09
+
+Every install makes up its own sync key now. It was one constant compiled into
+the app, which was correct for exactly one person and quietly catastrophic for
+two: the key *is* the namespace, so a second user would have read and written
+the first's plans — and `mergeRecords` applies the 500 cap to the *merged*
+list and keeps the newest, so an active user's plans would have evicted a quiet
+user's for good, with no tombstone and nothing said. That is the bug this
+closes, ahead of anyone actually arriving.
+
+The server needed no part of it: it checks the shape of a key and never a
+value, so isolation was entirely a client change. The shape moved into
+`sync/protocol.js` as `KEY_OK` — both ends have to agree about it, which is
+what that file is for, and it was spelled out at each end before.
+
+Cost: sharing a library between your own two devices is now a key copied once,
+shown in the Plans panel. That is the thing the hardcoded constant was buying,
+and it was worth giving up.
+
+Also, the 3D viewer is reachable from the app (Advanced → *Look at the ground
+in 3D*), and was quietly broken by hosting before that — its `.json` and
+geometry requests both blocked until the scene was built, minutes, against
+Cloudflare's ~100 s cap. Everything answers 202 and the page polls now, and a
+build that fails after its request is gone carries the reason to the next poll
+rather than letting the poller time out and blame the wait.
+
+**Not done, and now the top of the list:** nothing rate-limits the LiDAR
+routes. Any key can trigger unlimited 223 MB downloads from GUGiK, and
+`BUILD_CONCURRENCY 2` is one global queue with no fairness — one person
+importing a wide area blocks everyone else past the client's 150 s budget.
+That, and `var/laz` still has no eviction policy.
+
 ## 2026-09-08
 
 `server/` is hosted, at **https://drone.topomatch.com** — a second hostname on

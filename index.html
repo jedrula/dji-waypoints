@@ -236,8 +236,17 @@
       <div id="planList" class="planlist"></div>
       <div class="syncrow">
         <button id="syncNow" type="button">Sync</button>
-        <span class="hint">Saving syncs to your other device by itself.</span>
+        <span class="hint">Saving syncs to your other devices by itself.</span>
       </div>
+      <div class="syncrow">
+        <input id="syncKey" type="text" autocomplete="off" spellcheck="false"
+          aria-label="Your sync key">
+        <button id="syncKeyApply" type="button">Use key</button>
+      </div>
+      <p class="hint" id="syncKeyHint">Your plans and obstacles live under this key, and this
+      device made it up. Copy it into your other device to share one library; paste a different
+      one to move to that library, taking whatever is on this device with you. It is a name, not
+      a password — anyone who has it can read and write those lists.</p>
     </div>
 
     <div class="sheetpane" id="pane-device" hidden>

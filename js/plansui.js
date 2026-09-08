@@ -1,8 +1,11 @@
 // The saved-plans view. Local list always, and sync on top of it with nothing
-// to set up -- the key is hardcoded (js/plans.js), so the only honest thing for
-// this block to do is sync by itself: on open, and after every change. The
-// button stays for the case where the phone saved something while this page was
-// already sitting open.
+// to set up -- this device makes its own key up (js/service.js), so the only
+// honest thing for this block to do is sync by itself: on open, and after every
+// change. The button stays for the case where the phone saved something while
+// this page was already sitting open.
+//
+// The key is shown here because it is now the only thing standing between two
+// libraries, and pasting it into a second device is how they become one.
 //
 // It owns nothing outside its own pane: the plan count goes out through
 // `setCount` (the menu badge wears it) and loading one hands over through
@@ -10,6 +13,7 @@
 // you are editing, so js/planmode.js owns the button and calls `save` below.
 
 import { createPlanStore } from './plans.js';
+import { serviceKey, setServiceKey } from './service.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -110,6 +114,30 @@ export function initPlans({
   }
 
   $('syncNow').addEventListener('click', () => sync());
+
+  // Showing the key is most of the feature: a library nobody can name is a
+  // library you cannot reach from your other device.
+  $('syncKey').value = serviceKey();
+  // The field is too narrow to show a whole key and the point of it is to be
+  // copied, so touching it selects the lot. It still takes a paste, which is
+  // the other half.
+  $('syncKey').addEventListener('focus', () => $('syncKey').select());
+  $('syncKeyApply').addEventListener('click', () => {
+    const wanted = $('syncKey').value;
+    if (wanted.trim() === serviceKey()) { status('That is already this device\u2019s key.'); return; }
+    try {
+      setServiceKey(wanted);
+    } catch (e) {
+      // Put the working key back: an input left holding something the service
+      // would refuse reads as though it had been accepted.
+      $('syncKey').value = serviceKey();
+      status(e.message, 'bad');
+      return;
+    }
+    $('syncKey').value = serviceKey();
+    status('Switched. Syncing this device\u2019s plans into that library\u2026');
+    sync();
+  });
 
   // `quiet` is a sync nobody asked for -- after a save, or on open. It reports
   // what arrived and what went wrong, and otherwise says nothing, because

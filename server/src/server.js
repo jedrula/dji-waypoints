@@ -28,6 +28,7 @@ import { toPuwg92, toWgs84, inPoland } from '../../js/puwg92.js';
 import { findTiles, createTileStore } from './gugik.js';
 import { createTile, tileOf, originOf, TILE_M, SIZE, NO_DATA } from './ndsm.js';
 import { createStore, LISTS } from './store.js';
+import { KEY_OK } from '../../sync/protocol.js';
 import { createScene, GRID, CELL_M, KIND } from './scene.js';
 import { createOrthoStore, ORTHO_PX } from './ortho.js';
 import { createBdotStore } from './bdot.js';
@@ -293,8 +294,9 @@ const server = http.createServer(async (req, res) => {
     //
     // The shape is the whole check -- there is no list of valid keys, and for
     // the two synced lists the key is also the name the records are stored
-    // under. A key that ships inside a public app is a name, not a secret: it
-    // stops crawlers and casual abuse, not anyone who reads the source.
+    // under, which is as close to an account as this has. KEY_OK is imported
+    // rather than written again here: the client sends what this refuses, so
+    // the two must agree, and that is what sync/protocol.js is for.
     //
     // The viewer page is exempt because a browser navigating to a URL cannot
     // send a header. It reads no LiDAR; the fetches it then makes are gated
@@ -303,7 +305,7 @@ const server = http.createServer(async (req, res) => {
     const isPage = url.pathname === '/' || url.pathname === '/scene';
     if (!isPage) {
       if (origin && !ORIGIN_OK.test(origin)) return send(res, 403, { error: 'origin not allowed' }, origin);
-      if (!/^[A-Za-z0-9_-]{16,128}$/.test(key)) return send(res, 401, { error: 'a sync key is required' }, origin);
+      if (!KEY_OK.test(key)) return send(res, 401, { error: 'a sync key is required' }, origin);
     }
 
     if (url.pathname === '/v1/health') {

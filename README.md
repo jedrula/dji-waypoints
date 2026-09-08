@@ -1097,13 +1097,17 @@ Cloudflare. The Worker is deleted. The rules moved to `sync/protocol.js`, which
 belongs to neither side; `server/` is the only implementation and the route
 tests run against it over a real socket.
 
-**Nothing hosts `server/` yet**, so `SYNC_URL` follows the rule `js/heights.js`
-already uses for the same host: `http://localhost:8130` when the page is itself
-local, and empty otherwise. So the deployed app is local-only today — every
-write lands on the device and sync is the extra — and a public URL in
-`SYNC_URL`, or in `localStorage['dji.syncUrl']`, is the whole of turning it back
-on. Hosting it also gets measured heights onto the deployed app, which is the
-same one decision.
+**Nothing hosts `server/` yet**, so the address is `http://localhost:8130` when
+the page is itself local and empty otherwise. The deployed app is therefore
+local-only today — every write lands on the device and sync is the extra.
+
+One address, in `js/service.js`, for the whole service: heights, overhead
+lines, the rough model and both synced lists. Heights and sync each used to
+carry their own copy of that rule and their own localStorage key, so hosting
+this was two edits in two files that had to agree; it is one now. Putting a
+public URL there — or in `localStorage['dji.serviceUrl']` — turns on measured
+heights and two-device sync together, because they were always the same
+decision. See `docs/2026-09-08-hosting-the-service.md`.
 
 ## Phone, controller, MacBook
 

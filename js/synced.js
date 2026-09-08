@@ -1,4 +1,5 @@
 import { mergeRecords } from '../sync/protocol.js';
+import { serviceUrl } from './service.js';
 // One person, a few devices, and a list of things worth keeping. Plans were the
 // first such list; the obstacles you draw on the map are the second, and the
 // rule for keeping them in step is the same one -- local first, last write wins
@@ -18,20 +19,7 @@ import { mergeRecords } from '../sync/protocol.js';
 // replaces this constant with an account id; nothing else changes.
 export const SYNC_KEY = 'andrzej-H5rGhCrCRmPXoRSFUA8etg';
 
-// The service in server/, which is also what measures heights -- one backend
-// rather than two. Same rule as js/heights.js uses for the same host: off
-// unless the page is itself local, so the deployed app does not spend a round
-// trip on a service that is only running on someone's laptop.
-//
-// Empty means local-only, which is a perfectly good way to use the app: every
-// write lands on this device first and sync is the extra. It is also what the
-// deployed app does today, because nothing hosts server/ yet -- put a public
-// URL here, or in localStorage['dji.syncUrl'], the day something does, and two
-// devices share a list again with nothing else to change.
-const LOCAL = /^(localhost|127\.0\.0\.1)$/.test(globalThis.location?.hostname ?? '');
-export const SYNC_URL = LOCAL ? 'http://localhost:8130' : '';
 
-const URL_OVERRIDE = 'dji.syncUrl';
 
 function newId() {
   const b = new Uint8Array(9);
@@ -83,7 +71,7 @@ export function createSyncedStore({
   };
   const writeAll = (records) => store.setItem(storageKey, JSON.stringify(records));
 
-  const url = () => endpoint ?? store.getItem(URL_OVERRIDE) ?? SYNC_URL;
+  const url = () => endpoint ?? serviceUrl();
 
   return {
     // Tombstones are storage, not list entries.

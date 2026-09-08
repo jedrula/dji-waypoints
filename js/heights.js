@@ -13,20 +13,8 @@
 
 import { toPuwg92, inPoland } from './puwg92.js';
 import { insideRing } from './prism.js';
+import { serviceUrl } from './service.js';
 
-// Off unless the page is itself local, so the deployed app does not spend a
-// round trip on a service that is only ever running on someone's laptop. Set
-// localStorage['dji.heightsUrl'] to point anywhere.
-const LOCAL = /^(localhost|127\.0\.0\.1)$/.test(globalThis.location?.hostname ?? '');
-const DEFAULT_URL = LOCAL ? 'http://localhost:8130' : '';
-
-export function serviceUrl() {
-  try {
-    return (globalThis.localStorage?.getItem('dji.heightsUrl') ?? DEFAULT_URL).replace(/\/$/, '');
-  } catch {
-    return DEFAULT_URL;
-  }
-}
 
 // The grid comes from the service rather than being written down twice. If the
 // two ever disagreed the sampling would be silently off by whole tiles, which
@@ -184,6 +172,8 @@ export async function measure(found, {
   });
   return { obstacles, measured, blanked, tiles: needed.length };
 }
+
+export { serviceUrl };
 
 // For the tests and for anyone poking at it from a console.
 export const _internals = { sampleMax, tilesFor, reset: () => { tiles.clear(); geometry = null; } };

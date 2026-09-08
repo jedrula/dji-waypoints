@@ -52,14 +52,18 @@ Two servers: the app on 8123 as usual, this one on 8130.
 cd server && npm install && npm start
 ```
 
-That is all the wiring there is. The app turns measurement on by itself when
-the page is on localhost, so open the app, pan to somewhere in Poland, and
-press **Import what is here** under Obstacles > Advanced. To point it at a
-service running anywhere else:
+That is all the wiring there is. The app turns this on by itself when the page
+is on localhost, so open the app, pan to somewhere in Poland, switch to
+Obstacles and press **Obstacles here**. To point it at a service running
+anywhere else:
 
 ```js
-localStorage['dji.heightsUrl'] = 'https://heights.example.com'   // '' to switch off
+localStorage['dji.serviceUrl'] = 'https://dji.example.com'   // '' to switch off
 ```
+
+One address for the whole service -- heights, lines, the rough model and the
+two synced lists. `js/service.js` owns it, and it is the only thing that has to
+change to host this somewhere.
 
 The first import over new ground is slow and says so -- the button counts
 tiles, and a toast warns that the survey is coming down. Over Cybulskiego at

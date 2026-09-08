@@ -366,16 +366,18 @@ So an obstacle stores the outline the source actually holds, and the rectangle
 is demoted to what it was always good at: a broad phase. Six subtractions that
 dismiss a leg before anything exact happens, where being generous costs nothing.
 
-**The cost of the old answer, on one real site.** A block of Krakow imported --
-148 obstacles, 85 with outlines -- around a 70 m square of the Rynek:
+**What it does not buy, so far.** On a 70 m square of the Krakow Rynek with a
+block of the city imported -- 148 obstacles, 85 with outlines -- auto-fit picks
+41 m whether it is given the outlines or the boxes round them, at either
+clearance setting. The outlines do not lower the altitude there, because what
+forces that site high is how tall the buildings are and not how fat their boxes
+were. A tighter site pressed against one diagonal wall is where the shape should
+start deciding the answer, and that has not been measured yet.
 
-    auto-fit chose            as boxes 120 m        as outlines 41 m
-    auto-fit took             3753 ms               791 ms
-
-Auto-fit could not find any low altitude that cleared the fat boxes, so it
-climbed to DJI's ceiling and resolved the site three times worse than it had to.
-The outlines find 41 m clear. The search is also five times quicker, for the
-same reason: it stops climbing eighty metres earlier.
+What the outlines do buy is a clearance report that is about the building --
+see the heights section below for the case where the box was reporting the
+neighbour's roof as measured fact -- and the ability to fly between two things
+that a pair of overlapping boxes said were one solid mass.
 
 **Convex pieces, cut at question time.** js/collide.js measures a leg against a
 solid by ternary search, and the reason that search cannot slip past a near miss
@@ -452,6 +454,17 @@ tab. Four things, none of which changes an answer:
   radius is dropped once. Only the outer bound: dropping what sits well inside
   looks just as safe and is not, because the highest ring pulls in to little
   more than the subject's own span.
+
+Measured against the same Krakow import, before and after -- the same benchmark
+run against the commit before js/prism.js existed:
+
+                                 as boxes   naive footprints    now
+    collision check (per replan)    23 ms        617 ms        13 ms
+    coverage score                1254 ms      12529 ms      1124 ms
+    auto-fit search               1044 ms    >240000 ms      1309 ms
+
+The middle column is what the footprints cost before any of the four; the first
+browser test with it locked the tab up for forty-five seconds.
 
 And one bug found by measuring rather than by reading. `clearingAltitude` took a
 bare number, the app handed it `{ clearance: 5 }`, and JavaScript compared

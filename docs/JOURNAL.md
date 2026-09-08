@@ -5,6 +5,45 @@ learned, what broke, what state something was left in. What *changed in the code
 is already in `git log` and does not belong here twice; what is still open is in
 `TODO.md`. A line earns its place if you would not find it in either.
 
+## 2026-09-09 (later)
+
+Measured three things while the service sat live, and one of them was a bug.
+
+**A cold tile takes 152 s, and the app gave up at 150.** Krakow 488/1134,
+where the app opens: five GUGiK sheets, 331 MB down, 75 kB of tile out, 152 s
+end to end. `fetchTile` budgeted `waitMs = 150000`. So the first visit to a new
+area timed out roughly two seconds before its own tile landed — and then cached
+the miss (`tiles.set(key, null)`), so the 331 MB it had just paid for went
+unused until the page was reloaded. Fixed by separating the two cases: a
+definite non-202 is remembered, giving up waiting is not, because the build
+carries on server-side and the next import finds it instantly. Budget raised to
+240 s. The toast said "about a minute", which was wrong by two and a half
+times, so it no longer says it.
+
+**The file store is not the bottleneck, and does not need a database.**
+Benchmarked in node against a temp dir, at the 500-record cap and with the
+payload the client actually sends (the whole list, every sync):
+
+    one user, 500 plans, file on disk           134 KB
+    steady-state sync, whole library resent      35 ms
+     10 users syncing at once                  2.03 ms each
+    100 users syncing at once                  2.07 ms each
+    500 users syncing at once                  1.55 ms each   (775 ms total)
+     50 writes to ONE key                      1.0 ms each, serialised
+
+Flat to 500 concurrent users, ~500 syncs/s. The cap is what makes it work: each
+file is bounded, so every operation is O(700 records) and never O(everyone).
+SQLite would buy atomicity for free instead of the hand-rolled lock in
+`store.js` — it would not buy throughput, and there is no number here arguing
+for it yet.
+
+**The viewer works and is worth the disk.** Tile 724/724, the Rynek: 2.83 M
+returns on a 1000x1000 grid at 0.5 m, 46% buildings, 7% vegetation, 14% not
+measured, 2.55 MB to the browser. Default camera framing is fine — I thought it
+was broken, but that was a screenshot resizing the window, not the page.
+
+`var/laz` is now 774 MB across three tiles' worth of sheets. Disk 83 GB.
+
 ## 2026-09-09
 
 Every install makes up its own sync key now. It was one constant compiled into

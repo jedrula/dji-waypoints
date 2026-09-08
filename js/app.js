@@ -899,7 +899,9 @@ async function importHere() {
     const { measure } = await import('./heights.js');
     if (serviceUrl()) btn.textContent = 'Measuring heights…';
     const { obstacles: found, measured, blanked } = await measure(raw, {
-      onWait: () => toast('First visit here — the survey is downloading, about a minute.'),
+      // Measured 152 s for one cold tile (Krakow, 2026-09-09). "About a minute"
+      // was wrong by two and a half times, and the wait is per tile.
+      onWait: () => toast('First visit here — downloading the survey. A few minutes; the estimates stand until it lands.'),
       onProgress: (done, total) => { btn.textContent = `Measuring heights… ${done}/${total}`; },
     });
 

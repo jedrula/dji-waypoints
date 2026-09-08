@@ -32,9 +32,13 @@ async function grid(fetchImpl) {
 const tiles = new Map();   // "tn/te" -> Uint8Array | null
 
 // A tile that is not built yet answers 202 and starts building. The first
-// visit to an area is a real wait -- four LAZ tiles have to come down from
+// visit to an area is a real wait -- several LAZ sheets have to come down from
 // GUGiK -- so this keeps asking rather than failing, and gives up before
 // anyone starts wondering whether it is broken.
+//
+// The budget is 240 s because 150 s was measurably too short: a cold tile in
+// Krakow took 152 s end to end. Giving up is cheap now (see below), so the
+// number only has to cover the common case rather than the worst one.
 async function fetchTile(tn, te, { fetchImpl, signal, waitMs, onWait }) {
   const key = `${tn}/${te}`;
   if (tiles.has(key)) return tiles.get(key);
@@ -48,10 +52,23 @@ async function fetchTile(tn, te, { fetchImpl, signal, waitMs, onWait }) {
       tiles.set(key, data);
       return data;
     }
-    if (res.status !== 202 || Date.now() > until) {
+    // A definite answer that is not a tile: no survey here, or the service is
+    // unwell. Remember it, so importing fifty obstacles does not ask fifty
+    // times.
+    if (res.status !== 202) {
       tiles.set(key, null);
       return null;
     }
+    // Giving up waiting is NOT the same as there being nothing here, and
+    // remembering it as such was costing real measurements. A cold tile took
+    // 152 s to build (measured 2026-09-09, Krakow 488/1134: five GUGiK sheets,
+    // 331 MB, for a 75 kB tile) against a budget of 150 s -- so the first
+    // visit to a new area timed out about two seconds before its own tile
+    // landed, cached the miss for the rest of the session, and left the
+    // heights as estimates until the page was reloaded. The build carries on
+    // server-side regardless, so forgetting the miss is what lets the next
+    // import pick up a tile that is by then instant.
+    if (Date.now() > until) return null;
     if (!told) { told = true; onWait?.(); }
     await new Promise((r) => setTimeout(r, 3000));
   }
@@ -133,7 +150,7 @@ function tilesFor(rects, { tileMetres }) {
 // height it could measure replaced. `assumed` goes false on those, which is
 // what drops the `~` from the label and stops the app calling it a guess.
 export async function measure(found, {
-  fetchImpl = globalThis.fetch, signal, waitMs = 150000, onWait, onProgress,
+  fetchImpl = globalThis.fetch, signal, waitMs = 240000, onWait, onProgress,
 } = {}) {
   const url = serviceUrl();
   const wanted = found.filter((f) => f.assumed);

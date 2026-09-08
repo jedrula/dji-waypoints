@@ -1989,6 +1989,50 @@ console.log('\ncontroller bridge');
   ok('leaves a tagged height alone', res.obstacles[1].height === 41 && res.obstacles[1].assumed === false);
   ok('counts what it measured', res.measured === 1, String(res.measured));
 
+  // Giving up waiting is not the same as there being nothing here. A cold tile
+  // measured 152 s to build against a 150 s budget, so the first visit to an
+  // area timed out about two seconds before its own tile landed -- and the
+  // miss was cached, so the 331 MB of survey it had just paid for went unused
+  // until the page was reloaded.
+  {
+    _internals.reset();
+    let asked = 0;
+    const building = async (url) => {
+      if (url.endsWith('/v1/health')) {
+        return { ok: true, status: 200, json: async () => ({ tileMetres: TILE, size: SIZE }) };
+      }
+      asked++;
+      return { status: 202, json: async () => ({ status: 'building' }) };
+    };
+    const slow = await measure([box(at, on, 20)], { fetchImpl: building, waitMs: 0 });
+    ok('a tile still building leaves the estimate standing', slow.obstacles[0].assumed === true);
+    ok('and measures nothing', slow.measured === 0);
+
+    // The build carries on server-side, so the next import must be allowed to
+    // find it. Same page, no reload, tile now ready.
+    const after = await measure([box(at, on, 20)], { fetchImpl, waitMs: 0 });
+    ok('and the next import picks the tile up once it is built',
+       after.obstacles[0].height === 30 && after.obstacles[0].assumed === false);
+  }
+
+  // A definite answer that is not a tile is worth remembering, or an import of
+  // fifty obstacles in one square asks fifty times.
+  {
+    _internals.reset();
+    let asked = 0;
+    const gone = async (url) => {
+      if (url.endsWith('/v1/health')) {
+        return { ok: true, status: 200, json: async () => ({ tileMetres: TILE, size: SIZE }) };
+      }
+      asked++;
+      return { status: 500, json: async () => ({ error: 'unwell' }) };
+    };
+    await measure([box(at, on, 20)], { fetchImpl: gone, waitMs: 0 });
+    const once = asked;
+    await measure([box(at, on, 20)], { fetchImpl: gone, waitMs: 0 });
+    ok('a service that answered plainly is not asked again', asked === once, `${once} -> ${asked}`);
+  }
+
   // The worst thing the bounding box ever did, and the reason the footprint
   // had to reach this file. The rectangle round a real building is a median
   // 1.9x too big, so it routinely covers the neighbour's roof -- and a measured

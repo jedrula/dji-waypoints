@@ -5,6 +5,45 @@ learned, what broke, what state something was left in. What *changed in the code
 is already in `git log` and does not belong here twice; what is still open is in
 `TODO.md`. A line earns its place if you would not find it in either.
 
+## 2026-09-09 (later still) — planning against the ground
+
+First piece of mission planning v2: `surveyCeiling` in `js/heights.js`, and a
+**Check what the survey sees** button in Advanced.
+
+The point is the gap between the obstacle list and the ground. `measure`
+corrects the height of something OpenStreetMap already knew about; it can say
+nothing at all about a thing nobody mapped — a line of poplars, a pole, a
+crane. The raster saw all of it, one measured byte per square metre. So the
+honest ceiling for a flight is the tallest measured cell anywhere under it, and
+that is now a number the app can ask for and act on.
+
+Tried against the live service over a 200 m box on the Rynek: **64 m**, from
+39,991 sampled cells with 25 unmeasured. That is the Town Hall tower, and no
+obstacle in the list mentions it.
+
+Blunt on purpose — the maximum over the whole area, not per leg — because the
+aircraft holds one barometric altitude and the tallest thing it crosses decides
+whether that altitude is safe. It never lowers an altitude, and it reports what
+it cannot vouch for rather than assuming it away: `missing` tiles that are not
+built, `blank` cells the laser did not measure. An unbuilt tile is an unknown
+ceiling, not a zero one, and there is a test that says so.
+
+On demand rather than on every replan, because the first tile under new ground
+is a couple of minutes and hundreds of megabytes, and spending that because
+somebody nudged a slider would be rude to GUGiK and to the user.
+
+**A second timing, which decomposes the first.** Building tile 724/724 with its
+LAZ already on disk took 53 s; the Krakow tile that had to download its sheets
+took 152 s. So the GUGiK download is ~100 s of it, two thirds — worth knowing
+before anyone writes an eviction policy for `var/laz`, since deleting a sheet
+buys back disk at the price of that 100 s, not of the whole build.
+
+**Next, if this line is worth continuing:** the ceiling is one number for the
+whole flight, which is conservative but crude — a flight that only clips a tall
+corner is raised as though it crossed it. Per-leg sampling would fix that and
+is the obvious v3. And nothing yet uses the 0.5 m scene grid, which is four
+times finer than the height tile.
+
 ## 2026-09-09 (later)
 
 Measured three things while the service sat live, and one of them was a bug.

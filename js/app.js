@@ -937,6 +937,50 @@ async function importHere() {
   }
 }
 
+// Planning around the ground rather than around a list.
+//
+// The obstacle list only ever contains what somebody mapped. The survey raster
+// contains what is actually standing -- the line of poplars along the field
+// edge, the pole, the crane -- at one measured byte per square metre. So this
+// asks it what the tallest thing under the whole flight is, which is the only
+// number that decides whether one barometric altitude is safe.
+//
+// On demand rather than on every replan: the first tile under a new site is a
+// couple of minutes and hundreds of megabytes, and spending that because
+// somebody nudged a slider would be rude to a public agency and to the user.
+{
+  const btn = $('surveyFit');
+  btn.hidden = !serviceUrl();
+  $('surveyHint').hidden = !serviceUrl();
+  btn.addEventListener('click', async () => {
+    if (!state.mission) { toast('Draw something to fly first.'); return; }
+    const path = state.mission.exported ?? state.mission.waypoints ?? [];
+    if (!path.length) { toast('Nothing planned yet.'); return; }
+    // The area the aircraft actually crosses, which is what its altitude has
+    // to clear -- not the box you tapped.
+    const bounds = {
+      north: Math.max(...path.map((w) => w.lat)), south: Math.min(...path.map((w) => w.lat)),
+      east: Math.max(...path.map((w) => w.lon)), west: Math.min(...path.map((w) => w.lon)),
+    };
+    btn.disabled = true;
+    const was = btn.textContent;
+    try {
+      const { surveyCeiling } = await import('./heights.js');
+      state.survey = await surveyCeiling(bounds, {
+        onWait: () => toast('First look at this ground — downloading the survey. A few minutes.'),
+        onProgress: (d, n) => { btn.textContent = `Reading the survey… ${d}/${n}`; },
+      });
+      renderAlert(false);
+      const c = state.survey;
+      if (c.height === null) toast(c.reason ? `No survey here: ${c.reason}.` : 'The survey has not answered yet.');
+      else toast(`Tallest thing under this flight: ${c.height} m.`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = was;
+    }
+  });
+}
+
 // The rough model, for looking at rather than planning with. The service
 // builds it from the same survey the heights come from and serves the viewer
 // itself, so this is a link and nothing more -- no state, no effect on the
@@ -1179,6 +1223,42 @@ function renderAlert(over) {
     if (el.hidden) { el.hidden = false; el.className = 'alert note'; el.textContent = ''; }
     el.append(b);
   }
+  // What the survey saw, which is everything standing and not only what was
+  // mapped. Never lowers an altitude and never claims completeness: a tile that
+  // has not been built and a cell the laser missed are both unknowns, and an
+  // unknown ceiling is not a zero one.
+  const sv = state.survey;
+  if (sv && sv.height !== null) {
+    const need = sv.height + clearance();
+    const alt = +$('altitude').value;
+    const caveat = sv.missing
+      ? ` ${sv.missing} of ${sv.tiles} tiles have not been built, so this is not the whole picture.`
+      : '';
+    if (el.hidden) { el.hidden = false; el.className = 'alert warn'; el.textContent = ''; }
+    const g = document.createElement('span');
+    g.textContent = need > alt
+      ? ` The survey sees something ${sv.height} m tall under this flight — ${(need - alt).toFixed(0)} m above your altitude, mapped or not.${caveat}`
+      : ` The survey's tallest thing under this flight is ${sv.height} m; you clear it by ${(alt - sv.height).toFixed(0)} m.${caveat}`;
+    el.append(g);
+    if (need > alt) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = `Raise to ${Math.ceil(need)} m`;
+      b.addEventListener('click', () => {
+        tuned = true;
+        $('altitude').value = Math.min(120, Math.ceil(need));
+        computePlan();
+        history.commit();
+      });
+      el.append(b);
+    }
+  } else if (sv && sv.missing) {
+    if (el.hidden) { el.hidden = false; el.className = 'alert warn'; el.textContent = ''; }
+    const g = document.createElement('span');
+    g.textContent = ` The survey has not answered for ${sv.missing} of ${sv.tiles} tiles under this flight, so nothing here is measured yet.`;
+    el.append(g);
+  }
+
   if (state.clearAlt && state.clearAlt > +$('altitude').value) {
     const b = document.createElement('button');
     b.type = 'button';

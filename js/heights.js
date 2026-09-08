@@ -190,6 +190,61 @@ export async function measure(found, {
   return { obstacles, measured, blanked, tiles: needed.length };
 }
 
+// What the survey says is standing under a whole area, rather than under one
+// footprint someone imported.
+//
+// This is the difference between planning around a list and planning around
+// the ground. `measure` above corrects the height of an obstacle OpenStreetMap
+// already knew about; it can say nothing at all about a thing nobody mapped --
+// a line of poplars along a field edge, a pole, a crane, a barn extension. The
+// survey saw all of it: one byte per square metre, measured, whether or not
+// anyone ever drew it.
+//
+// So the honest ceiling for a flight is the tallest measured cell anywhere
+// under it, and that is what this returns. It is deliberately blunt: the
+// maximum over the whole area, not per leg, because an aircraft holds one
+// barometric altitude for the flight and the tallest thing it crosses is the
+// one that decides whether that altitude is safe.
+//
+// Everything it cannot vouch for is reported rather than assumed away:
+//
+//   `missing`  tiles that are not built yet, or have no survey at all
+//   `blank`    cells the laser did not measure -- water, shadow, gaps
+//
+// A caller that ignores those is claiming to know a number it does not, which
+// for a clearance is the difference between a bad photograph and a crash. Both
+// counts being zero is the only case where `height` is the whole truth.
+export async function surveyCeiling(bounds, {
+  fetchImpl = globalThis.fetch, signal, waitMs = 240000, onWait, onProgress,
+} = {}) {
+  const url = serviceUrl();
+  if (!url) return { height: null, reason: 'no service' };
+  // The corners, not the centre: a site straddling the border is half a survey
+  // and the half outside it is unknown, not flat.
+  if (!inPoland(bounds.north, bounds.east) || !inPoland(bounds.south, bounds.west)) {
+    return { height: null, reason: 'outside the survey' };
+  }
+
+  let g;
+  try {
+    g = await grid(fetchImpl);
+  } catch (e) {
+    return { height: null, reason: e.message };
+  }
+
+  const needed = tilesFor([bounds], g);
+  let done = 0;
+  let missing = 0;
+  for (const [tn, te] of needed) {
+    if (!(await fetchTile(tn, te, { fetchImpl, signal, waitMs, onWait }))) missing++;
+    onProgress?.(++done, needed.length);
+  }
+
+  const get = (tn, te) => tiles.get(`${tn}/${te}`) ?? null;
+  const { height, blank, seen } = sampleMax(bounds, g, get);
+  return { height, blank, seen, tiles: needed.length, missing };
+}
+
 export { serviceUrl };
 
 // For the tests and for anyone poking at it from a console.

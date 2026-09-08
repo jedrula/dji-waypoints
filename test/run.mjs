@@ -1941,7 +1941,7 @@ console.log('\ncontroller bridge');
 {
   console.log('\nmeasured heights');
   globalThis.localStorage = { getItem: () => 'http://heights.test', setItem() {} };
-  const { measure, serviceUrl, _internals } = await import('../js/heights.js');
+  const { measure, surveyCeiling, serviceUrl, _internals } = await import('../js/heights.js');
   const { toPuwg92 } = await import('../js/puwg92.js');
   ok('reads the service url from storage', serviceUrl() === 'http://heights.test');
 
@@ -2031,6 +2031,52 @@ console.log('\ncontroller bridge');
     const once = asked;
     await measure([box(at, on, 20)], { fetchImpl: gone, waitMs: 0 });
     ok('a service that answered plainly is not asked again', asked === once, `${once} -> ${asked}`);
+  }
+
+  // Planning around the ground rather than around a list. The 30 m patch is a
+  // thing nobody mapped: no obstacle covers it, so `measure` can never mention
+  // it, and the raster is the only thing that can.
+  {
+    _internals.reset();
+    const area = { north: at + 0.0009, south: at - 0.0009, east: on + dLon(100), west: on - dLon(100) };
+    // Serve the same raster for whichever tiles the area straddles, so this is
+    // about the sampling and not about the mock's tile arithmetic.
+    const anyTile = async (url) => {
+      if (url.endsWith('/v1/health')) {
+        return { ok: true, status: 200, json: async () => ({ tileMetres: TILE, size: SIZE }) };
+      }
+      return { status: 200, arrayBuffer: async () => data.buffer.slice(0) };
+    };
+    const c = await surveyCeiling(area, { fetchImpl: anyTile, waitMs: 0 });
+    ok('the survey ceiling is the tallest thing under the area', c.height === 30, String(c.height));
+    ok('and it says how much of the area it actually saw', c.seen > 0 && c.tiles >= 1);
+    ok('and counts the cells it could not measure', c.blank > 0, String(c.blank));
+    ok('with nothing missing when every tile answered', c.missing === 0, String(c.missing));
+  }
+
+  // A tile that never arrives must not read as flat ground. This is the whole
+  // safety argument: an unbuilt tile is an unknown ceiling, not a zero one.
+  {
+    _internals.reset();
+    const absent = async (url) => {
+      if (url.endsWith('/v1/health')) {
+        return { ok: true, status: 200, json: async () => ({ tileMetres: TILE, size: SIZE }) };
+      }
+      return { status: 202, json: async () => ({ status: 'building' }) };
+    };
+    const area = { north: at + 0.0009, south: at - 0.0009, east: on + dLon(100), west: on - dLon(100) };
+    const c = await surveyCeiling(area, { fetchImpl: absent, waitMs: 0 });
+    ok('a tile that is still building is reported missing, not flat',
+       c.missing === c.tiles && c.height === null, `missing=${c.missing}/${c.tiles} height=${c.height}`);
+  }
+
+  // Outside Poland there is no survey, and saying "nothing is standing here"
+  // would be a lie with an altitude attached.
+  {
+    const c = await surveyCeiling({ north: 48.2, south: 48.1, east: 16.4, west: 16.3 },
+      { fetchImpl, waitMs: 0 });
+    ok('outside the survey it declines rather than answering zero',
+       c.height === null && c.reason === 'outside the survey');
   }
 
   // The worst thing the bounding box ever did, and the reason the footprint

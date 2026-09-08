@@ -132,6 +132,12 @@
       are; it mostly does not know how tall, so anything it guesses is marked and counted in
       the warning above. Imported obstacles are flown around and never photographed.</p>
 
+      <button id="surveyFit" class="block" type="button" hidden>Check what the survey sees</button>
+      <p class="hint" id="surveyHint" hidden>Reads the national LiDAR under the whole flight and reports
+      the tallest thing standing there — trees, poles, a crane — whether or not anybody ever mapped it.
+      It never lowers your altitude, and it says so when a tile has not been built yet rather than
+      calling that flat ground. The first look at new ground takes a few minutes.</p>
+
       <button id="scene3d" class="block" type="button" hidden>Look at the ground in 3D</button>
       <p class="hint" id="scene3dHint" hidden>Opens the survey itself for the 500 m square in the
       middle of the map — the ground, the buildings and the trees as the LiDAR saw them, with the

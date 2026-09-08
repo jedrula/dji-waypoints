@@ -40,6 +40,7 @@ import { createHistory } from './history.js';
 import { judgeFix, parseHeight, MAX_ACCURACY } from './walk.js';
 import { bestFix, watchAccuracy, GPS_ERRORS, STALE_MS } from './gps.js';
 import { sampleTerrain, verdict as terrainVerdict } from './terrain.js';
+import { serviceUrl } from './service.js';
 
 const cam = CAMERAS.mini5pro;
 const $ = (id) => document.getElementById(id);
@@ -895,7 +896,7 @@ async function importHere() {
     // If the heights service is reachable it says how tall, from the national
     // LiDAR. If it is not, or has no survey here, the estimates stand and the
     // import behaves exactly as it did before this existed.
-    const { measure, serviceUrl } = await import('./heights.js');
+    const { measure } = await import('./heights.js');
     if (serviceUrl()) btn.textContent = 'Measuring heights…';
     const { obstacles: found, measured, blanked } = await measure(raw, {
       onWait: () => toast('First visit here — the survey is downloading, about a minute.'),
@@ -932,6 +933,24 @@ async function importHere() {
     // Whichever mode is in front now: a long import outlives a mode switch.
     btn.textContent = MODES[state.mode].here;
   }
+}
+
+// The rough model, for looking at rather than planning with. The service
+// builds it from the same survey the heights come from and serves the viewer
+// itself, so this is a link and nothing more -- no state, no effect on the
+// plan. Hidden when there is no service, because then there is nothing to open
+// and a dead button is worse than no button.
+{
+  const url = serviceUrl();
+  $('scene3d').hidden = !url;
+  $('scene3dHint').hidden = !url;
+  $('scene3d').addEventListener('click', () => {
+    const c = map.getCenter();
+    // The centre of the map, not the site: the model is a 500 m square of
+    // ground and you aim it by looking at where you are aiming.
+    window.open(`${serviceUrl()}/scene?lat=${c.lat.toFixed(6)}&lon=${c.lng.toFixed(6)}`,
+      '_blank', 'noopener');
+  });
 }
 
 $('clearOsm').addEventListener('click', () => {

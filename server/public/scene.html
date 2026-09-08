@@ -107,15 +107,38 @@ async function getJSON(url) {
   return r.json();
 }
 
+// A scene that does not exist yet answers 202 and starts building: ~223 MB of
+// LiDAR from GUGiK and 31 M points, so minutes on a fresh tile. Keep asking
+// rather than holding one request open -- the tunnel in front of the service
+// cuts an origin response at ~100 s, which killed this page on exactly the
+// tiles worth looking at.
+async function poll(url, onWait) {
+  const until = Date.now() + 900000;
+  let told = false;
+  for (;;) {
+    const r = await fetch(url, { headers: KEYED });
+    if (r.status === 200) return r;
+    // 404 is the build having failed for a reason worth reading -- no survey
+    // here, usually. Anything but 202 is over.
+    if (r.status !== 202) throw new Error((await r.json().catch(() => ({}))).error ?? `${r.status}`);
+    if (Date.now() > until) throw new Error('still building after 15 minutes');
+    if (!told) { told = true; onWait?.(); }
+    await new Promise((again) => setTimeout(again, 5000));
+  }
+}
+
 // ---------------------------------------------------------------- load
 
 const here = await getJSON(`/v1/locate?lat=${lat}&lon=${lon}`).catch((e) => { fail(e.message); throw e; });
 const { tn, te } = here.tile;
 
 $('bootmsg').textContent = 'Reading the point cloud and the orthophoto…';
-const meta = await getJSON(`/v1/scene/${tn}/${te}.json`).catch((e) => { fail(e.message); throw e; });
+const meta = await poll(`/v1/scene/${tn}/${te}.json`, () => {
+  $('bootmsg').textContent = 'First visit to this square — downloading the survey and building the model. Minutes, not seconds.';
+}).then((r) => r.json()).catch((e) => { fail(e.message); throw e; });
 
-const raw = await fetch(`/v1/scene/${tn}/${te}?wait=1`, { headers: KEYED }).then((r) => r.arrayBuffer());
+// The geometry is built by the time the metadata is, so this is a cache hit.
+const raw = await poll(`/v1/scene/${tn}/${te}`).then((r) => r.arrayBuffer());
 const N = meta.grid;
 const height = new Uint16Array(raw, 0, N * N);
 const kind = new Uint8Array(raw, N * N * 2, N * N);

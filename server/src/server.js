@@ -223,10 +223,19 @@ async function buildScene(tn, te) {
   return { body, meta };
 }
 
+// Why a failure has to be remembered: the build runs detached from the request
+// that started it, so "no LiDAR coverage here" -- the common outcome over a
+// forest or across the border -- reaches nobody. Without this the page polls
+// until its own budget runs out and blames a timeout for something that was
+// never going to work.
+const sceneFailed = new Map();   // key -> message, read once by the next poll
+
 function requestScene(tn, te) {
   const key = `${tn}_${te}`;
   if (scenes.has(key)) return scenes.get(key);
-  const job = throttle(() => buildScene(tn, te)).finally(() => scenes.delete(key));
+  const job = throttle(() => buildScene(tn, te))
+    .catch((err) => { sceneFailed.set(key, String(err.message ?? err)); throw err; })
+    .finally(() => scenes.delete(key));
   scenes.set(key, job);
   return job;
 }
@@ -407,17 +416,23 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      let entry = await cachedScene(tn, te);
+      const entry = await cachedScene(tn, te);
       if (!entry) {
-        if (q.get('wait') !== '1' && ext !== '.json') {
-          requestScene(tn, te).catch(() => {});
-          return send(res, 202, { status: 'building', tile: { tn, te } }, origin, { 'Retry-After': '15' });
+        // 202 and let the caller poll -- never a held-open request, for the
+        // same reason the tile route has always said so. Building a scene
+        // means ~223 MB of LiDAR down from GUGiK and 31 M points processed,
+        // which is minutes, and the Cloudflare tunnel in front of this cuts an
+        // origin response at ~100 s. `?wait=1` and the `.json` exemption both
+        // blocked, so the viewer failed on exactly the fresh tiles worth
+        // looking at. One rule for every variant now.
+        const failed = sceneFailed.get(`${tn}_${te}`);
+        if (failed) {
+          // Reported once, then cleared, so asking again is a fresh attempt.
+          sceneFailed.delete(`${tn}_${te}`);
+          return send(res, 404, { error: failed }, origin);
         }
-        try {
-          entry = await requestScene(tn, te);
-        } catch (err) {
-          return send(res, 404, { error: String(err.message ?? err) }, origin);
-        }
+        requestScene(tn, te).catch(() => {});
+        return send(res, 202, { status: 'building', tile: { tn, te } }, origin, { 'Retry-After': '15' });
       }
       if (ext === '.json') return send(res, 200, entry.meta, origin);
       res.writeHead(200, headers(origin, {

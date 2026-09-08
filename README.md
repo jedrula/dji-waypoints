@@ -341,9 +341,78 @@ name carries a `~`, and the band counts them. Correcting the height yourself
 clears the mark, because then it is yours. A height guessed too low is not a
 bad photograph, it is a crash, and the app must never quietly claim to know one.
 
-Power spans are chopped into pieces of at most 25 m before becoming boxes.
-Obstacles are axis-aligned, so one box round a 300 m diagonal run would wall off
-a 300 m square of sky.
+### The box was a lie about nearly every building
+
+An obstacle used to BE its bounding rectangle, and a rectangle is the wrong
+shape for a building because buildings follow the road rather than the meridian.
+Measured over 755 real OSM footprints in three parts of Poland, through this
+app's own importer:
+
+                        bbox area / true area          convex?   pieces
+    Wroclaw Cybulskiego  median 1.97x  p90 3.19x  max 8.7x   44%   median 2
+    Krakow Rynek         median 2.08x  p90 3.00x  max 7.5x   24%   median 4
+    Dominikowo (rural)   median 1.90x  p90 2.22x  max 2.9x   73%   median 1
+
+**86-93% of buildings are inflated by more than 1.5x, and the median building
+is doubled.** Even in Dominikowo, where 73% of footprints are plain convex
+rectangles, the median box is 1.90x -- because farmhouses face the lane. This is
+not a diagonal-building edge case; it is nearly every building there is.
+
+It also rules out the obvious fix. Giving the rectangle a rotation would sort
+Dominikowo out and do very little for Krakow, where only a quarter of footprints
+are convex and the median needs four pieces however you turn a rectangle.
+
+So an obstacle stores the outline the source actually holds, and the rectangle
+is demoted to what it was always good at: a broad phase. Six subtractions that
+dismiss a leg before anything exact happens, where being generous costs nothing.
+
+**The cost of the old answer, on one real site.** A block of Krakow imported --
+148 obstacles, 85 with outlines -- around a 70 m square of the Rynek:
+
+    auto-fit chose            as boxes 120 m        as outlines 41 m
+    auto-fit took             3753 ms               791 ms
+
+Auto-fit could not find any low altitude that cleared the fat boxes, so it
+climbed to DJI's ceiling and resolved the site three times worse than it had to.
+The outlines find 41 m clear. The search is also five times quicker, for the
+same reason: it stops climbing eighty metres earlier.
+
+**Convex pieces, cut at question time.** js/collide.js measures a leg against a
+solid by ternary search, and the reason that search cannot slip past a near miss
+is that point-to-solid distance is convex in the point. True of any convex set;
+false the moment a footprint has a reflex corner. So js/prism.js ear-clips a
+footprint into triangles first -- every triangle convex by construction -- and
+the argument survives verbatim.
+
+The cutting happens per mission and never reaches the store. That matters
+because the piece count has an ugly tail: a curved terrace ran to 91. As records
+those would blow both the 400-per-import cap and the Worker's 800; as derived
+geometry they cost nothing but arithmetic. One record per building, as before.
+
+Checked against an independent calculation -- rotate the point into a turned
+block's own frame and it is a plain rectangle again -- the worst error over a
+4900-point sweep is 3.5e-10 m. And the property the whole thing rests on, over
+3168 legs swept across and above four footprints: the outline is never closer to
+a leg than its own box, and on 643 of them it is further. Those 643 are the
+clear air the box was calling a strike.
+
+**Everything degrades to the box.** A ring that crosses itself does not enclose
+one definite thing, so no check could be sure it had covered the building: it is
+refused at the store, which is also what lets js/prism.js trust what it is
+handed. A ring that defeats the clipper is caught by arithmetic that has to
+balance -- the pieces must add up to the ring's own area, which a bow tie fails
+by 100 square metres -- and falls back to the rectangle the app used before any
+of this existed.
+
+**Wires are strips.** A power span used to be chopped into 25 m pieces with an
+axis-aligned box round each, because one box round a 300 m diagonal run would
+wall off a 300 m square of sky. A strip needs no chopping: it is already the
+shape of the wire. The 300 m span in the tests was twelve boxes and is now one
+strip, 8.0 m across and 280 m long.
+
+**Trees are still squares.** No OSM tree in a sample of 9908 carried even a
+crown diameter, so there is no outline to keep and inventing one would be worse
+than admitting there is none.
 
 ### Two lists, not one
 
@@ -358,7 +427,38 @@ Wroclaw block above that is the difference between ten strikes and none.
 The same class of bug lived in auto-fit, which squared every obstacle off to one
 span: a 40 x 12 m building measured as a 12 m square, blessed an altitude, and
 handed back a plan the collision check then reported strikes against. Auto-fit
-measures the boxes the check measures now.
+measures the same geometry the check measures now, outlines included.
+
+### Asking for less
+
+Most of what this cost was answering more than anyone had asked for, and with a
+city block in the way that is the difference between a usable app and a locked
+tab. Four things, none of which changes an answer:
+
+* **A bound per building, not per triangle.** Pieces carry their obstacle's id,
+  so one box in front of all of them costs one scan of the legs instead of
+  twelve. Exact, because a group's box contains its pieces: the group's gap to a
+  leg is a lower bound on each piece's, and a bound that is too small only ever
+  means measuring something that turns out to be far away.
+* **Distances nobody reads.** Every obstacle that came nowhere near still got an
+  exact measurement so the app could say "clear by 18 m", and nothing on screen
+  says it. 617 ms to 13 ms per replan.
+* **A verdict instead of a number.** The altitude search asks only whether a
+  flight hits anything, a few hundred times over, and threw the rest away. It
+  now stops at the first strike and clips the leg against the solid rather than
+  measuring its distance to it.
+* **Neighbours dismissed at every station of every orbit.** Rings pull in as
+  they rise and never bulge out, so a neighbour further off than the ring's own
+  radius is dropped once. Only the outer bound: dropping what sits well inside
+  looks just as safe and is not, because the highest ring pulls in to little
+  more than the subject's own span.
+
+And one bug found by measuring rather than by reading. `clearingAltitude` took a
+bare number, the app handed it `{ clearance: 5 }`, and JavaScript compared
+metres with an object: every test inside came out false, so the function that
+exists to say "fly at 56 m and you clear it" returned null every single time.
+Nothing failed. It takes an options object now, like `checkObstacles` beside it,
+and there is a test that asks it the way the app asks it.
 
 ### Where the heights should really come from
 
@@ -451,8 +551,10 @@ app about is a wall the score knows it cannot see through.
 The plan is geometry in the air. **Obstacles** are geometry on the ground, and
 the only question worth asking of the two together is whether they touch.
 
-Draw a box over a building, a tree or a mast, say how tall it is, and every plan
-gets measured against it.
+Tap a building, a tree or a mast, say how tall it is, and every plan gets
+measured against it. A tap is a small square, because a tap is all the shape
+there is; an imported thing carries the outline its source holds, and the
+section above is about why that matters.
 
 Click a box to work on it — in the list, on the map, or on any face of it in the
 3D view, and from whichever pane you happen to be in. There is one selection

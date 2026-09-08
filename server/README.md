@@ -44,6 +44,19 @@ npm test                          # offline, no network, ~1 s
 concurrency is 2, deliberately: GUGiK is a public agency doing us a favour,
 and every byte we take is cached so we never ask twice.
 
+Every route needs an `X-Sync-Key` header, not just the two list routes — the
+shape of it, `[A-Za-z0-9_-]{16,128}`, never a particular value. There is no
+list of valid keys and nothing to configure. It is there because a `/v1/tile`
+miss downloads ~223 MB of LiDAR, so an open data route is a pipe pointed at
+GUGiK; it stops crawlers and casual abuse, not anyone who reads the app source.
+The one exception is the viewer page itself, because a browser navigating to a
+URL cannot send a header; the fetches it then makes are gated like the rest.
+
+In production this runs on a home Linux box behind
+**https://drone.topomatch.com**, started by pane 8 of that box's
+`topomatch-orchestration/start-dev.sh`, which is also where the Cloudflare
+tunnel that fronts it is started.
+
 ## Trying it
 
 Two servers: the app on 8123 as usual, this one on 8130.

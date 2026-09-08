@@ -1097,17 +1097,26 @@ Cloudflare. The Worker is deleted. The rules moved to `sync/protocol.js`, which
 belongs to neither side; `server/` is the only implementation and the route
 tests run against it over a real socket.
 
-**Nothing hosts `server/` yet**, so the address is `http://localhost:8130` when
-the page is itself local and empty otherwise. The deployed app is therefore
-local-only today — every write lands on the device and sync is the extra.
+`server/` is hosted at **https://drone.topomatch.com** as of 2026-09-08, on a
+home Linux box, as a second hostname on the Cloudflare tunnel that already
+fronts another service there — the same tunnel and the same connector, not a
+second one. The address is `http://localhost:8130` when the page is itself
+local, so a laptop running its own copy needs no configuring.
 
 One address, in `js/service.js`, for the whole service: heights, overhead
 lines, the rough model and both synced lists. Heights and sync each used to
 carry their own copy of that rule and their own localStorage key, so hosting
-this was two edits in two files that had to agree; it is one now. Putting a
-public URL there — or in `localStorage['dji.serviceUrl']` — turns on measured
-heights and two-device sync together, because they were always the same
-decision. See `docs/2026-09-08-hosting-the-service.md`.
+this was two edits in two files that had to agree; it was one when the day
+came, and turning on measured heights and two-device sync was that single
+edit, because they were always the same decision.
+
+Every route needs the `X-Sync-Key` header now, not just the two list routes.
+That gate used to sit inside them, which left `/v1/*` open — and a `/v1/tile`
+miss downloads ~223 MB of LiDAR from GUGiK (measured on tile 724/724: four
+sheets, 51–60 MB each), so an open data route was a pipe pointed at a public
+agency rather than merely an unauthenticated read. The service checks the
+*shape* of that header, not its value: a key compiled into a public app is a
+name, not a secret. See `docs/2026-09-08-hosting-the-service.md`.
 
 ## Phone, controller, MacBook
 

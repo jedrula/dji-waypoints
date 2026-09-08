@@ -13,7 +13,7 @@
 
 import { toPuwg92, inPoland } from './puwg92.js';
 import { insideRing } from './prism.js';
-import { serviceUrl } from './service.js';
+import { serviceUrl, serviceHeaders } from './service.js';
 
 
 // The grid comes from the service rather than being written down twice. If the
@@ -22,7 +22,7 @@ import { serviceUrl } from './service.js';
 let geometry = null;
 async function grid(fetchImpl) {
   if (geometry) return geometry;
-  const res = await fetchImpl(`${serviceUrl()}/v1/health`);
+  const res = await fetchImpl(`${serviceUrl()}/v1/health`, { headers: serviceHeaders() });
   if (!res.ok) throw new Error(`heights service answered ${res.status}`);
   const h = await res.json();
   geometry = { tileMetres: h.tileMetres, size: h.size };
@@ -42,7 +42,7 @@ async function fetchTile(tn, te, { fetchImpl, signal, waitMs, onWait }) {
   const until = Date.now() + waitMs;
   let told = false;
   for (;;) {
-    const res = await fetchImpl(`${serviceUrl()}/v1/tile/${tn}/${te}`, { signal });
+    const res = await fetchImpl(`${serviceUrl()}/v1/tile/${tn}/${te}`, { headers: serviceHeaders(), signal });
     if (res.status === 200) {
       const data = new Uint8Array(await res.arrayBuffer());
       tiles.set(key, data);

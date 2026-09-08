@@ -7,9 +7,9 @@
 // obstacle list uses and live in synced.js; what is left here is what a plan
 // record actually is.
 
-import { createSyncedStore, merge, SYNC_KEY } from './synced.js';
+import { createSyncedStore, merge } from './synced.js';
 
-export { merge, SYNC_KEY };
+export { merge };
 
 export function createPlanStore({ storage, fetchImpl, endpoint } = {}) {
   const base = createSyncedStore({

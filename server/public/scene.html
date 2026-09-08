@@ -95,8 +95,14 @@ const lon = Number(params.get('lon') ?? 17.0308393);
 
 const fail = (msg) => { $('bootmsg').innerHTML = `<span class="bad">${msg}</span>`; };
 
+// The service gates every data route on the shape of this header, not on its
+// value -- there is no list of valid keys. This viewer is a debug page served
+// by the service itself, so it names itself rather than borrowing the app's
+// key; nothing has to agree about the value.
+const KEYED = { 'X-Sync-Key': 'scene-viewer-debug-page' };
+
 async function getJSON(url) {
-  const r = await fetch(url);
+  const r = await fetch(url, { headers: KEYED });
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `${r.status}`);
   return r.json();
 }
@@ -109,7 +115,7 @@ const { tn, te } = here.tile;
 $('bootmsg').textContent = 'Reading the point cloud and the orthophoto…';
 const meta = await getJSON(`/v1/scene/${tn}/${te}.json`).catch((e) => { fail(e.message); throw e; });
 
-const raw = await fetch(`/v1/scene/${tn}/${te}?wait=1`).then((r) => r.arrayBuffer());
+const raw = await fetch(`/v1/scene/${tn}/${te}?wait=1`, { headers: KEYED }).then((r) => r.arrayBuffer());
 const N = meta.grid;
 const height = new Uint16Array(raw, 0, N * N);
 const kind = new Uint8Array(raw, N * N * 2, N * N);
@@ -137,7 +143,15 @@ async function loadImage(src, crossOrigin) {
 
 async function gugikOrtho() {
   if (meta.ortho?.empty) return null;
-  return loadImage(`/v1/scene/${tn}/${te}.jpg`);
+  // An <img src> cannot carry a header, so the photo comes down as a blob and
+  // the object URL is what the image loads. The WMTS tiles below are a third
+  // party and stay a plain <img>.
+  const r = await fetch(`/v1/scene/${tn}/${te}.jpg`, { headers: KEYED });
+  if (!r.ok) return null;
+  const blob = URL.createObjectURL(await r.blob());
+  const img = await loadImage(blob);
+  URL.revokeObjectURL(blob);
+  return img;
 }
 
 // GUGiK also publishes the orthophoto as WMTS, and that service is the one
@@ -199,7 +213,7 @@ async function wmtsOrtho() {
 // The wires. Not in the point cloud at any density -- see tools/wire-spike.mjs
 // for the attempt -- so they come from BDOT10k, which knows where they run and
 // not how high they are. The height is the one the voltage implies.
-const wires = await fetch(`/v1/lines/${tn}/${te}`).then((r) => r.json()).catch(() => ({ lines: [] }));
+const wires = await fetch(`/v1/lines/${tn}/${te}`, { headers: KEYED }).then((r) => r.json()).catch(() => ({ lines: [] }));
 
 let ortho = await gugikOrtho();
 if (!ortho) {

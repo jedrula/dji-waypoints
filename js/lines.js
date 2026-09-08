@@ -15,6 +15,7 @@
 import { toPuwg92, toWgs84, inPoland } from './puwg92.js';
 import { spanQuads, LINE_SPAN } from './osm.js';
 import { serviceUrl } from './heights.js';
+import { serviceHeaders } from './service.js';
 
 export const SOURCE = 'bdot';
 
@@ -22,7 +23,7 @@ export const SOURCE = 'bdot';
 let grid = null;
 async function tileGrid(fetchImpl) {
   if (grid) return grid;
-  const res = await fetchImpl(`${serviceUrl()}/v1/health`);
+  const res = await fetchImpl(`${serviceUrl()}/v1/health`, { headers: serviceHeaders() });
   if (!res.ok) throw new Error(`heights service answered ${res.status}`);
   const h = await res.json();
   grid = { tileMetres: h.tileMetres };
@@ -87,7 +88,7 @@ export async function fetchLines(bounds, { fetchImpl = globalThis.fetch, signal,
   for (const [tn, te] of tiles) {
     let body;
     try {
-      const res = await fetchImpl(`${url}/v1/lines/${tn}/${te}`, { signal });
+      const res = await fetchImpl(`${url}/v1/lines/${tn}/${te}`, { headers: serviceHeaders(), signal });
       if (!res.ok) { onProgress?.(++done, tiles.length); continue; }
       body = await res.json();
     } catch {

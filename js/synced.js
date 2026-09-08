@@ -1,5 +1,5 @@
 import { mergeRecords } from '../sync/protocol.js';
-import { serviceUrl } from './service.js';
+import { serviceUrl, serviceHeaders } from './service.js';
 // One person, a few devices, and a list of things worth keeping. Plans were the
 // first such list; the obstacles you draw on the map are the second, and the
 // rule for keeping them in step is the same one -- local first, last write wins
@@ -10,16 +10,6 @@ import { serviceUrl } from './service.js';
 // own records look like.
 //
 // Storage and fetch are injected so this runs under node in the test suite.
-
-// The whole of "logging in", until there is anything to log in to. One person,
-// two devices, one key, compiled into the app -- which means it is as public as
-// the app is, and anyone reading this file can read and write the lists. That
-// is the trade for having no key to copy between devices, and it holds only
-// while a plan list is the sort of thing worth nobody's trouble. A real login
-// replaces this constant with an account id; nothing else changes.
-export const SYNC_KEY = 'andrzej-H5rGhCrCRmPXoRSFUA8etg';
-
-
 
 function newId() {
   const b = new Uint8Array(9);
@@ -110,7 +100,7 @@ export function createSyncedStore({
       const send = before.filter((r) => !local(r));
       const res = await http(`${to.replace(/\/$/, '')}${path}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Sync-Key': SYNC_KEY },
+        headers: serviceHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ [collection]: send }),
       });
       const body = await res.json().catch(() => ({}));

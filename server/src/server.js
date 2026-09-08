@@ -272,6 +272,31 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'OPTIONS') { res.writeHead(204, headers(origin)); return res.end(); }
 
+    // One gate, above the route table, for everything that costs something.
+    //
+    // This check used to live inside the two list routes, which left every
+    // /v1/* route open -- and a /v1/tile miss makes this service download
+    // ~223 MB of LiDAR from GUGiK (measured 2026-09-08 on tile 724/724: four
+    // sheets, 51-60 MB each). A public URL with no key on that route is an
+    // open pipe pointed at a public agency, and BUILD_CONCURRENCY only paces
+    // it. CORS does not help: ORIGIN_OK restricts what a browser may read, not
+    // what curl may ask for.
+    //
+    // The shape is the whole check -- there is no list of valid keys, and for
+    // the two synced lists the key is also the name the records are stored
+    // under. A key that ships inside a public app is a name, not a secret: it
+    // stops crawlers and casual abuse, not anyone who reads the source.
+    //
+    // The viewer page is exempt because a browser navigating to a URL cannot
+    // send a header. It reads no LiDAR; the fetches it then makes are gated
+    // like everything else.
+    const key = req.headers['x-sync-key'] ?? '';
+    const isPage = url.pathname === '/' || url.pathname === '/scene';
+    if (!isPage) {
+      if (origin && !ORIGIN_OK.test(origin)) return send(res, 403, { error: 'origin not allowed' }, origin);
+      if (!/^[A-Za-z0-9_-]{16,128}$/.test(key)) return send(res, 401, { error: 'a sync key is required' }, origin);
+    }
+
     if (url.pathname === '/v1/health') {
       return send(res, 200, {
         ok: true, tileMetres: TILE_M, size: SIZE,
@@ -446,9 +471,6 @@ const server = http.createServer(async (req, res) => {
     // client over is a URL change and nothing else.
     const list = LISTS[url.pathname];
     if (list) {
-      if (origin && !ORIGIN_OK.test(origin)) return send(res, 403, { error: 'origin not allowed' }, origin);
-      const key = req.headers['x-sync-key'] ?? '';
-      if (!/^[A-Za-z0-9_-]{16,128}$/.test(key)) return send(res, 401, { error: 'a sync key is required' }, origin);
       if (req.method === 'GET') return send(res, 200, { [list.field]: await syncStore.get(list, key) }, origin);
       if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' }, origin);
       let raw;

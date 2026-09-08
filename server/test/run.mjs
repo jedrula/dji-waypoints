@@ -254,6 +254,22 @@ console.log('\nsync over HTTP');
      (await post('/nope', { plans: [] })).status === 404);
   ok('a request with no sync key is refused',
      (await post('/obstacles', { obstacles: [] }, {})).status === 401);
+
+  // The gate is above the route table, not inside the list routes. It used to
+  // be inside them, which left every /v1/* route open -- and a /v1/tile miss
+  // downloads ~223 MB of LiDAR from GUGiK, so that was an open pipe pointed at
+  // a public agency rather than merely an unauthenticated read.
+  ok('a data route with no key is refused too, not just the lists',
+     (await fetch(base + '/v1/health')).status === 401);
+  ok('and the same route answers once the key is there',
+     (await fetch(base + '/v1/health', { headers: { 'X-Sync-Key': KEY } })).status === 200);
+  ok('an unknown route with no key is refused before it is a 404',
+     (await fetch(base + '/v1/nope')).status === 401);
+
+  // A browser navigating to a URL cannot send a header, so the viewer page is
+  // the one exemption. It reads no LiDAR; the fetches it then makes are gated.
+  ok('the viewer page loads without a key, because a navigation cannot carry one',
+     (await fetch(base + '/scene')).status === 200);
   ok('a body of the wrong shape is refused',
      (await post('/obstacles', { obstacles: 'not an array' })).status === 400);
   ok('a method the protocol does not use is refused',

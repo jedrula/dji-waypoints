@@ -12,7 +12,8 @@ import { listSlots, install } from '../tools/bridge.mjs';
 import { encodePlan, decodePlan } from '../js/share.js';
 import { readKmz } from '../js/kmzread.js';
 import { routeFromRead, inferPass } from '../js/route.js';
-import { createPlanStore, merge as clientMerge, SYNC_KEY } from '../js/plans.js';
+import { createPlanStore, merge as clientMerge } from '../js/plans.js';
+import { SERVICE_KEY } from '../js/service.js';
 import { merge, clean, cleanObstacle } from '../sync/protocol.js';
 import { createObstacleStore, normalizeRect, overlaps } from '../js/obstacles.js';
 import { checkObstacles, clearingAltitude, segmentBoxDist, pointBoxDist } from '../js/collide.js';
@@ -1063,8 +1064,8 @@ console.log('\nsaved plans');
 
   remotePlans = [{ id: 'remote1', name: 'From the phone', code: 'v1.ddd', updatedAt: Date.now() + 1000 }];
   const res = await store.sync();
-  ok('sync sends the hardcoded key in a header, with nothing to set up', lastRequest.key === SYNC_KEY);
-  ok('and the Worker would accept it', /^[A-Za-z0-9_-]{16,128}$/.test(SYNC_KEY));
+  ok('sync sends the hardcoded key in a header, with nothing to set up', lastRequest.key === SERVICE_KEY);
+  ok('and it is the shape the service checks for', /^[A-Za-z0-9_-]{16,128}$/.test(SERVICE_KEY));
   ok('sync sends tombstones too, so a delete propagates',
      lastRequest.body.plans.some((p) => p.deleted));
   ok('sync pulls the other device\'s plans in', store.list().some((p) => p.name === 'From the phone'));

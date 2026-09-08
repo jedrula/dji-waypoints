@@ -5,6 +5,40 @@ learned, what broke, what state something was left in. What *changed in the code
 is already in `git log` and does not belong here twice; what is still open is in
 `TODO.md`. A line earns its place if you would not find it in either.
 
+## 2026-09-08
+
+`server/` is hosted, at **https://drone.topomatch.com** — a second hostname on
+the Cloudflare tunnel that already fronts another service on the home Linux
+box, and pane 8 of that box's `start-dev.sh`. The deployed app therefore
+measures imported obstacle heights and syncs between devices for the first
+time; both were the same single edit, `DEFAULT_URL` in `js/service.js`.
+
+The ticket that planned this was wrong twice, which was most of the work. It
+assumed nginx fronted that box: nothing there has nginx, and the tunnel's
+origin is a FastAPI gateway proxying by path prefix. Routing through that
+gateway was the natural-looking option and lost on a measurement — it sets
+`Access-Control-Allow-Origin: *` over whatever the origin sent, which does not
+duplicate the header (Starlette overwrites) but does quietly make `ORIGIN_OK`
+decorative. The second hostname keeps the allowlist.
+
+It also called the auth blocker a server-side edit. `js/heights.js`,
+`js/lines.js` and `scene.html` sent no key on any `/v1` fetch, so the key moved
+to `js/service.js` as `SERVICE_KEY` — it is how you talk to the service, not
+how you sync — behind a `serviceHeaders()` helper. `SYNC_KEY` is gone. An
+`<img src>` cannot carry a header, so the viewer page fetches the orthophoto as
+a blob now.
+
+Two numbers worth keeping. A cold `/v1/tile` pulls **223 MB** of LiDAR (tile
+724/724, four sheets), but that is the first tile at a site, not the marginal
+one: over a 2×2 km block it amortises to ~106 MB per tile, **~424 MB per km²**,
+because a GUGiK sheet is ~562 × 594 m and barely spans more than one tile. And
+the box was at **5.2 GB free, 100% full**, or about 12 km² of flying; clearing
+caches, re-downloadable weights and 490 `.ply` exports that had a compressed
+sibling took it to 87 GB. There is still no eviction policy for `var/laz`.
+
+Cost 70 seconds of `api.topomatch.com`: **`SIGHUP` kills cloudflared 2026.3.0
+rather than reloading its config.** Restart it in its pane instead.
+
 ## 2026-09-01
 
 Walk mode: survey a site on foot, one stop per obstacle, and the lowest orbit

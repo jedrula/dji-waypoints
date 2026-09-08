@@ -1196,6 +1196,16 @@ console.log('\nobstacles');
      === undefined);
   ok('a ring closed by repeating its first point is not stored twice',
      store.put({ ...bbox, name: 'Closed (osm)', poly: [...ring, ring[0]] }).poly.length === 4);
+  // A ring that crosses itself does not enclose one definite thing, so there is
+  // no reading of it a check could be sure had covered the building. OSM has
+  // them. Rejecting it here means js/prism.js can trust what it is handed.
+  ok('a ring that crosses itself is refused, and the box stands',
+     store.put({ ...bbox, name: 'Bowtie (osm)',
+       poly: [ring[0], ring[2], ring[1], ring[3]] }).poly === undefined);
+  ok('and one that comes back to graze itself is refused too',
+     store.put({ ...bbox, name: 'Graze (osm)',
+       poly: [ring[0], ring[1], [50.0605, 19.9310], ring[1], ring[2], ring[3]] }).poly
+     === undefined);
 
   // The whole reason this is safe: a ring is never on the wire, so the record
   // the Worker validates has not changed and an old build cannot round-trip a
@@ -1224,6 +1234,183 @@ console.log('\nobstacles');
      sentLocal.obstacles.every((o) => o.poly === undefined));
   ok('the Worker strips a footprint that somehow reached it',
      cleanObstacle({ id: 'abcdef', updatedAt: 1, ...bbox, poly: ring }).poly === undefined);
+}
+
+console.log('\nthe shape a thing actually is');
+{
+  const { localPrisms, localSolid, localRing, earClip, isConvex, ringDist, insideRing }
+    = await import('../js/prism.js');
+
+  // A frame is only ever asked to turn lat/lon into local metres, so a plain
+  // linear one keeps these numbers exact and independent of the projection.
+  const LAT0 = 50.0610;
+  const LON0 = 19.9320;
+  const MLON = 111320 * Math.cos((LAT0 * Math.PI) / 180);
+  const flat = { toLocal: (lat, lon) => ({ x: (lon - LON0) * MLON, y: (lat - LAT0) * 111132 }) };
+  const atMetres = (x, y) => [LAT0 + y / 111132, LON0 + x / MLON];
+  // A w x d block turned `deg` anticlockwise from north-up, as an obstacle.
+  const blockAt = (w, d, deg, height = 10, id = 'blk') => {
+    const th = (deg * Math.PI) / 180;
+    const c = Math.cos(th);
+    const sn = Math.sin(th);
+    const poly = [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2]]
+      .map(([x, y]) => atMetres(x * c - y * sn, x * sn + y * c));
+    const lats = poly.map((v) => v[0]);
+    const lons = poly.map((v) => v[1]);
+    return { id, name: 'Block (osm)', height, poly,
+             north: Math.max(...lats), south: Math.min(...lats),
+             east: Math.max(...lons), west: Math.min(...lons) };
+  };
+
+  // The whole claim, checked against an independent calculation: rotate the
+  // point into the block's own frame and it is a plain rectangle again.
+  const block = blockAt(40, 12, 30);
+  const [piece] = localPrisms(block, flat);
+  const exact = (x, y) => {
+    const th = (-30 * Math.PI) / 180;
+    const lx = x * Math.cos(th) - y * Math.sin(th);
+    const ly = x * Math.sin(th) + y * Math.cos(th);
+    return Math.hypot(Math.max(Math.abs(lx) - 20, 0), Math.max(Math.abs(ly) - 6, 0));
+  };
+  let worst = 0;
+  for (let x = -40; x <= 40; x += 1.7) {
+    for (let y = -40; y <= 40; y += 1.7) {
+      worst = Math.max(worst, Math.abs(ringDist({ x, y }, piece.poly) - exact(x, y)));
+    }
+  }
+  ok(`distance to a turned block matches the exact answer (worst ${worst.toExponential(1)} m)`,
+     worst < 1e-6, `${worst}`);
+  ok('a rectangle at an angle is one convex piece, not a fan of triangles',
+     localPrisms(block, flat).length === 1 && isConvex(piece.poly));
+  ok('and its bounding box still contains it, so the broad phase holds',
+     piece.poly.every((v) => v.x >= piece.min.x - 1e-9 && v.x <= piece.max.x + 1e-9
+       && v.y >= piece.min.y - 1e-9 && v.y <= piece.max.y + 1e-9));
+
+  // The complaint that started this. The box round a 40 x 12 m block at 30 deg
+  // is 40.6 x 30.4 m, so it reaches 15 m either side of a building that is only
+  // 6 m thick. A leg 11 m off the wall is a strike against the box and 11 m of
+  // clear air against the building.
+  const boxOnly = { ...localSolid(block, flat) };
+  delete boxOnly.poly;
+  // A pass flown along the wall, 10 m out from a building only 6 m thick, so
+  // there is exactly 4 m of air. Along the wall rather than across it, because
+  // a leg across a turned building really does go through one end of it.
+  const th30 = Math.PI / 6;
+  const along = { x: Math.cos(th30), y: Math.sin(th30) };
+  const out10 = { x: -Math.sin(th30) * 10, y: Math.cos(th30) * 10 };
+  const legA = { x: out10.x - along.x * 15, y: out10.y - along.y * 15, z: 5 };
+  const legB = { x: out10.x + along.x * 15, y: out10.y + along.y * 15, z: 5 };
+  const asBox = segmentBoxDist(legA, legB, boxOnly).dist;
+  const asShape = segmentBoxDist(legA, legB, piece).dist;
+  ok(`the box calls a pass along the wall a strike (${asBox.toFixed(1)} m)`,
+     asBox < 0.001, `${asBox}`);
+  ok(`the footprint measures the 4 m of air that is there (${asShape.toFixed(3)} m)`,
+     near(asShape, 4, 1e-3), `${asShape}`);
+  // A hover beside the wall, where the answer is a single point's distance.
+  ok('a hover beside the building is exactly as far off as the geometry says',
+     near(segmentBoxDist({ x: 0, y: 11.5, z: 5 }, { x: 0, y: 11.5, z: 6 }, piece).dist,
+       exact(0, 11.5), 1e-6));
+  ok('and a leg over the roof is still a strike, because the building is there',
+     segmentBoxDist({ x: -60, y: 0, z: 5 }, { x: 60, y: 0, z: 5 }, piece).dist < 0.001);
+  ok('a leg above the roof clears it by the height difference',
+     near(segmentBoxDist({ x: -60, y: 0, z: 17 }, { x: 60, y: 0, z: 17 }, piece).dist, 7, 1e-3));
+
+  // An L. This is what rotation could never fix: no single rectangle, at any
+  // angle, is tight round it. 24 x 24 m with a 12 x 12 m bite out of the
+  // north-east corner.
+  const L = {
+    id: 'ell', name: 'L block (osm)', height: 10,
+    poly: [atMetres(0, 0), atMetres(24, 0), atMetres(24, 12), atMetres(12, 12),
+           atMetres(12, 24), atMetres(0, 24)],
+    north: LAT0 + 24 / 111132, south: LAT0, east: LON0 + 24 / MLON, west: LON0,
+  };
+  const pieces = localPrisms(L, flat);
+  ok(`an L becomes convex pieces (${pieces.length})`, pieces.length >= 2);
+  ok('every piece is convex, which is what the ternary search needs',
+     pieces.every((q) => isConvex(q.poly)));
+  ok('every piece belongs to the obstacle it came from',
+     pieces.every((q) => q.id === 'ell'));
+  const area = (r) => Math.abs(r.reduce((a, p, i) => {
+    const q = r[(i + 1) % r.length];
+    return a + p.x * q.y - q.x * p.y;
+  }, 0)) / 2;
+  const cut = pieces.reduce((t, q) => t + area(q.poly), 0);
+  ok(`the pieces add up to the L, no more and no less (${cut.toFixed(0)} m2)`,
+     near(cut, 24 * 24 - 12 * 12, 0.5), `${cut}`);
+  // The bite is the point: it is air, and the app has to know that.
+  const inBite = { x: 18, y: 18, z: 5 };
+  ok('the bite out of the L is outside every piece',
+     pieces.every((q) => ringDist(inBite, q.poly) > 5));
+  ok('and inside the bounding box, which is why the box was not good enough',
+     inBite.x > pieces[0].min.x && inBite.x < 24 && inBite.y < 24);
+  ok('the L knows its own notch is not part of it',
+     insideRing({ x: 18, y: 18 }, localRing(L, flat)) === false
+     && insideRing({ x: 6, y: 6 }, localRing(L, flat)) === true);
+
+  // Winding. OSM rings come both ways round and every test above assumes one.
+  const backwards = { ...L, poly: [...L.poly].reverse() };
+  ok('a ring wound the other way describes the same building',
+     near(area(localRing(backwards, flat)), area(localRing(L, flat)), 0.01)
+     && localPrisms(backwards, flat).every((q) => isConvex(q.poly)));
+
+  // Degrading. Every way of failing has to land on the rectangle.
+  ok('a bow-tie ring is not a building, and yields the box it always was',
+     earClip([{ x: 0, y: 0 }, { x: 10, y: 10 }, { x: 10, y: 0 }, { x: 0, y: 10 }]) === null);
+  const bow = { id: 'bow', name: 'Bow (osm)', height: 9,
+                poly: [atMetres(0, 0), atMetres(10, 10), atMetres(10, 0), atMetres(0, 10)],
+                north: LAT0 + 10 / 111132, south: LAT0, east: LON0 + 10 / MLON, west: LON0 };
+  const bowPieces = localPrisms(bow, flat);
+  ok('and the box is what the collision check then measures',
+     bowPieces.length === 1 && bowPieces[0].poly === undefined);
+  // Near-collinear points are what a curved terrace is made of, and they used
+  // to be able to defeat the clipper.
+  const arc = [];
+  for (let i = 0; i <= 20; i++) arc.push({ x: i, y: Math.round(i * 1e-9 * 1e9) * 0 });
+  ok('a run of collinear points does not defeat the clipper',
+     earClip([...arc.map((q) => ({ x: q.x, y: 0 })), { x: 20, y: 8 }, { x: 0, y: 8 }]) !== null);
+  ok('a tapped obstacle has no ring at all and costs nothing',
+     localPrisms({ id: 't', name: 'Oak', height: 4, north: 50.062, south: 50.0619,
+                   east: 19.9325, west: 19.9324 }, flat)[0].poly === undefined);
+
+  // Back together again. The check measures pieces and reports buildings: a
+  // reading that said "the flight hits 4 obstacles" about one L-shaped block
+  // would be a worse answer than the fat box ever gave.
+  const tall = { ...L, height: 80 };
+  const hit = checkObstacles(m, localPrisms(tall, m.frame), { clearance: 5 });
+  ok(`an L-shaped building is one obstacle in the verdict, not its pieces (${hit.obstacles.length})`,
+     hit.obstacles.length === 1, `${hit.obstacles.length}`);
+  ok('and it is named by the obstacle, not by a triangle', hit.obstacles[0].id === 'ell');
+  ok('a plan that goes through it says so once',
+     hit.strikes === 1 && hit.obstacles[0].grade === 'strike');
+  ok('the legs it flags all point back at the same obstacle',
+     hit.legs.length > 0 && hit.legs.every((l) => l.obstacle === 'ell'));
+  ok('the height reported is the building\'s, whichever piece was closest',
+     hit.obstacles[0].height === 80);
+  // The distance has to be the closest piece's, not the last one measured.
+  const far = { ...L, height: 2 };
+  const clear = checkObstacles(m, localPrisms(far, m.frame), { clearance: 5 });
+  const perPiece = localPrisms(far, m.frame)
+    .map((q) => checkObstacles(m, [q], { clearance: 5 }).obstacles[0].dist);
+  ok('and the distance is the closest piece, measured exactly',
+     near(clear.obstacles[0].dist, Math.min(...perPiece), 1e-9));
+
+  // The altitude search has to measure against the same geometry as the check,
+  // or auto-fit blesses a plan the check then refuses. That bug has happened
+  // here before, with a 40 x 12 m building squared off to 12 m.
+  const withShape = _pp(
+    { points: pointsFromRect(rect, 3), shape: 'rect',
+      obstacles: [{ lat: (tall.north + tall.south) / 2, lon: (tall.east + tall.west) / 2,
+                    height: 80, span: 24, spanX: 24, spanY: 24,
+                    poly: tall.poly, north: tall.north, south: tall.south,
+                    east: tall.east, west: tall.west, capture: false }] },
+    { ...DEFAULTS, subjectClearance: 5 }, cam);
+  const chosen = withShape?.mission;
+  ok('auto-fit still returns a plan when a footprint is in the way', Boolean(chosen));
+  if (chosen) {
+    const verdict = checkObstacles(chosen, localPrisms(tall, chosen.frame), { clearance: 5 });
+    ok('and the plan it blesses is one the collision check agrees is clear',
+       verdict.strikes === 0, `${verdict.strikes} strikes`);
+  }
 }
 
 console.log('\nwalking the site');

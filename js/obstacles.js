@@ -46,8 +46,14 @@ export const DEFAULT_CLEARANCE = 5;
 //
 //   * the stored rectangle always CONTAINS the stored ring, so the rectangle
 //     stays a usable broad phase -- nothing can hide outside it;
-//   * anything that is not a ring of at least three points inside that
+//   * anything that is not a SIMPLE ring of at least three points inside that
 //     rectangle is dropped, and the obstacle is the box it always was.
+//
+// Simple means it does not cross itself. OSM has buildings that do, and the
+// only honest reading of one is the rectangle: a ring that crosses itself does
+// not enclose a definite thing, so nothing downstream can be sure it has
+// covered the building. Checking it once, here, is far cheaper than checking it
+// on every plan -- and it means js/prism.js can trust what it is handed.
 const MAX_POLY = 200;      // p90 of real footprints is 28 points
 const POLY_SLACK = 2e-6;   // about 20 cm, the rounding either side
 function cleanPoly(poly, rect) {
@@ -68,7 +74,39 @@ function cleanPoly(poly, rect) {
   while (out.length > 1 && out[0][0] === out[out.length - 1][0] && out[0][1] === out[out.length - 1][1]) {
     out.pop();
   }
-  return out.length >= 3 ? out : null;
+  if (out.length < 3) return null;
+  return isSimpleRing(out) ? out : null;
+}
+
+// Does the ring cross itself? Every pair of edges that do not share a point,
+// tested for a proper crossing. O(n^2) on a ring of at most 200 points, once
+// per record rather than once per plan.
+const turn = (a, b, c) => Math.sign((b[1] - a[1]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[1] - a[1]));
+function crosses(a, b, c, d) {
+  const t1 = turn(a, b, c);
+  const t2 = turn(a, b, d);
+  const t3 = turn(c, d, a);
+  const t4 = turn(c, d, b);
+  // Touching counts: a ring that comes back to graze itself does not enclose
+  // one definite thing either, and the box is the safe reading of both.
+  if (t1 === 0 && t2 === 0) {
+    const between = (p, q, r) => Math.min(p[0], r[0]) <= q[0] && q[0] <= Math.max(p[0], r[0])
+      && Math.min(p[1], r[1]) <= q[1] && q[1] <= Math.max(p[1], r[1]);
+    return between(a, c, b) || between(a, d, b) || between(c, a, d) || between(c, b, d);
+  }
+  return t1 !== t2 && t3 !== t4;
+}
+function isSimpleRing(ring) {
+  const n = ring.length;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      // Adjacent edges share a point on purpose; the pair that wraps round the
+      // end of the ring is adjacent too.
+      if (j === i + 1 || (i === 0 && j === n - 1)) continue;
+      if (crosses(ring[i], ring[(i + 1) % n], ring[j], ring[(j + 1) % n])) return false;
+    }
+  }
+  return true;
 }
 
 export function createObstacleStore({ storage, fetchImpl, endpoint, local } = {}) {

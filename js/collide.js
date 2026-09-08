@@ -11,20 +11,34 @@
 // Every height in this app is above the takeoff point, so a box on a slope is
 // only as right as the height you gave it.
 
-// Distance from a point to an axis-aligned box; zero inside it.
+import { ringDist } from './prism.js';
+
+// Distance from a point to one solid; zero inside it.
+//
+// A solid is a footprint extruded from the ground. When it carries a `poly`
+// -- a CONVEX ring in the same local metres, see js/prism.js -- the flat part
+// of the distance comes from the ring instead of from two subtractions. The
+// vertical part, and the hypot that puts them together, are unchanged: a
+// convex prism is a convex polygon crossed with a height range, so the
+// distance separates exactly the way a box's three sides always did.
 export function pointBoxDist(p, b) {
+  const dz = Math.max(b.min.z - p.z, 0, p.z - b.max.z);
+  if (b.poly) return Math.hypot(ringDist(p, b.poly), dz);
   const dx = Math.max(b.min.x - p.x, 0, p.x - b.max.x);
   const dy = Math.max(b.min.y - p.y, 0, p.y - b.max.y);
-  const dz = Math.max(b.min.z - p.z, 0, p.z - b.max.z);
   return Math.hypot(dx, dy, dz);
 }
 
-// Distance from a segment to a box, and where along it that happens.
+// Distance from a segment to a solid, and where along it that happens.
 //
-// Point-to-box distance is a convex function of the point, and a segment is an
-// affine function of t, so the composition is convex in t with exactly one
+// Point-to-solid distance is a convex function of the point, and a segment is
+// an affine function of t, so the composition is convex in t with exactly one
 // minimum. Ternary search walks straight to it -- no sampling, and so no near
 // miss slipping between two samples -- for about forty distance evaluations.
+//
+// That argument is why js/prism.js cuts a footprint into convex pieces before
+// anything gets here. Distance to a convex set is convex whatever its shape;
+// distance to an L is not, and the search could then settle in the wrong dip.
 export function segmentBoxDist(p0, p1, b) {
   const at = (t) => ({
     x: p0.x + (p1.x - p0.x) * t,
@@ -47,6 +61,10 @@ export function segmentBoxDist(p0, p1, b) {
 // leg, so this is a true lower bound on the segment-to-box distance -- which is
 // what lets most legs be dismissed in six subtractions instead of forty
 // distance evaluations.
+//
+// This is where the bounding box earns its keep now that it is no longer the
+// obstacle: a solid's box contains the solid, so the bound stays true and being
+// generous only means a few more exact measurements.
 function aabbGap(s, b) {
   const dx = Math.max(b.min.x - s.max.x, 0, s.min.x - b.max.x);
   const dy = Math.max(b.min.y - s.max.y, 0, s.min.y - b.max.y);
@@ -58,6 +76,25 @@ function aabbGap(s, b) {
 // if it comes within the clearance. Both are worth seeing, and they are not the
 // same news, so they do not get the same colour.
 const gradeOf = (dist, clearance) => (dist <= 0.001 ? 'strike' : dist < clearance ? 'near' : null);
+
+// One entry per OBSTACLE, from however many convex pieces it was cut into.
+// Pieces share their obstacle's id, so this is where an L-shaped building stops
+// being four triangles and goes back to being a building: the closest piece is
+// the closest approach, the worst grade is the grade, and "the flight hits 2
+// obstacles" counts buildings rather than triangles.
+function byObstacle(pieces) {
+  const worst = { strike: 2, near: 1 };
+  const out = new Map();
+  for (const p of pieces) {
+    const prev = out.get(p.id);
+    if (!prev) { out.set(p.id, { ...p }); continue; }
+    prev.legs += p.legs;
+    if ((worst[p.grade] ?? 0) > (worst[prev.grade] ?? 0)) prev.grade = p.grade;
+    if (p.dist < prev.dist) { prev.dist = p.dist; prev.at = p.at; }
+    prev.height = Math.max(prev.height, p.height);
+  }
+  return [...out.values()];
+}
 
 export function checkObstacles(mission, boxes, { clearance = 5 } = {}) {
   const empty = { clearance, obstacles: [], legs: [], strikes: 0, near: 0, minDist: null };
@@ -147,13 +184,13 @@ export function checkObstacles(mission, boxes, { clearance = 5 } = {}) {
       obstacle: l.obstacle,
     }));
 
-  obstacles.sort((a, c) => a.dist - c.dist);
+  const found = byObstacle(obstacles).sort((a, c) => a.dist - c.dist);
   return {
     clearance,
-    obstacles,
+    obstacles: found,
     legs,
-    strikes: obstacles.filter((o) => o.grade === 'strike').length,
-    near: obstacles.filter((o) => o.grade === 'near').length,
+    strikes: found.filter((o) => o.grade === 'strike').length,
+    near: found.filter((o) => o.grade === 'near').length,
     minDist: minDist === Infinity ? null : minDist,
   };
 }
@@ -170,6 +207,7 @@ export function clearingAltitude(mission, boxes, clearance = 5) {
   for (const b of boxes) {
     const over = path.some((w) => {
       const l = f.toLocal(w.lat, w.lon);
+      if (b.poly) return ringDist(l, b.poly) < clearance;
       return l.x > b.min.x - clearance && l.x < b.max.x + clearance
           && l.y > b.min.y - clearance && l.y < b.max.y + clearance;
     });

@@ -33,7 +33,8 @@ import { routeFromRead } from './route.js';
 import { createBasemaps } from './basemap.js';
 import { createSite, pointOf, spanMOf, spansOf, isEstimated, isImported, labelOf,
   DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS } from './site.js';
-import { localBox, overlaps } from './obstacles.js';
+import { overlaps } from './obstacles.js';
+import { localPrisms, localSolid } from './prism.js';
 import { checkObstacles, clearingAltitude } from './collide.js';
 import { createHistory } from './history.js';
 import { judgeFix, parseHeight, MAX_ACCURACY } from './walk.js';
@@ -430,6 +431,10 @@ const siteForPlanner = () => ({
     return {
       ...pointOf(o), height: o.height,
       span: Math.max(sp.x, sp.y), spanX: sp.x, spanY: sp.y,
+      // The outline as well as the box. The altitude search measures against
+      // the same geometry the collision check does, and the spans are still
+      // what decides how far out a ring has to stand.
+      poly: o.poly, north: o.north, south: o.south, east: o.east, west: o.west,
       capture: !isImported(o),
     };
   }),
@@ -767,7 +772,9 @@ function settleSoon() {
     if (!tuned) autoFit();
     if (!state.mission) return;
     readTerrain();
-    const boxes = nearbyObstacles().map((o) => localBox(o, state.mission.frame));
+    // Convex pieces, not whole solids: what blocks a camera is worked out by
+    // clipping a ray against a convex thing, and an L is not one.
+    const boxes = nearbyObstacles().flatMap((o) => localPrisms(o, state.mission.frame));
     state.coverage = scoreCoverage(state.mission, { maxCameras: 220, boxes });
     // Tagged so a later replan can tell whether this score is still about the
     // flight on screen, rather than leaving yesterday's number sitting there.
@@ -948,13 +955,17 @@ function computePlan() {
     return;
   }
 
-  const boxes = boxes0.map((o) => localBox(o, state.mission.frame));
+  // Two shapes of the same obstacles, for two jobs. The maths wants convex
+  // pieces, because that is what makes the distance search exact; the eye wants
+  // one solid per thing, because that is what a building is. See js/prism.js.
+  const prisms = boxes0.flatMap((o) => localPrisms(o, state.mission.frame));
+  const solids = boxes0.map((o) => localSolid(o, state.mission.frame));
   // Last score stays on screen only if it belongs to this many waypoints;
   // otherwise the tile says so until the new one lands.
   if (state.coverage?.forWaypoints !== state.mission.stats.waypoints) state.coverage = null;
-  state.hazard = checkObstacles(state.mission, boxes, { clearance: clearance() });
+  state.hazard = checkObstacles(state.mission, prisms, { clearance: clearance() });
   state.clearAlt = (state.hazard.strikes || state.hazard.near)
-    ? clearingAltitude(state.mission, boxes, { clearance: clearance() })
+    ? clearingAltitude(state.mission, prisms, { clearance: clearance() })
     : null;
 
   drawRoute();
@@ -963,7 +974,7 @@ function computePlan() {
   renderIdentity();
   if (state.onDevice) showDeviceRoute(null);
   view3d.setMission(state.mission, state.coverage);
-  view3d.setObstacles(graded(boxes), state.hazard.legs);
+  view3d.setObstacles(graded(solids), state.hazard.legs);
   writeUrl();
   settleSoon();
 }
@@ -1212,7 +1223,7 @@ function showDeviceRoute(src) {
   if (!state.onDevice) {
     view3d.setMission(state.mission, state.coverage);
     view3d.setObstacles(
-      state.mission ? graded(nearbyObstacles().map((o) => localBox(o, state.mission.frame))) : [],
+      state.mission ? graded(nearbyObstacles().map((o) => localSolid(o, state.mission.frame))) : [],
       state.hazard?.legs ?? [],
     );
     return;
@@ -1222,7 +1233,7 @@ function showDeviceRoute(src) {
   // Ungraded: every grade on screen belongs to the plan, and colouring someone
   // else's route with the plan's verdict would be a lie in the most expensive
   // possible place.
-  view3d.setObstacles(nearbyObstacles().map((o) => localBox(o, state.onDevice.frame)), []);
+  view3d.setObstacles(nearbyObstacles().map((o) => localSolid(o, state.onDevice.frame)), []);
   map.fitBounds(L.latLngBounds(state.onDevice.waypoints.map((w) => [w.lat, w.lon])),
     { padding: [40, 40], maxZoom: 21 });
 }

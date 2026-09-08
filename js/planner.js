@@ -2,6 +2,7 @@ import { frame, distM, bearing } from './geo.js';
 import { footprint, gsdCm, fov } from './camera.js';
 import { footprintOf, bounds, centroid, circumradius, polygonArea, clipSegment, DEFAULT_SHAPE } from './shape.js';
 import { checkObstacles } from './collide.js';
+import { localPrisms, ringDist } from './prism.js';
 
 // A 3DGS-oriented capture over the points you tapped. Three passes, in this order:
 //   1. nadir grid         - metric backbone, gimbal -90
@@ -270,11 +271,27 @@ export function subjectsOf(local, hull, avoid = [], f, { all = false } = {}) {
       span,
       spanX: o.spanX ?? span,
       spanY: o.spanY ?? span,
+      // The convex pieces of its outline, when it has one. `span` still says
+      // how far out a ring must stand; this says where the ring has to climb.
+      // Null rather than an empty list when the outline was refused: an empty
+      // one would read as "no piece is anywhere near" and quietly stop the
+      // thing raising the ring at all.
+      ring: ringsOf(o, f),
       height: o.height,
       kind: 'obstacle',
     });
   }
   return out;
+}
+
+// The convex pieces of an obstacle's outline, or null if it has none the maths
+// can use. js/prism.js falls back to the bounding box in that case, which comes
+// back here without a `poly`, and a list of nothing is not the same answer as
+// no list at all.
+function ringsOf(o, f) {
+  if (!o.poly) return null;
+  const rings = localPrisms(o, f).map((q) => q.poly).filter(Boolean);
+  return rings.length ? rings : null;
 }
 
 // One dome around ONE thing.
@@ -335,9 +352,13 @@ function objectPass(g) {
   const floorAt = (x, y) => {
     let z = 0;
     for (const o of others) {
-      const gapX = Math.max(Math.abs(x - o.x) - (o.spanX ?? o.span) / 2, 0);
-      const gapY = Math.max(Math.abs(y - o.y) - (o.spanY ?? o.span) / 2, 0);
-      if (Math.hypot(gapX, gapY) < clearance) z = Math.max(z, o.height + clearance);
+      // A ring, when the neighbour has one: a ring that raises the arc it
+      // actually stands under, rather than the arc its bounding box covers.
+      const gap = o.ring
+        ? Math.min(...o.ring.map((r) => ringDist({ x, y }, r)))
+        : Math.hypot(Math.max(Math.abs(x - o.x) - (o.spanX ?? o.span) / 2, 0),
+                     Math.max(Math.abs(y - o.y) - (o.spanY ?? o.span) / 2, 0));
+      if (gap < clearance) z = Math.max(z, o.height + clearance);
     }
     return z;
   };
@@ -984,15 +1005,21 @@ export function proposePlan(site, base, cam, budget = {}) {
     // off here made auto-fit measure a 40 x 12 m building as a 12 m square,
     // bless an altitude, and hand back a plan the check then reported ten
     // strikes against.
-    const local = boxes.map((o, i) => {
+    const local = boxes.flatMap((o, i) => {
+      // The outline when the obstacle has one, for the same reason the check
+      // uses it: the box round a real building is a median 1.9x too big, and
+      // blessing an altitude against the box means refusing altitudes that are
+      // clear -- or worse, measuring a diagonal building as the square it sits
+      // in and getting the whole answer somewhere else.
+      if (o.poly) return localPrisms({ ...o, id: `a${i}` }, m.frame);
       const c = m.frame.toLocal(o.lat, o.lon);
       const hx = (o.spanX ?? o.span ?? SUBJECT_SPAN) / 2;
       const hy = (o.spanY ?? o.span ?? SUBJECT_SPAN) / 2;
-      return {
+      return [{
         id: `a${i}`,
         min: { x: c.x - hx, y: c.y - hy, z: 0 },
         max: { x: c.x + hx, y: c.y + hy, z: Math.max(0.1, o.height) },
-      };
+      }];
     });
     return checkObstacles(m, local, { clearance }).strikes > 0;
   };

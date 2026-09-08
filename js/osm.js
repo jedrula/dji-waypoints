@@ -43,9 +43,6 @@ export const ASSUMED = {
 // (0 of 9908 trees carried a crown diameter), so both are conventions.
 const TREE_SPAN = 7;
 export const LINE_SPAN = 8;
-// Spans are chopped into pieces so that a diagonal run does not become one
-// enormous axis-aligned box: a 200 m diagonal would block a 200 m square.
-export const LINE_STEP = 25;
 
 const M_PER_DEG_LAT = 111132;
 const mPerDegLon = (lat) => 111320 * Math.cos((lat * Math.PI) / 180);
@@ -97,24 +94,59 @@ function powerHeight(tags) {
   return tags.power === 'line' ? ASSUMED.powerHigh : ASSUMED.powerLow;
 }
 
-// A span cut into pieces of at most LINE_STEP, each becoming one box. Returns
-// the boxes rather than the points, because the caller only wants obstacles.
-export function spanBoxes(geometry, span) {
+// A wire is a strip: one obstacle per straight run, `span` wide, lying along
+// the run at whatever angle the run happens to be at.
+//
+// This used to chop each run into 25 m pieces and put an axis-aligned box round
+// every piece, because a single box round a 200 m diagonal would wall off a
+// 200 m square of sky. A strip needs no chopping -- it is already the shape of
+// the wire -- so a 200 m run is one obstacle instead of eight, and the eight
+// were each still nearly twice as wide as the wire.
+export function spanQuads(geometry, span) {
   const out = [];
+  const half = span / 2;
   for (let i = 1; i < geometry.length; i++) {
     const a = geometry[i - 1];
     const b = geometry[i];
-    const dLat = (b.lat - a.lat) * M_PER_DEG_LAT;
-    const dLon = (b.lon - a.lon) * mPerDegLon(a.lat);
-    const len = Math.hypot(dLat, dLon);
-    const steps = Math.max(1, Math.ceil(len / LINE_STEP));
-    for (let k = 0; k < steps; k++) {
-      const t = (k + 0.5) / steps;
-      out.push(boxAround(a.lat + (b.lat - a.lat) * t, a.lon + (b.lon - a.lon) * t, span));
-    }
+    const mLon = mPerDegLon(a.lat);
+    const dx = (b.lon - a.lon) * mLon;
+    const dy = (b.lat - a.lat) * M_PER_DEG_LAT;
+    const len = Math.hypot(dx, dy);
+    // Two mapped points in the same place are not a run of wire.
+    if (len < 0.01) continue;
+    // Out to the side of the run, half a span each way. A bend leaves a wedge
+    // uncovered on its outside, which is air: the wire itself is inside both
+    // strips, because both of them contain the vertex they meet at.
+    const px = (-dy / len) * half;
+    const py = (dx / len) * half;
+    const dLat = py / M_PER_DEG_LAT;
+    const dLon = px / mLon;
+    const poly = [
+      [a.lat + dLat, a.lon + dLon],
+      [b.lat + dLat, b.lon + dLon],
+      [b.lat - dLat, b.lon - dLon],
+      [a.lat - dLat, a.lon - dLon],
+    ];
+    out.push({ ...bboxOfPairs(poly), poly });
   }
   return out;
 }
+
+// The rectangle round a ring of [lat, lon] pairs. The importers hand the store
+// a rectangle AND the ring inside it, because the rectangle is what every
+// broad phase already uses and js/obstacles.js requires it to contain the ring.
+function bboxOfPairs(pairs) {
+  const lats = pairs.map((p) => p[0]);
+  const lons = pairs.map((p) => p[1]);
+  return {
+    north: Math.max(...lats), south: Math.min(...lats),
+    east: Math.max(...lons), west: Math.min(...lons),
+  };
+}
+
+// An OSM way's geometry as the ring the store keeps. Closed ways repeat their
+// first point; js/obstacles.js drops that, so it is left alone here.
+const ringOf = (geometry) => geometry.map((g) => [g.lat, g.lon]);
 
 function bboxOf(geometry, pad = 0) {
   const lats = geometry.map((g) => g.lat);
@@ -158,7 +190,12 @@ export function toObstacles(elements, { max = 400 } = {}) {
       // Only a tagged metric height counts as known. A storey count is a
       // decent estimate and still a 3 m one, so it stays marked so the heights
       // service will measure over the top of it.
-      push(bboxOf(e.geometry), h ?? ASSUMED.building, label, tagged === null);
+      // The footprint, not a box round it. A box round a real building is a
+      // median 1.9-2.1x too big and more than 1.5x too big for nine in ten of
+      // them, which is sky the planner reads as blocked and LiDAR cells that
+      // belong to the neighbour's roof.
+      push({ ...bboxOf(e.geometry), poly: ringOf(e.geometry) },
+        h ?? ASSUMED.building, label, tagged === null);
     } else if (t.natural === 'tree' && Number.isFinite(e.lat)) {
       const h = metres(t.height);
       push(boxAround(e.lat, e.lon, TREE_SPAN), h ?? ASSUMED.tree,
@@ -169,7 +206,7 @@ export function toObstacles(elements, { max = 400 } = {}) {
       const label = v >= 1000 ? `${Math.round(v / 1000)} kV line` : 'Power line';
       // Every span is an assumed height: no tower or pole in the sample
       // carried one, and the sag between them is not in OSM at all.
-      for (const rect of spanBoxes(e.geometry, LINE_SPAN)) push(rect, h, label, true);
+      for (const rect of spanQuads(e.geometry, LINE_SPAN)) push(rect, h, label, true);
     }
   }
   return out;

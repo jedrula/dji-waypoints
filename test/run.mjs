@@ -1372,14 +1372,61 @@ console.log('\nwhat is already standing here');
   ok('an untagged tree gets the assumed height, marked',
      byLabel('Tree')[0].height === ASSUMED.tree && byLabel('Tree')[0].assumed === true);
 
-  // The reason spans are chopped: one box round a 300 m diagonal would wall off
-  // a 300 m square of sky.
+  // A wire is a strip, so a diagonal run needs no chopping. This used to be
+  // twelve axis-aligned boxes for the one span, each of them nearly twice as
+  // wide as the wire, because a single box round the run would have walled off
+  // a 200 m square of sky. The strip IS the run.
+  const { LINE_SPAN } = await import('../js/osm.js');
+  const metresApart = (u, v, lat) => Math.hypot(
+    (v[1] - u[1]) * 111320 * Math.cos((lat * Math.PI) / 180), (v[0] - u[0]) * 111132);
   const span = byLabel('110 kV');
-  ok(`a long span becomes many short boxes (${span.length})`, span.length > 8);
+  ok(`a long diagonal run is one strip, not a row of boxes (${span.length})`, span.length === 1);
   ok('every piece stands at the height its voltage implies',
      span.every((b) => b.height === ASSUMED.powerHigh && b.assumed === true));
-  const widest = Math.max(...span.map((b) => (b.north - b.south) * 111132));
-  ok(`and no piece is a huge box (${widest.toFixed(0)} m across)`, widest < 30, `${widest}`);
+  ok('the strip is four corners, not a rectangle', span[0].poly.length === 4);
+  const across = metresApart(span[0].poly[0], span[0].poly[3], 51.104);
+  const along = metresApart(span[0].poly[0], span[0].poly[1], 51.104);
+  ok(`and it is as wide as the wire, not as wide as the run (${across.toFixed(1)} m)`,
+     near(across, LINE_SPAN, 0.2), `${across}`);
+  ok(`while running the length of the span (${along.toFixed(0)} m)`, along > 200, `${along}`);
+  // The rectangle is still the broad phase, and it is still allowed to be the
+  // whole diagonal square -- nothing may hide outside it.
+  ok('the rectangle round the strip still contains it',
+     span[0].poly.every((v) => v[0] <= span[0].north + 1e-9 && v[0] >= span[0].south - 1e-9
+       && v[1] <= span[0].east + 1e-9 && v[1] >= span[0].west - 1e-9));
+
+  // A building keeps the outline the source holds. A 40 x 12 m block at 30 deg
+  // is the case from the screenshot that started this: the box round it is
+  // 2.6x its own area, all of it sky the planner reads as blocked.
+  const blockRing = (() => {
+    const [lat0, lon0, w, d, deg] = [51.11, 17.06, 40, 12, 30];
+    const th = (deg * Math.PI) / 180;
+    const mLon = 111320 * Math.cos((lat0 * Math.PI) / 180);
+    return [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2]]
+      .map(([x, y]) => ({ lat: lat0 + (x * Math.sin(th) + y * Math.cos(th)) / 111132,
+                          lon: lon0 + (x * Math.cos(th) - y * Math.sin(th)) / mLon }));
+  })();
+  const [diag] = toObstacles([{ tags: { building: 'yes', height: '10' }, geometry: blockRing }]);
+  ok('a building keeps its outline rather than a box round it', diag.poly?.length === 4);
+  const toXY = (v) => ({ x: (v[1] - 17.06) * 111320 * Math.cos((51.11 * Math.PI) / 180),
+                         y: (v[0] - 51.11) * 111132 });
+  const trueArea = polygonArea(diag.poly.map(toXY));
+  const boxArea = (diag.north - diag.south) * 111132
+                * (diag.east - diag.west) * 111320 * Math.cos((51.11 * Math.PI) / 180);
+  ok(`the outline is the real 480 m2 (${trueArea.toFixed(0)})`, near(trueArea, 480, 5),
+     `${trueArea}`);
+  ok(`where the box round it is 2.6x that (${(boxArea / trueArea).toFixed(1)}x)`,
+     boxArea / trueArea > 2.5, `${boxArea / trueArea}`);
+  // The importer hands on what OSM gave it, repeated closing point and all;
+  // dropping that is the store's job, and it is tested there.
+  ok('a closed way is passed on as it arrived',
+     toObstacles([{ tags: { building: 'yes' },
+       geometry: [...blockRing, blockRing[0]] }])[0].poly.length === 5);
+
+  // A crown has no outline anywhere in OSM -- 0 of 9908 trees carried even a
+  // diameter -- so a tree stays the square it always was, honestly.
+  ok('a tree is still a box, because a crown has no outline to keep',
+     byLabel('Tree')[0].poly === undefined && byLabel('Platanus')[0].poly === undefined);
 
   // Nothing may be imported without a decision about its height.
   ok('everything imported carries an explicit assumed flag',

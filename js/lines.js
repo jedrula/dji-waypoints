@@ -13,7 +13,7 @@
 // the assumption its voltage implies.
 
 import { toPuwg92, toWgs84, inPoland } from './puwg92.js';
-import { spanBoxes, LINE_SPAN } from './osm.js';
+import { spanQuads, LINE_SPAN } from './osm.js';
 import { serviceUrl } from './heights.js';
 
 export const SOURCE = 'bdot';
@@ -42,16 +42,15 @@ export function tilesFor(bounds, tileMetres) {
   return out;
 }
 
-// One line's tile-local metres become the boxes the collision check works in.
-// The chopping is osm.js's, deliberately: a diagonal span cut into one box
-// would wall off a square the length of the span, and that rule should exist
-// once however many importers need it.
+// One line's tile-local metres become the strips the collision check works in.
+// The strip is osm.js's, deliberately: a wire is the same shape whichever
+// importer found it, and that rule should exist once however many need it.
 export function lineToObstacles(line, { tn, te, tileMetres }) {
   const e0 = te * tileMetres;
   const n0 = tn * tileMetres;
   const geometry = line.points.map(([x, y]) => toWgs84(e0 + x, n0 + y));
   if (geometry.length < 2) return [];
-  return spanBoxes(geometry, LINE_SPAN).map((rect) => ({
+  return spanQuads(geometry, LINE_SPAN).map((rect) => ({
     ...rect,
     height: line.height,
     label: line.label,

@@ -215,6 +215,10 @@ export function createSite({ onChange = () => {}, onSync = () => {}, storage, fe
         const rect = normalizeRect({ north: f.north, south: f.south, east: f.east, west: f.west });
         obstacles.put({
           ...rect,
+          // The outline the source actually holds, when there is one. The store
+          // validates it against the rectangle and drops anything it cannot
+          // trust, so passing it on is never worse than not having it.
+          poly: f.poly,
           height: Math.max(0, f.height),
           name: `${f.assumed ? EST_PREFIX : ''}${f.label} (${f.source ?? IMPORTED})`,
         });

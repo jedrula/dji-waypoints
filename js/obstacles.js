@@ -152,20 +152,6 @@ export function normalizeRect(r) {
 export const overlaps = (a, b) =>
   a.west < b.east && a.east > b.west && a.south < b.north && a.north > b.south;
 
-// The obstacle as an axis-aligned box in a mission's local ENU metres. The
-// frame is ellipsoidal, so a box drawn 200 m from the plan centre is still
-// where you drew it.
-export function localBox(o, frame) {
-  const a = frame.toLocal(o.south, o.west);
-  const b = frame.toLocal(o.north, o.east);
-  return {
-    id: o.id,
-    name: o.name,
-    min: { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), z: 0 },
-    max: { x: Math.max(a.x, b.x), y: Math.max(a.y, b.y), z: Math.max(0.1, o.height) },
-  };
-}
-
 // A name nobody typed. Height is the one thing every box has, so it is what
 // stands in for a name -- and it is more use than "Untitled" would be.
 export const describe = (o) => o.name || `${o.height} m box`;

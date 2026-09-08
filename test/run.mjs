@@ -14,8 +14,9 @@ import { readKmz } from '../js/kmzread.js';
 import { routeFromRead, inferPass } from '../js/route.js';
 import { createPlanStore, merge as clientMerge, SYNC_KEY } from '../js/plans.js';
 import worker, { merge as workerMerge, clean, cleanObstacle } from '../sync/worker.js';
-import { createObstacleStore, localBox, normalizeRect, overlaps } from '../js/obstacles.js';
+import { createObstacleStore, normalizeRect, overlaps } from '../js/obstacles.js';
 import { checkObstacles, clearingAltitude, segmentBoxDist, pointBoxDist } from '../js/collide.js';
+import { localSolid } from '../js/prism.js';
 import { createHistory } from '../js/history.js';
 import { convexHull, polygonArea, centroid, circumradius, clipSegment, pointInPolygon, footprintOf, SHAPES } from '../js/shape.js';
 import { lonToX, latToY, xToLon, yToLat, mPerPx, pickZoom, tileRange, tileCount, tileBounds, createTileCache } from '../js/tiles.js';
@@ -1138,7 +1139,7 @@ console.log('\nobstacles');
                  south: 50.06060, north: 50.06075, west: 19.93130, east: 19.93150 };
   const shed = { id: 'shed01', name: 'Shed', height: 3,
                  south: 50.06060, north: 50.06075, west: 19.93130, east: 19.93150 };
-  const toBox = (o) => localBox(o, m.frame);
+  const toBox = (o) => localSolid(o, m.frame);
 
   const hitMast = checkObstacles(m, [toBox(mast)], { clearance: 5 });
   ok('a 60 m mast under a 40 m flight is a strike', hitMast.strikes === 1);
@@ -1173,7 +1174,7 @@ console.log('\nobstacles');
   // whole site is the extreme case, and it has to take the ground with it: what
   // the plan can no longer see, it can no longer claim to have covered.
   const { scoreCoverage } = await import('../js/coverage.js');
-  const lid = localBox({ id: 'lid01', name: 'Lid', height: 20,
+  const lid = localSolid({ id: 'lid01', name: 'Lid', height: 20,
                          south: rect.south, north: rect.north, west: rect.west, east: rect.east }, m.frame);
   const open = scoreCoverage(m, { maxCameras: 60 });
   const covered = scoreCoverage(m, { maxCameras: 60, boxes: [lid] });
@@ -1287,7 +1288,7 @@ console.log('\nobstacles');
 
 console.log('\nthe shape a thing actually is');
 {
-  const { localPrisms, localSolid, localRing, earClip, isConvex, ringDist, insideRing }
+  const { localPrisms, localRing, earClip, isConvex, ringDist, insideRing }
     = await import('../js/prism.js');
 
   // A frame is only ever asked to turn lat/lon into local metres, so a plain

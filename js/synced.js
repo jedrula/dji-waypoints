@@ -1,4 +1,4 @@
-import { mergeRecords } from '../sync/policy.js';
+import { mergeRecords } from '../sync/protocol.js';
 // One person, a few devices, and a list of things worth keeping. Plans were the
 // first such list; the obstacles you draw on the map are the second, and the
 // rule for keeping them in step is the same one -- local first, last write wins
@@ -18,9 +18,18 @@ import { mergeRecords } from '../sync/policy.js';
 // replaces this constant with an account id; nothing else changes.
 export const SYNC_KEY = 'andrzej-H5rGhCrCRmPXoRSFUA8etg';
 
-// Set by `wrangler deploy` (see sync/README.md). Empty would mean local-only,
-// which is still a perfectly good way to use the app.
-export const SYNC_URL = 'https://dji-waypoints-sync.andrzej-swaton.workers.dev';
+// The service in server/, which is also what measures heights -- one backend
+// rather than two. Same rule as js/heights.js uses for the same host: off
+// unless the page is itself local, so the deployed app does not spend a round
+// trip on a service that is only running on someone's laptop.
+//
+// Empty means local-only, which is a perfectly good way to use the app: every
+// write lands on this device first and sync is the extra. It is also what the
+// deployed app does today, because nothing hosts server/ yet -- put a public
+// URL here, or in localStorage['dji.syncUrl'], the day something does, and two
+// devices share a list again with nothing else to change.
+const LOCAL = /^(localhost|127\.0\.0\.1)$/.test(globalThis.location?.hostname ?? '');
+export const SYNC_URL = LOCAL ? 'http://localhost:8130' : '';
 
 const URL_OVERRIDE = 'dji.syncUrl';
 
@@ -121,7 +130,7 @@ export function createSyncedStore({
       // is running a build that predates this list. "not found" would send
       // someone hunting for a bad URL instead of redeploying the Worker.
       if (res.status === 404) {
-        throw new Error(`the sync service has no ${collection} route — deploy sync/worker.js`);
+        throw new Error(`the sync service has no ${collection} route — update the service`);
       }
       if (!res.ok) throw new Error(body.error ?? `sync failed (${res.status})`);
       const incoming = Array.isArray(body[collection]) ? body[collection] : [];

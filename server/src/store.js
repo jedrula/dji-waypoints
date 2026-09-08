@@ -1,17 +1,20 @@
-// The sync half of the service: the same two lists the Cloudflare Worker
-// keeps, with the same rules, on a disk instead of in KV.
+// The sync half of the service: the two lists this app keeps -- the plans you
+// saved and the obstacles you drew -- on a disk.
 //
-// The record validation and the merge are IMPORTED from the Worker rather than
-// copied. The Worker's own comment makes the case: a client that merges
-// differently from the server is worse than one copy of a rule in two places,
-// and that goes double for two servers. Those exports are pure -- no Cloudflare
-// globals outside `fetch` -- so Node can just use them, and while both are
-// running they cannot drift.
+// The record validation and the merge are IMPORTED from sync/protocol.js rather
+// than written again here. A client that merges differently from a server is
+// how a record comes back from the dead, and the browser applies the same rule
+// before it ever talks to this.
+//
+// There was a Cloudflare Worker doing this job, and for a while both ran. It is
+// gone: this service already spoke its protocol byte for byte, so keeping a
+// second implementation of the same two routes bought nothing but a second
+// place for the rules to drift.
 
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { merge, clean, cleanObstacle } from '../../sync/worker.js';
+import { merge, clean, cleanObstacle } from '../../sync/protocol.js';
 
 export const LISTS = {
   '/sync': { field: 'plans', prefix: 'ns', max: 500, maxBody: 64 * 1024, clean },

@@ -13,7 +13,8 @@ dragging.
 
 ```
 npm start          # http://localhost:8123
-npm test           # 253 assertions: geometry, poses, coverage, collision, tiles, undo, KMZ read+write, codes, plans, sync worker, bridge
+npm test           # geometry, poses, coverage, collision, tiles, undo, KMZ read+write, codes, plans, sync, bridge
+cd server && npm test   # projection, height grid, GUGiK index, sync over HTTP, ortho, BDOT lines
 npm run compare    # score capture configurations against each other
 npm run bridge     # what controller can this machine see?
 ```
@@ -388,7 +389,7 @@ the argument survives verbatim.
 
 The cutting happens per mission and never reaches the store. That matters
 because the piece count has an ugly tail: a curved terrace ran to 91. As records
-those would blow both the 400-per-import cap and the Worker's 800; as derived
+those would blow both the 400-per-import cap and the store's 800; as derived
 geometry they cost nothing but arithmetic. One record per building, as before.
 
 Checked against an independent calculation -- rotate the point into a turned
@@ -1055,11 +1056,11 @@ Sync adds the other device, and there is nothing to set up: no login, no key to
 copy. Every device runs under one **sync key** hardcoded in `js/synced.js`, and
 saving syncs by itself — save on the phone, open the panel on the Mac, the plan
 is there. The Sync button is only for a page that was already open. Both devices
-push to `sync/worker.js` on Cloudflare, which namespaces storage by the key's
+push to the service in `server/`, which namespaces storage by the key's
 SHA-256 — what is stored cannot be turned back into a key. Merging is
 last-write-wins per plan id, with deletions as timestamped tombstones so
-removing a plan on the phone removes it on the Mac. Client and Worker run the
-same merge on purpose.
+removing a plan on the phone removes it on the Mac. Client and server run the
+same merge on purpose, from `sync/protocol.js`.
 
 The key ships in a public app, so it is a name and not a secret: anyone reading
 the source can read and write that plan list. For one person's saved boxes that
@@ -1068,26 +1069,41 @@ than one person, the key becomes the user id and a real login goes in front of
 the same storage; nothing about the shape has to change.
 
 Obstacles are the second list and ride the same machinery: same key, same
-last-write-wins merge, its own route (`POST /obstacles`) and its own KV entry, so
-the boxes you drew on the phone are on the Mac too. The local-first store, the
+last-write-wins merge, its own route (`POST /obstacles`) and its own file, so
+the obstacles you marked on the phone are on the Mac too. The local-first store, the
 merge and the round trip live once in `js/synced.js`; `js/plans.js` and
 `js/obstacles.js` only say what a record of theirs looks like. A client that
 merged differently from the server would make a plan flicker between devices,
 which is why both run the same rule on purpose.
 
-Adding a list means deploying the Worker again, and until that happens the new
+Adding a list means redeploying the service, and until that happens the new
 route 404s. The app says exactly that — *"the sync service has no obstacles
-route — deploy sync/worker.js"* — rather than the bare "not found" that would
-send you hunting for a wrong URL. Nothing is lost while it waits: the list is
-local-first, so the boxes are saved either way and the next sync sends them.
+route — update the service"* — rather than the bare "not found" that would send
+you hunting for a wrong URL. Nothing is lost while it waits: the list is
+local-first, so the records are saved either way and the next sync sends them.
 
-    cd sync && wrangler dev --local    # KV in a local emulator, no account
-    wrangler kv namespace create PLANS # then put the id in wrangler.toml
-    wrangler deploy
+### There was a second backend, and now there is not
 
-Set `SYNC_URL` in `js/synced.js` to the deployed URL, or `dji.syncUrl` in
-localStorage to point one browser somewhere else. With neither, the app says so
-and stays local-only.
+A Cloudflare Worker held these two lists for a while, and it made sense when
+they were the only thing a server was needed for: a public URL that is up while
+you are standing in a field, for nothing, with no machine to keep alive.
+
+Then `server/` arrived for a different reason — LiDAR tiles are too big to
+decode on a phone — and the sync routes were built into it as well, byte for
+byte the same protocol. That left two implementations of two routes, and the
+Node one importing its validation and its merge *from the Worker*, so the only
+Cloudflare-specific file in the repo owned the rules for a service that is not
+Cloudflare. The Worker is deleted. The rules moved to `sync/protocol.js`, which
+belongs to neither side; `server/` is the only implementation and the route
+tests run against it over a real socket.
+
+**Nothing hosts `server/` yet**, so `SYNC_URL` follows the rule `js/heights.js`
+already uses for the same host: `http://localhost:8130` when the page is itself
+local, and empty otherwise. So the deployed app is local-only today — every
+write lands on the device and sync is the extra — and a public URL in
+`SYNC_URL`, or in `localStorage['dji.syncUrl']`, is the whole of turning it back
+on. Hosting it also gets measured heights onto the deployed app, which is the
+same one decision.
 
 ## Phone, controller, MacBook
 

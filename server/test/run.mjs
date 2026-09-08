@@ -212,6 +212,69 @@ console.log('\nsync store');
   rmSync(dir, { recursive: true, force: true });
 }
 
+console.log('\nsync over HTTP');
+{
+  // The store tests above say nothing about routing, about which list a request
+  // lands in, or about one list being able to clobber the other -- which is the
+  // part that would cost real data. These ran against the Cloudflare Worker
+  // until it was deleted; this service is the only implementation now, so they
+  // run against it, over a real socket.
+  const dir = mkdtempSync(join(tmpdir(), 'heights-http-'));
+  process.env.DATA_DIR = dir;
+  const { server } = await import('../src/server.js');
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const KEY = 'andrzej-H5rGhCrCRmPXoRSFUA8etg';
+  const post = (path, body, headers = { 'X-Sync-Key': KEY }) => fetch(base + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+  });
+
+  const T = Date.now();
+  const plan = { id: 'planaa', name: 'Yard', code: 'v1.aaa', updatedAt: T - 4000 };
+  const box = { id: 'boxaaa', name: 'Shed', height: 4, updatedAt: T - 4000,
+                north: 50.001, south: 50, east: 19.001, west: 19 };
+
+  let res = await post('/sync', { plans: [plan] });
+  let body = await res.json();
+  ok('the plan route stores a plan', res.status === 200 && body.plans[0].code === 'v1.aaa');
+
+  res = await post('/obstacles', { obstacles: [box] });
+  body = await res.json();
+  ok('the obstacle route stores an obstacle', res.status === 200 && body.obstacles[0].height === 4);
+
+  // The two lists must never share storage: an obstacle sync that wiped the
+  // plan library would be the worst bug in here.
+  body = await (await post('/sync', { plans: [] })).json();
+  ok('storing obstacles leaves the plans alone',
+     body.plans.length === 1 && body.plans[0].id === 'planaa');
+
+  ok('an unknown route is a 404, not a silent success',
+     (await post('/nope', { plans: [] })).status === 404);
+  ok('a request with no sync key is refused',
+     (await post('/obstacles', { obstacles: [] }, {})).status === 401);
+  ok('a body of the wrong shape is refused',
+     (await post('/obstacles', { obstacles: 'not an array' })).status === 400);
+  ok('a method the protocol does not use is refused',
+     (await fetch(base + '/obstacles', { method: 'DELETE', headers: { 'X-Sync-Key': KEY } })).status === 405);
+
+  // Last write wins, across the wire, the way two devices actually meet.
+  await post('/obstacles', { obstacles: [{ ...box, height: 9, updatedAt: T - 3000 }] });
+  body = await (await post('/obstacles', { obstacles: [{ ...box, height: 2, updatedAt: T - 3500 }] })).json();
+  ok('an older edit loses to a newer one already stored', body.obstacles[0].height === 9);
+
+  body = await (await post('/obstacles',
+    { obstacles: [{ id: 'boxaaa', deleted: true, updatedAt: T - 2000 }] })).json();
+  ok('and a tombstone travels like any other write', body.obstacles[0].deleted === true);
+
+  res = await fetch(base + '/obstacles', { headers: { 'X-Sync-Key': KEY } });
+  ok('GET reads a list back without writing', (await res.json()).obstacles.length === 1);
+
+  await new Promise((r) => server.close(r));
+  rmSync(dir, { recursive: true, force: true });
+}
+
 console.log('\nrough model');
 {
   const t = createScene(0, 0);

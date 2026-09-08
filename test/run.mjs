@@ -13,7 +13,7 @@ import { encodePlan, decodePlan } from '../js/share.js';
 import { readKmz } from '../js/kmzread.js';
 import { routeFromRead, inferPass } from '../js/route.js';
 import { createPlanStore, merge as clientMerge, SYNC_KEY } from '../js/plans.js';
-import worker, { merge as workerMerge, clean, cleanObstacle } from '../sync/worker.js';
+import { merge, clean, cleanObstacle } from '../sync/protocol.js';
 import { createObstacleStore, normalizeRect, overlaps } from '../js/obstacles.js';
 import { checkObstacles, clearingAltitude, segmentBoxDist, pointBoxDist } from '../js/collide.js';
 import { localSolid } from '../js/prism.js';
@@ -932,7 +932,7 @@ console.log('\nplan codes');
   ok('a plan code is short enough to message', code.length < 320, `${code.length} chars`);
   ok('rejects junk', decodePlan('hello') === null && decodePlan('') === null);
   ok('rejects a plan with no taps in it', decodePlan(encodePlan({ points: [] }, ui) ?? 'x') === null);
-  // Fifty taps has to still fit what the sync worker will store (2000 chars).
+  // Fifty taps has to still fit what the sync service will store (2000 chars).
   const many = encodePlan({ points: Array.from({ length: 50 }, (_, i) => (
     { lat: 50.06 + i * 1e-4, lon: 19.93 + i * 1e-4, height: 3 })) }, ui);
   ok('fifty taps still fit the sync limit', many.length < 2000, `${many.length} chars`);
@@ -1100,9 +1100,9 @@ console.log('\nsaved plans');
   const older = { id: 'x', name: 'old', code: 'v1.o', updatedAt: T - 2000 };
   const newer = { id: 'x', name: 'new', code: 'v1.n', updatedAt: T - 1000 };
   ok('client merge is last-write-wins', clientMerge([older], [newer])[0].name === 'new');
-  ok('worker merge is last-write-wins', workerMerge([newer], [older])[0].name === 'new');
+  ok('the merge is last-write-wins', merge([newer], [older])[0].name === 'new');
   ok('a tombstone beats an older edit',
-     workerMerge([older], [{ id: 'x', deleted: true, updatedAt: T }])[0].deleted === true);
+     merge([older], [{ id: 'x', deleted: true, updatedAt: T }])[0].deleted === true);
 
   ok('worker rejects a plan with no code', clean({ id: 'abcdef', updatedAt: 1, name: 'x' }) === null);
   ok('worker rejects a forged id', clean({ id: '../etc', updatedAt: 1, name: 'x', code: 'v1.a' }) === null);
@@ -1208,14 +1208,14 @@ console.log('\nobstacles');
   ok('obstacles sync on their own route, not the plan one', sent.url.endsWith('/obstacles'));
   ok('and under their own key on the wire', Array.isArray(sent.body.obstacles));
 
-  ok('worker rejects a box with no area',
+  ok('the protocol rejects a box with no area',
      cleanObstacle({ id: 'abcdef', updatedAt: 1, north: 50, south: 50, east: 19, west: 18, height: 5 }) === null);
-  ok('worker rejects a box the size of a country',
+  ok('and a box the size of a country',
      cleanObstacle({ id: 'abcdef', updatedAt: 1, north: 51, south: 50, east: 19, west: 18, height: 5 }) === null);
-  ok('worker accepts a well-formed obstacle',
+  ok('it accepts a well-formed obstacle',
      cleanObstacle({ id: 'abcdef', updatedAt: 1, north: 50.001, south: 50, east: 19.001, west: 19,
                      height: 5, name: 'Oak' }).height === 5);
-  ok('worker refuses a height it cannot use',
+  ok('and refuses a height it cannot use',
      cleanObstacle({ id: 'abcdef', updatedAt: 1, north: 50.001, south: 50, east: 19.001, west: 19,
                      height: 'tall' }) === null);
   ok('a tombstone needs nothing but an id and a time',
@@ -1282,7 +1282,7 @@ console.log('\nobstacles');
      sentLocal.obstacles.length === 1 && sentLocal.obstacles[0].name === 'Oak');
   ok('and the hand-placed one that is sent carries no ring',
      sentLocal.obstacles.every((o) => o.poly === undefined));
-  ok('the Worker strips a footprint that somehow reached it',
+  ok('a footprint that somehow reached the wire is stripped',
      cleanObstacle({ id: 'abcdef', updatedAt: 1, ...bbox, poly: ring }).poly === undefined);
 }
 
@@ -1788,70 +1788,6 @@ console.log('\nground imagery');
   ok('the cache does not grow without bound', cache.size() <= 4);
 }
 
-console.log('\nsync worker');
-{
-  // The Worker is a fetch handler and a KV namespace, both of which node can
-  // supply. Testing merge() and clean() in isolation says nothing about
-  // routing, about which KV entry a list lands in, or about one list being able
-  // to clobber the other -- which is the part that would cost real data.
-  const kv = new Map();
-  const env = { PLANS: { get: async (k) => kv.get(k) ?? null, put: async (k, v) => { kv.set(k, v); } } };
-  const KEY = 'andrzej-H5rGhCrCRmPXoRSFUA8etg';
-  const post = (path, body) => worker.fetch(new Request(`https://w.dev${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Sync-Key': KEY },
-    body: JSON.stringify(body),
-  }), env);
-
-  // Real times: a tombstone is only kept for a window now, and one dated 1970
-  // is one the store is entitled to have forgotten.
-  const NOW = Date.now();
-  const plan = { id: 'planaa', name: 'Yard', code: 'v1.aaa', updatedAt: NOW - 4000 };
-  const box = { id: 'boxaaa', name: 'Shed', height: 4, updatedAt: NOW - 4000,
-                north: 50.001, south: 50, east: 19.001, west: 19 };
-
-  let res = await post('/sync', { plans: [plan] });
-  let body = await res.json();
-  ok('the plan route stores a plan', res.status === 200 && body.plans[0].code === 'v1.aaa');
-
-  res = await post('/obstacles', { obstacles: [box] });
-  body = await res.json();
-  ok('the obstacle route stores an obstacle', res.status === 200 && body.obstacles[0].height === 4);
-
-  // The two lists share one namespace and must never share an entry: an
-  // obstacle sync that wiped the plan library would be the worst bug in here.
-  res = await post('/sync', { plans: [] });
-  body = await res.json();
-  ok('storing obstacles leaves the plans alone', body.plans.length === 1 && body.plans[0].id === 'planaa');
-  ok('and the two lists live under different keys', kv.size === 2);
-
-  res = await post('/nope', { plans: [] });
-  ok('an unknown route is a 404, not a silent success', res.status === 404);
-
-  res = await worker.fetch(new Request('https://w.dev/obstacles', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"obstacles":[]}',
-  }), env);
-  ok('a request with no sync key is refused', res.status === 401);
-
-  res = await post('/obstacles', { obstacles: 'not an array' });
-  ok('a body of the wrong shape is refused', res.status === 400);
-
-  // Last write wins, across the wire, the way two devices actually meet.
-  await post('/obstacles', { obstacles: [{ ...box, height: 9, updatedAt: NOW - 3000 }] });
-  res = await post('/obstacles', { obstacles: [{ ...box, height: 2, updatedAt: NOW - 3500 }] });
-  body = await res.json();
-  ok('an older edit loses to a newer one already stored', body.obstacles[0].height === 9);
-
-  res = await post('/obstacles', { obstacles: [{ id: 'boxaaa', deleted: true, updatedAt: NOW - 2000 }] });
-  body = await res.json();
-  ok('and a tombstone travels like any other write', body.obstacles[0].deleted === true);
-
-  res = await worker.fetch(new Request('https://w.dev/obstacles', {
-    method: 'GET', headers: { 'X-Sync-Key': KEY },
-  }), env);
-  ok('GET reads a list back without writing', (await res.json()).obstacles.length === 1);
-}
-
 console.log('\nundo');
 {
   let world = { alt: 40, boxes: [] };
@@ -2245,7 +2181,7 @@ console.log('\ncontroller bridge');
 // -- what a list is allowed to forget ----------------------------------------
 {
   console.log('\nrecord retention');
-  const { mergeRecords, TOMBSTONE_MS, MAX_TOMBSTONES } = await import('../sync/policy.js');
+  const { mergeRecords, TOMBSTONE_MS, MAX_TOMBSTONES } = await import('../sync/protocol.js');
   const now = Date.now();
   const live = (id, age = 0, extra = {}) => ({ id, updatedAt: now - age, name: id, ...extra });
   const dead = (id, age = 0) => ({ id, deleted: true, updatedAt: now - age });

@@ -74,7 +74,7 @@ GET /v1/coverage?lat=&lon=     what survey exists here, without downloading it
 GET /v1/tile/{tn}/{te}         the raster; 202 while building, add ?wait=1 to block
 GET /v1/height?lat=&lon=       one height, for "how tall is that"
 GET /v1/health
-POST /sync  POST /obstacles    the plan and obstacle lists (see "The Worker" below)
+POST /sync  POST /obstacles    the plan and obstacle lists (see "The sync lists" below)
 ```
 
 Tile addresses are PUWG92 500 m grid indices, so a URL is stable forever and
@@ -263,15 +263,25 @@ Each of these produced a confident wrong answer before it was caught.
   overhead/underground split. So power lines still come from OpenStreetMap
   geometry with an assumed height.
 
-## The Worker
+## The sync lists
 
-`sync/worker.js` stores the plan and obstacle lists on Cloudflare KV, and this
-service speaks the same protocol on the same two routes -- so pointing a client
-here is a URL change and nothing else (`localStorage['dji.syncUrl']`).
+Two routes hold the two lists this app keeps: `POST /sync` for saved plans and
+`POST /obstacles` for what you marked on the ground. The client sends everything
+it knows, this merges it with what is on disk under that sync key, and returns
+the union; last write wins per id, and a delete is a timestamped tombstone so it
+travels like any other change.
 
-The record validation and the merge are **imported from the Worker**, not
-copied. Its own comment makes the case: a client that merges differently from
-the server is worse than one rule living in two files, and that goes double for
-two servers. While both run, they cannot drift.
+The record validation and the merge come from `sync/protocol.js`, which belongs
+to neither side -- the browser applies the same rule before it ever talks to
+this, and a client that merges differently from a server is how a record comes
+back from the dead.
 
-Nothing is migrated automatically. The Worker still holds the live lists.
+A Cloudflare Worker did this job first and did it well enough: a public URL that
+is up while you are standing in a field, for nothing. It is deleted. This
+service already spoke its protocol byte for byte, so the second implementation
+bought nothing but a second place for the rules to drift -- and the Worker
+cannot host the rest of what is here anyway, because decoding LAZ needs a disk
+and minutes, not a 30-second edge invocation.
+
+Nothing was migrated: the lists start empty. Storage is one JSON file per list
+per key under `var/`.

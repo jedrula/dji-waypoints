@@ -439,9 +439,11 @@ const siteForPlanner = () => ({
 const MODES = {
   capture: {
     label: 'capture point',
-    // What the standing-here button says in this mode. "Here" on its own reads
-    // as "here on the map, where I tapped" -- which is the other gesture
-    // entirely, and the wrong one.
+    // What the big button over the map does in this mode. A capture point is
+    // one you are sure of because you walked to it, so here the button reports
+    // the phone's position -- and it says "where I stand" rather than "here"
+    // because "here" on a map reads as "here on the map", which is exactly
+    // what obstacle mode means by it.
     here: 'Capture where I stand',
     colour: '#4da3ff',
     tip: 'Tap the map on what you want captured. Tap a point to set how tall it is.',
@@ -454,7 +456,12 @@ const MODES = {
   },
   obstacle: {
     label: 'obstacle',
-    here: 'Obstacle where I stand',
+    // Obstacles are not walked to. A pylon is a thing you keep well away from,
+    // and the ones that matter most are wires you cannot stand under and read
+    // off a phone. So in this mode the button asks the map rather than the
+    // receiver: pan to the site and the tall things arrive. That is also what
+    // makes a mission plannable at a desk, with no fix at all.
+    here: 'Obstacles here',
     colour: '#ffb84d',
     tip: 'Tap the map where something stands. Tap a point to set how tall it is.',
     list: () => site.obstacles(),
@@ -474,9 +481,14 @@ function setMode(mode) {
   $('tip').textContent = MODES[mode].tip;
   showTip();
   $('hereBtn').classList.toggle('obstacle', mode === 'obstacle');
-  $('hereBtn').textContent = MODES[mode].here;
-  $('hereBtn').title = `Put ${mode === 'capture' ? 'a capture point' : 'an obstacle'} `
-    + 'at the position your phone reports, rather than where you tap the map';
+  // Obstacle mode's button asks OpenStreetMap about the view, so it works on a
+  // machine with no receiver in it at all. Capture mode's needs one, and stays
+  // away when there is none.
+  $('hereBtn').hidden = mode === 'capture' && !navigator.geolocation;
+  if (!importing) $('hereBtn').textContent = MODES[mode].here;
+  $('hereBtn').title = mode === 'capture'
+    ? 'Put a capture point at the position your phone reports, rather than where you tap the map'
+    : 'Buildings, trees and overhead lines from OpenStreetMap, for whatever is on screen';
   $('clearMode').textContent = mode === 'capture' ? 'Clear points' : 'Clear obstacles';
   renderPoints();
   renderPointBar();
@@ -819,8 +831,17 @@ $('refit').addEventListener('click', () => { tuned = false; autoFit(); toast('Re
 // What is already standing here, from OpenStreetMap: buildings, trees and --
 // the ones you cannot see from above and that actually bring an aircraft down
 // -- power lines. See js/osm.js for what it knows and what it is guessing.
-$('importOsm').addEventListener('click', async () => {
-  const btn = $('importOsm');
+//
+// This is obstacle mode's button over the map, and it asks about the view. It
+// used to be a line in Advanced, next to a button that placed one obstacle at
+// the phone's position: the wrong two shapes round the wrong way, because the
+// gesture that fills a site in with what is standing on it is the one that
+// needs no receiver, and it belongs where the map is.
+let importing = false;
+async function importHere() {
+  const btn = $('hereBtn');
+  if (importing) return;
+  importing = true;
   btn.disabled = true;
   btn.textContent = 'Asking OpenStreetMap…';
   try {
@@ -867,10 +888,12 @@ $('importOsm').addEventListener('click', async () => {
   } catch (e) {
     toast(`Import failed — ${e.message}`);
   } finally {
+    importing = false;
     btn.disabled = false;
-    btn.textContent = 'Import what is here';
+    // Whichever mode is in front now: a long import outlives a mode switch.
+    btn.textContent = MODES[state.mode].here;
   }
-});
+}
 
 $('clearOsm').addEventListener('click', () => {
   layers.wires.clearLayers();
@@ -1317,7 +1340,9 @@ async function findMe({ quiet = false, then = null } = {}) {
   if (finding) { toast('Still looking for a position…'); return null; }
   finding = true;
   $('findme').classList.add('busy');
-  $('hereBtn').disabled = true;
+  // Only capture mode's button is the one being pressed; obstacle mode's is an
+  // import and has nothing to wait for.
+  if (state.mode === 'capture') $('hereBtn').disabled = true;
   try {
     if (!quiet) toast('Asking your device where you are…', { sticky: true });
     const fix = await bestFix({
@@ -1336,7 +1361,7 @@ async function findMe({ quiet = false, then = null } = {}) {
   } finally {
     finding = false;
     $('findme').classList.remove('busy');
-    $('hereBtn').disabled = false;
+    $('hereBtn').disabled = importing;
   }
 }
 $('findme').addEventListener('click', () => { watchFix(); findMe(); });
@@ -1375,21 +1400,26 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden && stopWatch) { stopWatch(); stopWatch = null; $('fix').hidden = true; }
 });
 
-// Standing next to the thing rather than looking at it on a map. Same two kinds
-// of point, placed where the phone says you are and grown by how unsure it is.
-$('hereBtn').addEventListener('click', () => { watchFix(); } );
-$('hereBtn').addEventListener('click', () => findMe({
-  then: (fix) => {
-    const verdict = judgeFix(fix);
-    if (!verdict.ok) { toast(verdict.why); return; }
-    const added = MODES[state.mode].add({ lat: fix.lat, lon: fix.lon, accuracy: fix.accuracy });
-    if (added) state.selected = { kind: state.mode, id: added.id };
-    goToFix(fix);
-    renderPointBar();
-    toast(`${MODES[state.mode].label} placed where you are (±${fix.accuracy.toFixed(0)} m)`
-      + `${fix.age > STALE_MS ? ' — from a stale fix, check it' : ''}.`);
-  },
-}));
+// The one button over the map, and it means a different thing in each mode --
+// which is the point. In capture mode it is standing next to the thing rather
+// than looking at it on a map: a point placed where the phone says you are,
+// grown by how unsure it is. In obstacle mode it is the map view instead.
+$('hereBtn').addEventListener('click', () => {
+  if (state.mode === 'obstacle') { importHere(); return; }
+  watchFix();
+  findMe({
+    then: (fix) => {
+      const verdict = judgeFix(fix);
+      if (!verdict.ok) { toast(verdict.why); return; }
+      const added = MODES[state.mode].add({ lat: fix.lat, lon: fix.lon, accuracy: fix.accuracy });
+      if (added) state.selected = { kind: state.mode, id: added.id };
+      goToFix(fix);
+      renderPointBar();
+      toast(`${MODES[state.mode].label} placed where you are (±${fix.accuracy.toFixed(0)} m)`
+        + `${fix.age > STALE_MS ? ' — from a stale fix, check it' : ''}.`);
+    },
+  });
+});
 
 /* ---------- the controller ---------- */
 const bridge = initInstall({
@@ -1620,7 +1650,6 @@ if (onPhone) watchFix();
 if (opened.has('mockgps')) {
   import('./gpsmock.js').then((m) => m.installMock(map, opened)).catch((e) => console.error(e));
 }
-$('hereBtn').hidden = !navigator.geolocation;
 
 window.__state = state;
 window.__site = site;

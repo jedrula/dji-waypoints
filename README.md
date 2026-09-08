@@ -324,8 +324,9 @@ Three traps, all of which cost a wrong answer that looked right:
 
 Tapping every tree round a site is work a person gives up on halfway, and the
 thing that actually brings a drone down -- a power line -- is invisible from
-above. OpenStreetMap knows where they are. **Import what is here** in Advanced
-pulls buildings, trees and power lines for whatever is on screen.
+above. OpenStreetMap knows where they are. **Obstacles here**, the button over
+the map in obstacle mode, pulls buildings, trees and power lines for whatever is
+on screen.
 
 What it does not know is how tall they are. Measured over a chunk of Wroclaw:
 
@@ -742,12 +743,22 @@ is several taps, the same way a wide capture is; there is no second gesture for
 drawing an outline.
 
 **A tap is a tap wherever the coordinates came from.** *Capture where I stand*
-(and *Obstacle where I stand*, in the other mode) places the same point at the
-position the phone reports, grown by the accuracy it admits to, which is what
-walking a site now is. There is no separate walk mode, because a stop was never
-anything but a tap you made with your feet. The button used to say *Here*, which
-reads as "here on the map, where I tapped" -- the other gesture entirely, and
-the wrong one.
+places the same point at the position the phone reports, grown by the accuracy
+it admits to, which is what walking a site now is. There is no separate walk
+mode, because a stop was never anything but a tap you made with your feet. The
+button used to say *Here*, which reads as "here on the map, where I tapped" --
+the other gesture entirely, and the wrong one.
+
+**One button over the map, meaning a different thing in each mode.** Obstacle
+mode's says *Obstacles here*, and *here* is the map view: it pulls in what is
+already standing there. It used to offer *Obstacle where I stand* instead, which
+was the wrong gesture twice over. You do not walk to an obstacle -- a pylon is a
+thing you keep well away from, and the wires that matter most cannot be stood
+under and read off a phone -- and it put the one part of describing a site that
+needs no receiver behind the one thing that does. A mission can now be planned
+at a desk, with no fix at all: pan to the site, tap *Obstacles here*, tap the
+corners of what you want photographed. Marking a tree you are standing next to
+is still a tap on the map, with your own position drawn on it.
 
 **Getting back to what you are working on.** Pan far enough and your points are
 off the edge with nothing on screen to say which way. A frame button on the map

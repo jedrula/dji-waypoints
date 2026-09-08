@@ -165,7 +165,36 @@ export function earClip(ring) {
 //
 // Every piece carries the obstacle's own id, so a result about a piece is a
 // result about the obstacle, and js/collide.js can put them back together.
+//
+// Remembered, because the app re-plans on every tap and every slider tick and
+// the frame only moves when the taps do -- and because cutting an outline up is
+// the one expensive thing in this file.
+//
+// Keyed on the RING, not on the obstacle. The obstacle is the obvious key and
+// it does not work: the planner is handed a fresh object per plan (see
+// siteForPlanner in js/app.js) that carries the same ring, so keying on the
+// object misses every time while keying on the ring hits. What a cut depends on
+// is the ring, the frame and the height, and the first two are the key while the
+// third is checked -- so a height edit is not served a stale answer.
+const pieces = new WeakMap();
+const outlines = new WeakMap();
+
+const fresh = (had, frame, height) => had && had.lat0 === frame.lat0
+  && had.lon0 === frame.lon0 && had.height === height;
+
 export function localPrisms(o, frame) {
+  const ring = Array.isArray(o.poly) && o.poly.length >= 3 ? o.poly : null;
+  // Nothing to cut and nothing to remember: a tapped obstacle is its own box.
+  if (!ring) return cutPrisms(o, frame);
+  const height = o.height ?? 0;
+  const had = pieces.get(ring);
+  if (fresh(had, frame, height)) return had.cut;
+  const cut = cutPrisms(o, frame);
+  pieces.set(ring, { lat0: frame.lat0, lon0: frame.lon0, height, cut });
+  return cut;
+}
+
+function cutPrisms(o, frame) {
   const solid = localSolid(o, frame);
   if (!solid.poly) return [solid];
   if (isConvex(solid.poly)) return [solid];
@@ -231,20 +260,16 @@ export function ringWithin(p, ring, limit) {
 // is what makes asking about the outline affordable in a loop: a point that is
 // not even near the box cannot be near the outline inside it, and that is four
 // comparisons against a hundred edge distances.
-// Remembered per obstacle, because the planner asks for the same outline in the
-// same frame a few hundred times over: the altitude search re-plans for every
-// candidate, and the frame comes from the taps rather than from the candidate.
-// A record is replaced wholesale whenever anything about it changes, so the key
-// being the object itself is also the answer to staleness.
-const outlines = new WeakMap();
-
+// Remembered on the same terms, because the altitude search re-plans for every
+// candidate and asks for the same outline every time.
 export function localOutline(o, frame) {
   if (!Array.isArray(o.poly) || o.poly.length < 3) return null;
-  const had = outlines.get(o);
-  if (had && had.lat0 === frame.lat0 && had.lon0 === frame.lon0) return had.outline;
+  const height = o.height ?? 0;
+  const had = outlines.get(o.poly);
+  if (fresh(had, frame, height)) return had.outline;
   const ring = localRing(o, frame);
-  const outline = { ring, ...boundsOf(ring, o.height ?? 0) };
-  outlines.set(o, { lat0: frame.lat0, lon0: frame.lon0, outline });
+  const outline = { ring, ...boundsOf(ring, height) };
+  outlines.set(o.poly, { lat0: frame.lat0, lon0: frame.lon0, height, outline });
   return outline;
 }
 

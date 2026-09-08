@@ -1160,9 +1160,14 @@ console.log('\nobstacles');
   ok('raising the clearance turns the same shed into a warning', fussy.near === 1);
 
   ok('the clearing altitude lifts the flight over the tallest thing under it',
-     near(clearingAltitude(m, [toBox(mast)], 5), 65, 0.01));
+     near(clearingAltitude(m, [toBox(mast)], { clearance: 5 }), 65, 0.01));
   ok('nothing under the flight means no altitude to suggest',
-     clearingAltitude(m, [], 5) === null);
+     clearingAltitude(m, [], { clearance: 5 }) === null);
+  // It takes an options object, like checkObstacles beside it. It used to take
+  // a bare number, the app passed the object, and every comparison inside came
+  // out false: the suggestion never appeared and nothing failed.
+  ok('and it is asked the way the app asks it',
+     clearingAltitude(m, [toBox(mast)], { clearance: 5 }) > 0);
 
   // An obstacle blocks the camera as well as the aircraft. A slab lying over the
   // whole site is the extreme case, and it has to take the ground with it: what
@@ -1412,6 +1417,48 @@ console.log('\nthe shape a thing actually is');
   for (let i = 0; i <= 20; i++) arc.push({ x: i, y: Math.round(i * 1e-9 * 1e9) * 0 });
   ok('a run of collinear points does not defeat the clipper',
      earClip([...arc.map((q) => ({ x: q.x, y: 0 })), { x: 20, y: 8 }, { x: 0, y: 8 }]) !== null);
+  // The property the whole change rests on, and the one worth a test that does
+  // not care about any particular geometry: the outline is INSIDE the box, so
+  // whatever the flight does, the outline can only ever be further away than
+  // the box was. A footprint may never turn a clear leg into a strike.
+  {
+    const cases = [blockAt(40, 12, 30, 18, 'a'), blockAt(60, 8, 65, 30, 'b'),
+                   { ...L, height: 30 }, { ...L, poly: [...L.poly].reverse(), height: 30 }];
+    let looser = 0;
+    let checked = 0;
+    let worseThanBox = 0;
+    // A deterministic sweep of legs across and above each one.
+    for (const o of cases) {
+      const box = { ...localSolid(o, flat) };
+      delete box.poly;
+      const parts = localPrisms(o, flat);
+      for (let a = 0; a < 360; a += 17) {
+        for (let off = -30; off <= 30; off += 7) {
+          for (const z of [2, 9, 19, 34]) {
+            const th = (a * Math.PI) / 180;
+            const dir = { x: Math.cos(th), y: Math.sin(th) };
+            const nrm = { x: -dir.y, y: dir.x };
+            const p0 = { x: nrm.x * off - dir.x * 60, y: nrm.y * off - dir.y * 60, z };
+            const p1 = { x: nrm.x * off + dir.x * 60, y: nrm.y * off + dir.y * 60, z };
+            const asBox = segmentBoxDist(p0, p1, box).dist;
+            const asShape = Math.min(...parts.map((q) => segmentBoxDist(p0, p1, q).dist));
+            checked++;
+            // A millimetre of slack, because the distance itself is a ternary
+            // search that stops at 1e-4 of the leg -- the worst disagreement
+            // over this sweep is four micrometres. A real violation would be
+            // metres: it would mean the pieces reach outside their own box.
+            if (asShape < asBox - 1e-3) worseThanBox++;
+            if (asShape > asBox + 1e-3) looser++;
+          }
+        }
+      }
+    }
+    ok(`the outline is never closer to a leg than its own box (${checked} legs)`,
+       worseThanBox === 0, `${worseThanBox} closer`);
+    ok(`and on a real footprint it is often further (${looser} of ${checked})`,
+       looser > checked / 8, `${looser}`);
+  }
+
   ok('a tapped obstacle has no ring at all and costs nothing',
      localPrisms({ id: 't', name: 'Oak', height: 4, north: 50.062, south: 50.0619,
                    east: 19.9325, west: 19.9324 }, flat)[0].poly === undefined);

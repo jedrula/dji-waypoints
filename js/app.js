@@ -593,13 +593,21 @@ function restoreWires() {
   } catch { /* nothing drawn is the right failure */ }
 }
 
-function renderPoints() {
-  layers.obsBoxes.clearLayers();
+// Outlines are kept and restyled, never rebuilt -- the same rule as the markers
+// below, learned the same way. Clearing the layer and drawing every outline
+// again is the simple version, and with a city block imported it is a hundred
+// and fifty polygons of thirty points each thrown away and remade on every
+// slider tick, which is most of what a replan costs. A record is replaced
+// wholesale whenever it changes, so its own identity says when the shape has to
+// be redrawn and when only the colour has moved.
+const obsShapes = new Map();   // obstacle id -> { shape, from, style }
 
+function renderPoints() {
   const struck = new Set((state.hazard?.obstacles ?? [])
     .filter((o) => o.grade !== 'clear').map((o) => o.id));
 
   const wanted = new Set();
+  const drawn = new Set();
   for (const o of site.obstacles()) {
     const grade = struck.has(o.id)
       ? (state.hazard.obstacles.find((x) => x.id === o.id)?.grade ?? 'clear') : 'clear';
@@ -608,18 +616,40 @@ function renderPoints() {
     // the line under its own footprint and invites you to nudge a piece of a
     // power cable, which is not a thing you can do.
     const isWire = labelOf(o).endsWith(' (bdot)');
-    // The outline the thing actually has, when the source knew it. A tapped
-    // obstacle's outline IS its rectangle, so this is one call for both.
-    L.polygon(ringLatLon(o).map((v) => [v.lat, v.lon]), {
+    const style = {
       color: OBSTACLE_COLOR[grade], weight: 1,
       fillOpacity: isWire && grade === 'clear' ? 0 : 0.12,
       opacity: isWire && grade === 'clear' ? 0 : 1,
-      interactive: false,
-    }).addTo(layers.obsBoxes);
+    };
+    // The outline the thing actually has, when the source knew it. A tapped
+    // obstacle's outline IS its rectangle, so this is one call for both.
+    drawn.add(o.id);
+    let kept = obsShapes.get(o.id);
+    if (!kept) {
+      const shape = L.polygon(ringLatLon(o).map((v) => [v.lat, v.lon]),
+        { ...style, interactive: false }).addTo(layers.obsBoxes);
+      obsShapes.set(o.id, { shape, from: o, style });
+    } else {
+      if (kept.from !== o) {
+        kept.shape.setLatLngs(ringLatLon(o).map((v) => [v.lat, v.lon]));
+        kept.from = o;
+      }
+      if (kept.style.color !== style.color || kept.style.opacity !== style.opacity
+          || kept.style.fillOpacity !== style.fillOpacity) {
+        kept.shape.setStyle(style);
+        kept.style = style;
+      }
+    }
     if (isWire && grade === 'clear') continue;
     wanted.add(syncPoint('obstacle', o.id, pointOf(o), o.height, grade !== 'clear'));
   }
   for (const p of site.capture()) wanted.add(syncPoint('capture', p.id, p, p.height, false));
+
+  for (const [id, kept] of obsShapes) {
+    if (drawn.has(id)) continue;
+    layers.obsBoxes.removeLayer(kept.shape);
+    obsShapes.delete(id);
+  }
 
   for (const [key, m] of pointMarkers) {
     if (wanted.has(key)) continue;

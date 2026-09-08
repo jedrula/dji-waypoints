@@ -310,19 +310,33 @@ export function checkObstacles(
 // passes over, which is the number you actually want the moment the answer is
 // "it hits something". A tower off to one side does not set your altitude, so
 // only boxes the path crosses horizontally count.
-export function clearingAltitude(mission, boxes, clearance = 5) {
+// Takes `{ clearance }` rather than a bare number, like checkObstacles beside
+// it. It used to take the number, the app passed it the object, and JavaScript
+// quietly compared metres with an object: every test came out false and the
+// suggestion the whole function exists to make never appeared. The two
+// functions are called on the same line and now read the same.
+export function clearingAltitude(mission, boxes, { clearance = 5 } = {}) {
   if (!mission || !boxes?.length) return null;
   const f = mission.frame;
   const path = mission.exported ?? mission.waypoints ?? [];
+  // The path in local metres ONCE, not once per solid: with a city block
+  // imported that was 180,000 conversions to answer one question.
+  const pts = path.map((w) => f.toLocal(w.lat, w.lon));
+  // Tallest first, so that anything which could not raise the answer even if
+  // the flight went straight through it is never asked about.
+  const tall = [...boxes].sort((a, b) => b.max.z - a.max.z);
   let need = 0;
-  for (const b of boxes) {
-    const over = path.some((w) => {
-      const l = f.toLocal(w.lat, w.lon);
-      if (b.poly) return ringDist(l, b.poly) < clearance;
-      return l.x > b.min.x - clearance && l.x < b.max.x + clearance
-          && l.y > b.min.y - clearance && l.y < b.max.y + clearance;
+  for (const b of tall) {
+    const top = b.max.z + clearance;
+    if (top <= need) break;
+    const over = pts.some((l) => {
+      // The box first; it contains the outline, so a point outside it by more
+      // than the clearance is outside the outline by more than the clearance.
+      if (l.x <= b.min.x - clearance || l.x >= b.max.x + clearance
+          || l.y <= b.min.y - clearance || l.y >= b.max.y + clearance) return false;
+      return b.poly ? ringDist(l, b.poly) < clearance : true;
     });
-    if (over) need = Math.max(need, b.max.z + clearance);
+    if (over) need = top;
   }
   return need || null;
 }

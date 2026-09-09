@@ -26,6 +26,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { toPuwg92, toWgs84 } from './puwg92.js';
 import { tileRange, tileCount, tileBounds, mPerPx, TILE_PX } from './tiles.js';
 import { groundAt, puwgToLocal, localToTile, drapeWire, stitch } from './surface.js';
+import { toWgs84 as puwgToWgs84 } from './puwg92.js';
 import { serviceUrl, serviceHeaders } from './service.js';
 import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, asHex } from './palette.js';
 import { fov, orientation } from './camera.js';
@@ -116,6 +117,9 @@ export function createScene3D(canvas) {
   let missionGroup = null;
   let wireGroup = null;
   let meshGroup = null;
+  // Tile name -> Mesh, so a neighbour asked for twice is fetched once.
+  const meshTiles = new Map();
+  const meshMode = () => new URLSearchParams(location.search).has('mesh');
   let wirePaths = [];
   let groundSpec = null;
   let looksOn = true;
@@ -152,6 +156,9 @@ export function createScene3D(canvas) {
     // first time the view was ever opened.
     controls.enableDamping = false;
     controls.addEventListener('change', () => { render(); scheduleRedrape(); });
+    canvas.addEventListener('pointerdown', meshDown);
+    canvas.addEventListener('pointermove', meshMove);
+    canvas.addEventListener('click', meshClick);
     // No lights. The surface shades itself -- see surfaceMaterial() -- and
     // everything else in this scene is lines and points, which are unlit.
     //
@@ -798,25 +805,29 @@ export function createScene3D(canvas) {
   }
 
   // The photogrammetric mesh: real walls, with the pixels the oblique cameras
-  // actually saw on them. A PROTOTYPE, behind `?mesh=1`, because one 100 m tile
-  // is 7.3 MB on the wire and ~638 MB per square kilometre at source -- the
-  // heaviest thing this app can ask for -- and because how it should sit beside
-  // the LiDAR surface is not yet decided.
+  // actually saw on them. A PROTOTYPE, behind `?mesh=1`.
   //
-  // See server/src/mesh.js. It arrives packed and already in PUWG92 metres from
-  // an origin the request chose, which is the mission's own frame origin, so
-  // the only conversion left here is the same affine the surface uses: PUWG92
-  // grid north is not true north, and over 100 m the convergence is about 1.7 m
-  // of sideways error if you ignore it.
-  async function buildMesh({ signal } = {}) {
-    if (meshGroup) { scene.remove(meshGroup); meshGroup = null; }
-    if (!new URLSearchParams(location.search).has('mesh')) return;
-    if (!mission || !scene || loaded?.datum === undefined) return;
-
+  // One tile is 100 m of ground and 7.3 MB on the wire, ~638 MB per square
+  // kilometre at source -- the heaviest thing this app can ask for -- so tiles
+  // arrive ONE AT A TIME and only when asked for. Click the ground where you
+  // want more; see meshClick.
+  //
+  // In this mode the LiDAR surface is not loaded at all. It used to be: the
+  // view built the whole stitched heightfield, drew it, and then hid it the
+  // moment the mesh arrived, which meant waiting through minutes of the worse
+  // picture to get the better one and fetching hundreds of megabytes to throw
+  // away.
+  //
+  // See server/src/mesh.js. Vertices arrive in PUWG92 metres from an origin the
+  // request chose -- the mission's own frame origin -- so the conversion left
+  // here is the affine the surface uses: PUWG92 grid north is not true north,
+  // and over 100 m the convergence is about 1.7 m of sideways error.
+  async function loadMeshTile(lat, lon, { signal } = {}) {
     const { lat0, lon0 } = mission.frame;
-    onStatus('Downloading the photogrammetric mesh…');
-    const res = await ask(`/v1/mesh?lat=${lat0}&lon=${lon0}`, { signal });
-    if (!res.ok) { onStatus('No mesh model covers this ground.'); return; }
+    const res = await ask(`/v1/mesh?lat=${lat}&lon=${lon}`, { signal });
+    if (!res.ok) return { ok: false, why: 'no mesh model covers that' };
+    const name = (res.headers.get('X-Mesh-Tile') ?? `${lat.toFixed(5)},${lon.toFixed(5)}`);
+    if (meshTiles.has(name)) return { ok: true, already: true, name };
     const raw = await res.arrayBuffer();
 
     const head = new Uint32Array(raw, 0, 2);
@@ -829,18 +840,19 @@ export function createScene3D(canvas) {
     at += nv * 8;
     const index = new Uint32Array(raw.slice(at, at + nt * 3 * 4));
 
-    // Metres east/north of the frame origin, into the frame's own x/y. The
-    // origin was asked for AS the frame origin, so this is a rotation of about
-    // a degree and nothing else -- but a degree over 100 m is 1.7 m.
+    // The offsets are from the tile's OWN request point, so they are shifted to
+    // the mission frame's origin before projecting -- otherwise every neighbour
+    // would stack on top of the first.
+    const here = toPuwg92(lat, lon);
     const home = toPuwg92(lat0, lon0);
     const toLocal = puwgToLocal(mission.frame, home.east, home.north);
-    const datum = loaded.datum;
+    const datum = meshDatum(position, nv);
     for (let i = 0; i < nv; i++) {
-      const e = home.east + position[i * 3];
-      const n = home.north - position[i * 3 + 2];      // z is south
+      const e = here.east + position[i * 3];
+      const n = here.north - position[i * 3 + 2];        // z is south
       const l = toLocal(e, n);
       position[i * 3] = l.x;
-      position[i * 3 + 1] -= datum;                    // metres above takeoff
+      position[i * 3 + 1] -= datum;                      // metres above takeoff
       position[i * 3 + 2] = -l.y;
     }
 
@@ -849,52 +861,34 @@ export function createScene3D(canvas) {
     geom.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     geom.setIndex(new THREE.BufferAttribute(index, 1));
 
-    // Fetched as a blob, NOT as an <img src>. Every /v1 route wants an
-    // X-Sync-Key and an <img> cannot send a header, so the tag 401s and the
-    // mesh draws flat grey -- which is exactly what happened, and exactly what
-    // docs/2026-09-08-hosting-the-service.md already records happening to
-    // server/public/scene.html's orthophoto. Twice is a pattern: if a picture
-    // comes from this service, it is a fetch and a bitmap.
-    const tex = await ask(`/v1/mesh.jpg?lat=${lat0}&lon=${lon0}`, { signal })
+    const tex = await ask(`/v1/mesh.jpg?lat=${lat}&lon=${lon}`, { signal })
       .then((r) => (r.ok ? r.blob() : null))
       // FLIPPED HERE, not on the texture. Texture.flipY is IGNORED for an
       // ImageBitmap -- three.js can only flip a source it uploads itself -- so
       // setting it did nothing, twice, and the mesh came up with black patches
       // where faces sampled the mirrored position of a chart. OBJ counts v from
-      // the bottom and the JPEG decodes from the top, and this is the only
-      // place that difference can be settled.
+      // the bottom and the JPEG decodes from the top; this is the only place
+      // the two conventions can meet.
       .then((b) => (b ? createImageBitmap(b, { imageOrientation: 'flipY' }) : null))
       .catch(() => null);
     let map = null;
     if (tex) {
       map = new THREE.Texture(tex);
-      // Raw, like every other picture here: our shaders write straight out.
       map.colorSpace = THREE.NoColorSpace;
-      // Nothing to set here: the flip happened at createImageBitmap, because
-      // Texture.flipY cannot touch an ImageBitmap.
-      // The atlas is 8192 x 4096 over one 100 m tile -- about 2 cm of ground
-      // per pixel -- and without this the ground reads as a smear at any
-      // oblique angle, which is every angle you actually look from. Trilinear
-      // filtering samples a mipmap chosen for the SHORT axis of a stretched
-      // pixel, so a surface seen edge-on gets a level meant for something far
-      // away. Anisotropy is the fix and it is the single biggest thing between
-      // this data and how it looked.
+      // The atlas is 8192 x 4096 over 100 m -- about 2 cm of ground per pixel
+      // -- and without this the ground reads as a smear at any oblique angle,
+      // which is every angle you look from.
       map.anisotropy = renderer.capabilities.getMaxAnisotropy();
       map.needsUpdate = true;
     }
 
-    meshGroup = new THREE.Mesh(geom, new THREE.ShaderMaterial({
+    const tile = new THREE.Mesh(geom, new THREE.ShaderMaterial({
       uniforms: { uMap: { value: map }, uHas: { value: map ? 1 : 0 } },
       side: THREE.DoubleSide,
-      // The normal is taken from the DERIVATIVES of the view-space position,
-      // not from the geometry. computeVertexNormals was the obvious thing and
-      // it painted whole roofs black: a photogrammetric mesh is full of
-      // degenerate triangles -- zero area, duplicate corners -- and a zero-area
-      // face normalises to NaN, which poisons the shading term and comes out
-      // black however high the ambient floor is. A fragment always has a
-      // well-defined derivative, so this cannot produce one. It is flat
-      // shading, which for half-metre triangles is what smooth would have
-      // looked like anyway, and it saves computing and shipping normals.
+      // The normal comes from the DERIVATIVES of the view-space position, not
+      // from computeVertexNormals: a photogrammetric mesh is full of zero-area
+      // triangles and one of those normalises to NaN, which poisons the shading
+      // term however high its floor. A fragment always has a derivative.
       vertexShader: `
         varying vec2 vUv;
         varying vec3 vPos;
@@ -913,21 +907,95 @@ export function createScene3D(canvas) {
         void main() {
           vec3 n = normalize(cross(dFdx(vPos), dFdy(vPos)));
           vec3 base = uHas == 1 ? texture2D(uMap, vUv).rgb : vec3(0.72, 0.70, 0.66);
-          // Two-sided: the mesh does not promise a winding, and a facade lit
-          // from behind is not information.
           gl_FragColor = vec4(base * lambert(gl_FrontFacing ? n : -n), 1.0);
         }`,
     }));
-    scene.add(meshGroup);
-    // The LiDAR surface covers the same ground, half a metre to the mesh's few
-    // centimetres, and the two interpenetrate: a roof modelled twice shows as
-    // whichever won the depth test per pixel. While this is a prototype the
-    // mesh simply wins, so what is on screen is one thing and can be judged.
-    if (surfaceMesh) surfaceMesh.visible = false;
-    onStatus(`Photogrammetric mesh: ${nt.toLocaleString()} triangles, `
-      + `${(raw.byteLength / 1e6).toFixed(1)} MB, 0.09 m in position, flown 2025-03-20. `
-      + 'The LiDAR surface is hidden under it.');
-    render();
+    meshGroup ??= new THREE.Group();
+    if (!meshGroup.parent) scene.add(meshGroup);
+    meshGroup.add(tile);
+    meshTiles.set(name, tile);
+    return { ok: true, name, triangles: nt, bytes: raw.byteLength };
+  }
+
+  // Where the ground is under the takeoff point, from the mesh itself.
+  //
+  // Without the LiDAR there is nothing else to measure it against, and the mesh
+  // has it: the lowest vertex within ten metres of the request point is the
+  // ground the aircraft leaves from. Ten metres because a footpath beside the
+  // house is ground and the roof twelve metres away is not; the lowest of a
+  // small neighbourhood is the floor, not a chimney.
+  function meshDatum(position, nv) {
+    let lowest = Infinity;
+    for (let i = 0; i < nv; i++) {
+      const x = position[i * 3];
+      const z = position[i * 3 + 2];
+      if (x * x + z * z > 100) continue;
+      if (position[i * 3 + 1] < lowest) lowest = position[i * 3 + 1];
+    }
+    // Nothing within ten metres -- a tile fetched for a neighbour, not for the
+    // takeoff point -- so fall back to the lowest thing in it.
+    if (!Number.isFinite(lowest)) {
+      for (let i = 0; i < nv; i++) if (position[i * 3 + 1] < lowest) lowest = position[i * 3 + 1];
+    }
+    return Number.isFinite(lowest) ? lowest : 0;
+  }
+
+  const sayMesh = () => onStatus(
+    `Photogrammetric mesh, ${meshTiles.size} tile${meshTiles.size === 1 ? '' : 's'} `
+    + 'of 100 m, 0.09 m in position, flown 2025-03-20. '
+    + 'Click the ground beyond the edge to fetch the next one.',
+  );
+
+  // Click bare ground to fetch the tile under it.
+  //
+  // One tile is 7.3 MB and covers 100 m, so they cannot all arrive at once and
+  // guessing which neighbours somebody wants would fetch eight to be useful.
+  // Pointing at the ground is the smallest way to say which.
+  //
+  // The click lands on the horizontal plane through the takeoff point rather
+  // than on any geometry -- the whole point is to click where there IS no
+  // geometry -- so it is a ray against y = 0, which is flat ground at the
+  // datum. On a hill that is out by the slope over the distance clicked, and
+  // it only has to land in the right 100 m square.
+  let dragged = false;
+  function meshDown() { dragged = false; }
+  function meshMove(ev) { if (ev.buttons) dragged = true; }
+  async function meshClick(ev) {
+    // A drag is how you orbit, so only a press that never moved counts. The
+    // native click event decides what a click IS -- an earlier version compared
+    // pointerdown and pointerup coordinates by hand and silently rejected every
+    // one of them, which cost an evening.
+    if (dragged || !meshMode() || !mission || !camera) return;
+    try {
+    const rect = canvas.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+      -((ev.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, camera);
+    const hit = new THREE.Vector3();
+    if (!ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), hit)) return;
+
+    const { lat0, lon0 } = mission.frame;
+    const home = toPuwg92(lat0, lon0);
+    const back = localToTile(mission.frame, home.east, home.north);
+    const off = back(hit.x, -hit.z);
+    const g = puwgToWgs84(home.east + off.e, home.north + off.n);
+
+    onStatus('Fetching the mesh tile you clicked…');
+    try {
+      const got = await loadMeshTile(g.lat, g.lon);
+      if (!got.ok) { onStatus(`Nothing there — ${got.why}.`); return; }
+      if (got.already) { onStatus('That tile is already loaded.'); return; }
+      render();
+      sayMesh();
+    } catch (e) {
+      onStatus(`That tile would not load — ${e.message}`);
+    }
+    } catch (e) {
+      onStatus(`Could not work out where you clicked — ${e.message}`);
+    }
   }
 
   function buildWires() {
@@ -1092,7 +1160,7 @@ export function createScene3D(canvas) {
   // tower standing beside your orbit. Looking down on it is a map.
   function frameCamera() {
     const path = mission?.exported ?? mission?.waypoints ?? [];
-    if (!path.length || !surfaceMesh) return;
+    if (!path.length || (!surfaceMesh && !meshGroup)) return;
     const frame = mission.frame;
     const box = new THREE.Box3();
     for (const w of path) {
@@ -1353,7 +1421,11 @@ export function createScene3D(canvas) {
       // then it is the arrival of a flight that has to start the loading. Not
       // doing this left the survey blank for exactly that entry, which is the
       // one a shared link uses.
-      if (!loaded) { api.open(); return; }
+      // `loaded` is the LiDAR, and mesh mode never sets it -- so without the
+      // second test every replan reopened the view and re-fetched the mesh,
+      // which is 7.3 MB a time.
+      if (!loaded && !meshTiles.size) { api.open(); return; }
+      if (meshTiles.size) { buildMission(); render(); return; }
       if (moved) buildSurface(); else { buildMission(); render(); }
     },
 
@@ -1422,10 +1494,22 @@ export function createScene3D(canvas) {
       const ctl = new AbortController();
       inFlight = ctl;
       try {
+        if (meshMode()) {
+          // No LiDAR at all in this mode -- see loadMeshTile. Building the
+          // heightfield first and hiding it when the mesh arrived meant
+          // waiting through minutes of the worse picture to reach the better
+          // one, and fetching hundreds of megabytes to throw away.
+          onStatus('Downloading the photogrammetric mesh…');
+          const got = await loadMeshTile(c.lat0, c.lon0, { signal: ctl.signal });
+          if (!got.ok) { onStatus(`No mesh here — ${got.why}.`); return; }
+          buildMission();
+          frameCamera();
+          render();
+          sayMesh();
+          return;
+        }
         await loadFor(c.lat0, c.lon0, { signal: ctl.signal });
         buildSurface();
-        // After the surface, so a mesh that fails leaves a working view.
-        await buildMesh({ signal: ctl.signal }).catch((e) => console.warn('mesh:', e));
         const n = loaded.meta.tiles?.length ?? 1;
         onStatus(`${loaded.meta.sources?.[0]?.year ?? 'LiDAR'} survey, `
           + `${loaded.meta.cellMetres * loaded.step} m cells, `

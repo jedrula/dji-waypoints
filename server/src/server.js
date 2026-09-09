@@ -563,6 +563,11 @@ const server = http.createServer(async (req, res) => {
           'Content-Type': 'application/octet-stream',
           'Content-Encoding': 'gzip',
           'Cache-Control': 'public, max-age=31536000, immutable',
+          // Named so the client can tell one tile from another and not fetch
+          // the same neighbour twice. Exposed, because a cross-origin reader
+          // sees no custom header without being told it may.
+          'X-Mesh-Tile': String(info.tile ?? ''),
+          'Access-Control-Expose-Headers': 'X-Mesh-Tile, X-Mesh-Meta',
           'X-Mesh-Meta': JSON.stringify({
             vertices: geom.vertices, triangles: geom.triangles, ...info,
           }).slice(0, 3900),

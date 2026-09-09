@@ -137,6 +137,9 @@ async function lidarView() {
     const { createScene3D } = await import('./scene3d.js');
     lidar = createScene3D($('lidar'));
     lidar.setLooks(looksOn);
+    // Set here as well as in setView, because this is created lazily and the
+    // first tile can load before the view is switched to.
+    lidar.setGround(basemaps.groundSpec(true));
     lidar.onStatus((text) => toast(text, { sticky: /minutes|Asking|Downloading/.test(text) }));
   }
   return lidar;
@@ -257,6 +260,10 @@ for (const btn of document.querySelectorAll('#viewtabs button')) {
 function pushGround() {
   if (!ready) return;
   view3d.setGround(basemaps.groundSpec(groundMode === 'imagery'));
+  // The survey view wants the same imagery, but only where the country has no
+  // orthophoto of its own -- so it gets the spec regardless of whether the flat
+  // view is painting with it.
+  lidar?.setGround(basemaps.groundSpec(true));
 }
 
 /* ---------- the address bar is where the view lives ---------- */

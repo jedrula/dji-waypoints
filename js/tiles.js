@@ -72,10 +72,20 @@ export function tileBounds(z, x, y) {
 // is how the view learns to draw itself again, because a tile that arrives
 // after the frame it was wanted for is otherwise invisible until you move.
 //
-// Nothing sets crossOrigin. These tiles carry no CORS headers, so asking for
-// them anonymously would fail the load outright; without it they draw fine and
-// merely taint the canvas, which costs us nothing -- the 3D view never reads
-// its own pixels back.
+// Nothing sets crossOrigin here, and the reason given used to be that these
+// tiles carry no CORS headers. That was wrong. Measured 2026-09-09:
+//
+//     curl -I -H 'Origin: http://localhost:8123' <a World_Imagery tile>
+//     HTTP/1.1 200 OK
+//     Access-Control-Allow-Origin: *
+//
+// It matters because a canvas tainted by a cross-origin image cannot become a
+// WebGL texture at all, and the claim would have stopped anyone from trying --
+// js/scene3d.js drapes these tiles on the LiDAR surface and needs a clean
+// canvas to do it, so it sets crossOrigin and it works.
+//
+// This cache still does not, because it has no need to: the flat view draws
+// straight to a 2D canvas and never reads its pixels back.
 export function createTileCache({ url, onLoad = () => {}, limit = 200, Image: Img } = {}) {
   const cache = new Map();
   const ImageCtor = Img ?? globalThis.Image;

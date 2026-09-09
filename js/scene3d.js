@@ -24,6 +24,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { toPuwg92 } from './puwg92.js';
+import { pickZoom, tileRange, tileBounds, TILE_PX } from './tiles.js';
 import { groundAt, puwgToLocal, drapeWire } from './surface.js';
 import { serviceUrl, serviceHeaders } from './service.js';
 import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, asHex } from './palette.js';
@@ -115,6 +116,7 @@ export function createScene3D(canvas) {
   let missionGroup = null;
   let wireGroup = null;
   let wirePaths = [];
+  let groundSpec = null;
   let looksOn = true;
   let surfaceMesh = null;
   let loaded = null;       // { tn, te, meta, height, kind, base }
@@ -242,6 +244,117 @@ export function createScene3D(canvas) {
           gl_FragColor = vec4(base * lambert(vNormal2), 1.0);
         }`,
     });
+  }
+
+  // The map's own imagery, reprojected onto the tile. The only source of
+  // colour this view has.
+  //
+  // The basemap has a picture of everywhere, which the national orthophoto does
+  // not -- that was the original complaint, a Krakow tile with no photo falling
+  // back to flat classification colours and reading as a grey abstraction.
+  //
+  // It is a FALLBACK, but NOT for the reason first given. The worry was that a
+  // third-party basemap is orthorectified against its own terrain model and
+  // would slide against this geometry, putting a roof off its walls. Measured
+  // instead, by cross-correlating the two pictures of tile 725/724 resampled to
+  // 0.98 m and shifting one against the other:
+  //
+  //     offset 0.0 m   r = 0.984      <- the peak, at zero
+  //            1.0 m   r = 0.906
+  //            4.9 m   r = 0.649
+  //           19.5 m   r = 0.285
+  //
+  // A sharp peak exactly at no shift, so over Poland these agree to under a
+  // metre -- an r of 0.984 between two supposedly independent photographs is
+  // itself the hint, since Esri licenses national orthophoto and this is very
+  // likely the same picture GUGiK gave us.
+  //
+  // What keeps GUGiK first is resolution and honesty about resampling: its
+  // photo is 24 cm per pixel in the projection the heights were measured in and
+  // needs no transform at all, where this is 37 cm at zoom 18 and goes through
+  // a reprojection. Where the country has a photo, that one wins.
+  //
+  // The reprojection is per source tile and affine. A basemap tile is
+  // axis-aligned in Web Mercator; this canvas is axis-aligned in PUWG92; and
+  // the two are not parallel -- grid north and true north differ by up to a
+  // degree in Poland, which is 8 m of skew across 500 m, so blitting the tiles
+  // square would visibly shear the picture. Over one tile the mapping is affine
+  // to well under a pixel, so three corners give the transform and drawImage
+  // does the rest. Same trick view3d.js uses per triangle, needed once per tile
+  // here because the target is flat rather than a perspective camera.
+  async function basemapTexture(meta) {
+    if (!groundSpec?.url) return null;
+    const { south, west, north, east } = meta.bounds;
+    // A bigger tile budget than the flat view's, because this is fetched once
+    // per 500 m tile rather than on every frame, and it is the only picture
+    // there is. Zoom 19 over a tile is about 121 requests of a few tens of
+    // kilobytes, which is what a map pane loads while you pan.
+    const z = Math.min(
+      pickZoom({ south, west, north, east }, { maxTiles: 160, maxZoom: 19 }),
+      groundSpec.maxZoom ?? 19,
+    );
+    const r = tileRange({ south, west, north, east }, z);
+
+    // 2048 over 500 m is 24 cm a pixel -- the same as the national orthophoto
+    // this replaced, and finer than the half-metre height grid it is draped on,
+    // so the geometry stays the limit rather than the picture. Zoom 19 is
+    // 18 cm at the source, so nothing is being enlarged.
+    const P = 2048;
+    const c = document.createElement('canvas');
+    c.width = P;
+    c.height = P;
+    const ctx = c.getContext('2d');
+    const { east: e0, north: n0 } = meta.origin;
+    const span = meta.tileMetres;
+    // PUWG92 metres to canvas pixels. Row 0 is the NORTH edge, which is the
+    // convention the surface's own UVs already use.
+    const px = (e, n) => ({ x: ((e - e0) / span) * P, y: ((n0 + span - n) / span) * P });
+
+    const load = (url) => new Promise((done) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';   // it becomes a WebGL texture
+      img.onload = () => done(img);
+      img.onerror = () => done(null);
+      img.src = url;
+    });
+
+    const jobs = [];
+    for (let ty = r.y0; ty <= r.y1; ty++) {
+      for (let tx = r.x0; tx <= r.x1; tx++) jobs.push({ tx, ty });
+    }
+    const imgs = await Promise.all(jobs.map((j) => load(groundSpec.url(z, j.tx, j.ty))));
+
+    let drawn = 0;
+    for (let i = 0; i < jobs.length; i++) {
+      const img = imgs[i];
+      if (!img) continue;
+      const b = tileBounds(z, jobs[i].tx, jobs[i].ty);
+      const corner = (lat, lon) => {
+        const g = toPuwg92(lat, lon);
+        return px(g.east, g.north);
+      };
+      // The tile's top-left, top-right and bottom-left, in canvas pixels.
+      const p0 = corner(b.north, b.west);
+      const p1 = corner(b.north, b.east);
+      const p2 = corner(b.south, b.west);
+      ctx.setTransform(
+        (p1.x - p0.x) / TILE_PX, (p1.y - p0.y) / TILE_PX,
+        (p2.x - p0.x) / TILE_PX, (p2.y - p0.y) / TILE_PX,
+        p0.x, p0.y,
+      );
+      // Half a source pixel of overlap, or the seams between tiles show as a
+      // grid of hairlines where two affines disagree by a rounding.
+      ctx.drawImage(img, -0.5, -0.5, TILE_PX + 1, TILE_PX + 1);
+      drawn++;
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    if (!drawn) return null;
+
+    const tex = new THREE.CanvasTexture(c);
+    // Raw, like the GUGiK drape and for the same reason -- see the note there.
+    tex.colorSpace = THREE.NoColorSpace;
+    tex.needsUpdate = true;
+    return tex;
   }
 
   // The sky, as a vertical two-stop gradient on a 2 px-wide canvas. Cheaper
@@ -721,30 +834,26 @@ export function createScene3D(canvas) {
       ortho: null,
     };
 
-    // The photograph, when the country has one here. It is the same orthophoto
-    // the geometry was measured with and in the same projection, so it is a
-    // straight drape -- no warping, unlike the third-party basemap the flat
-    // view uses. Without it the surface is coloured by classification, which is
-    // less pretty and no less true.
-    if (!meta.ortho?.empty) {
-      onStatus('Downloading the orthophoto…');
-      try {
-        const jpg = await ask(`/v1/scene/${tile.tn}/${tile.te}.jpg`, { signal });
-        if (jpg.ok) {
-          const bitmap = await createImageBitmap(await jpg.blob());
-          const tex = new THREE.Texture(bitmap);
-          // Sampled raw, NOT as sRGB. Our surface shader writes gl_FragColor
-          // straight out with no encode of its own -- the same as the service
-          // viewer, which is a plain RGBA8 texture and a plain write -- so
-          // asking three.js to decode to linear on sample would leave the
-          // whole picture a stop and a half dark. The one place the two
-          // renderers could have silently disagreed about the same photo.
-          tex.colorSpace = THREE.NoColorSpace;
-          tex.needsUpdate = true;
-          next.ortho = tex;
-        }
-      } catch { /* colour by classification instead */ }
-    }
+    // The picture comes from the map, always. The LiDAR measures the depth and
+    // the map provides the graphics, and that division is the whole design:
+    // look straight down at this surface and you are looking at the left-hand
+    // pane, because it is the same imagery.
+    //
+    // GUGiK's own orthophoto used to be fetched here in preference and it is
+    // gone. It was the better source on paper -- the same photograph the
+    // heights were measured from, in the same projection, no transform at all
+    // -- but it bought nothing that survived measurement, and it cost the
+    // thing that matters. It does not exist over most of the country, so the
+    // survey view fell back to flat classification colours and read as a grey
+    // abstraction; that was the original complaint. And the two panes showed
+    // different pictures of the same ground for no reason a user could see.
+    //
+    // The alignment worry that justified preferring it was tested rather than
+    // asserted -- see basemapTexture -- and the two agree to under a metre.
+    onStatus('Draping the map…');
+    try {
+      next.ortho = await basemapTexture(meta);
+    } catch { /* colour by classification instead, which is no less true */ }
 
     // The buildings, as solids with walls -- the one thing the surface cannot
     // hold. Not fatal if it fails: the surface stands on its own and the wall
@@ -796,6 +905,33 @@ export function createScene3D(canvas) {
       render();
     },
 
+    // The basemap the map on the left is showing, which is where this view's
+    // every pixel comes from. Switching the picker re-drapes, because the two
+    // panes showing different pictures of the same ground is the thing this
+    // arrangement exists to prevent.
+    //
+    // Keyed on a generated URL rather than on the spec: groundSpec.url is built
+    // fresh on every call, so comparing the functions would re-drape forever.
+    async setGround(spec) {
+      const was = groundSpec?.url?.(0, 0, 0) ?? null;
+      groundSpec = spec ?? null;
+      const now = groundSpec?.url?.(0, 0, 0) ?? null;
+      if (was === now || !loaded || !renderer) return;
+      const tex = await basemapTexture(loaded.meta).catch(() => null);
+      if (!tex) return;
+      loaded.ortho?.dispose?.();
+      loaded.ortho = tex;
+      // Swap the texture on the material rather than rebuilding the surface.
+      // buildSurface ends by re-framing the camera, so re-draping through it
+      // threw away whatever view you had orbited to -- for a change of
+      // basemap, which alters not one vertex.
+      if (surfaceMesh) {
+        surfaceMesh.material.uniforms.uOrtho.value = tex;
+        surfaceMesh.material.uniforms.uHasOrtho.value = 1;
+      }
+      render();
+    },
+
     onStatus(fn) { onStatus = fn ?? (() => {}); },
 
     // Opening the view is what fetches three.js, the surface and the photo. The
@@ -844,17 +980,28 @@ export function createScene3D(canvas) {
                spanM: Math.max(20, 2 * dist * Math.tan((camera.fov * Math.PI) / 360)) };
     },
 
+    // Reproduce the map: straight down, north up, the same width of ground.
+    //
+    // It used to keep whatever angle you had already orbited to, on the
+    // reasoning that a sync should not throw away a view you spent time
+    // getting. That was the wrong call for what this button is for. The reason
+    // to point the 3D at the map is to CHECK the two against each other, and
+    // that only works if looking down gives you the map back -- same place,
+    // same scale, same way up. An oblique view at the right centre cannot be
+    // compared with anything.
+    //
+    // The nudge is not a fudge. Directly above the target, the up vector is
+    // degenerate and the screen rotation is undefined; a thousandth of the
+    // distance to the south puts OrbitControls at azimuth 0, where screen-up
+    // works out as north, and tilts the camera by 0.06 of a degree.
     lookAt({ lat, lon, spanM }) {
       if (!mission || !controls) return;
       const l = mission.frame.toLocal(lat, lon);
-      // Keep the direction the camera is already pointing from and only move
-      // it: a sync that also reset the angle would throw away the view you had
-      // spent time getting to.
-      const offset = camera.position.clone().sub(controls.target);
-      const want = (spanM / 2) / Math.tan((camera.fov * Math.PI) / 360);
-      offset.setLength(Math.max(20, want));
+      // Half the span subtends half the field of view, so this is the height
+      // at which exactly spanM of ground is in shot.
+      const dist = Math.max(20, (spanM / 2) / Math.tan((camera.fov * Math.PI) / 360));
       controls.target.set(l.x, 0, -l.y);
-      camera.position.copy(controls.target).add(offset);
+      camera.position.set(l.x, dist, -l.y + dist * 0.001);
       controls.update();
       render();
     },

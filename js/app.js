@@ -23,6 +23,7 @@ import { CAMERAS, gsdCm } from './camera.js';
 import { planMission, proposePlan, splitMission, pointsFromRect, DEFAULTS, DJI_FLY_MAX_WAYPOINTS } from './planner.js';
 import { SHAPES, DEFAULT_SHAPE, footprintOf, polygonArea } from './shape.js';
 import { frame, mPerDegLat, mPerDegLon } from './geo.js';
+import { mPerPx } from './tiles.js';
 import { buildKmz } from './wpml.js';
 import { createView3D } from './view3d.js';
 import { scoreCoverage } from './coverage.js';
@@ -183,6 +184,10 @@ function setView(name) {
   // map, the imagery button paints the ground under the 3D.
   $('routeToggle').hidden = !showMap;
   $('groundtabs').hidden = !show3d;
+  // Each sync is only offered when the view it READS from is on screen: there
+  // is no sense in aiming the 3D at a map you cannot see.
+  $('syncTo3d').hidden = !showMap;
+  $('syncToMap').hidden = !show3d;
   $('findplace').hidden = !showMap;
   if (!showMap) openPlace(false);
   showRecentre();
@@ -1693,6 +1698,43 @@ $('findme').addEventListener('click', () => findMe());
 for (const b of document.querySelectorAll('#groundtabs button')) {
   b.addEventListener('click', () => setGround(b.dataset.ground));
 }
+
+// The two views are not tied together, on purpose: you pan the map to find the
+// next thing while the 3D stays on what you are working on. These are how you
+// tie them when you want to, one button per direction.
+//
+// They meet in the middle rather than sharing a camera. The map speaks lat/lon
+// and a zoom; a 3D view speaks local metres and a camera distance. Neither
+// converts to the other, so both answer "where are you looking, and how much of
+// the ground is in shot" -- a centre and a span -- and that is the whole of it.
+const active3d = () => (groundMode === 'survey' ? lidar : view3d);
+
+// How wide the map is showing, in metres of ground across the pane.
+function mapSpanM() {
+  const b = map.getBounds();
+  const mid = (b.getNorth() + b.getSouth()) / 2;
+  return Math.max(20, (b.getEast() - b.getWest()) * mPerDegLon(mid));
+}
+
+$('syncTo3d').addEventListener('click', () => {
+  const v = active3d();
+  if (!v?.lookAt) { toast('Nothing in the 3D view to point yet.'); return; }
+  const c = map.getCenter();
+  v.lookAt({ lat: c.lat, lon: c.lng, spanM: mapSpanM() });
+  toast('The 3D view is looking where the map is.');
+});
+
+$('syncToMap').addEventListener('click', () => {
+  const at = active3d()?.where?.();
+  if (!at) { toast('Tap out a site first — there is nothing to line up on.'); return; }
+  // A span back to a zoom: the level whose ground-per-pixel fills the pane
+  // with that much ground. Never past 21, which is as far as the imagery goes.
+  const px = Math.max(200, $('map').clientWidth || 800);
+  let z = 21;
+  while (z > 3 && mPerPx(at.lat, z) * px < at.spanM) z -= 1;
+  map.setView([at.lat, at.lon], z, { animate: false });
+  toast('The map is looking where the 3D view is.');
+});
 
 // Overhead lines: on, and fetch any this view has not asked about yet. The
 // register is the only source for them, so the switch does the asking too --

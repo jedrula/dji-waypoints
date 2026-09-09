@@ -676,6 +676,27 @@ Obstacles also block the **camera**, not just the aircraft: the coverage score
 stops counting a surface it can only see through a box. They are never scored
 themselves — a tree next to the house is not a surface you failed to photograph.
 
+## Two views, tied together only when you say so
+
+The map and the 3D pane keep their own cameras. That is the useful default:
+you pan the map to find the next thing while the 3D stays on what you are
+working on, and a shared camera would take that away.
+
+So each pane gets a button that points the OTHER one at what it is showing —
+under that pane's own controls, on the side of the divider it belongs to. They
+are only offered when the pane they read from is on screen: there is no sense
+in aiming the 3D at a map you cannot see.
+
+They meet in the middle rather than sharing state. The map speaks lat/lon and a
+zoom; a 3D view speaks local metres and a camera distance. Neither is converted
+into the other — both answer *where are you looking, and how much ground is in
+shot*, a centre and a span, and that is the whole interface. Both 3D renderers
+answer it, so the app syncs whichever one is up without knowing which.
+
+Syncing the map picks the zoom that shows **at least** the span the 3D had, so
+a round trip can come back one level wider. That is the safe direction: you
+see everything you were looking at.
+
 ## Overhead lines
 
 Their own switch in the left stack, on the map and in the survey at the same

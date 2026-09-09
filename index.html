@@ -111,6 +111,27 @@
         </svg>
       </button>
     </div>
+    <!-- The two views are deliberately not tied together -- you pan the map to
+         find the next thing while the 3D stays on what you are working on --
+         so this is how you tie them when you want to. One button per
+         direction, and each is only there when the view it reads from is. -->
+    <button id="syncTo3d" type="button" class="maptoggle"
+            title="Point the 3D view at what the map is showing">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2.5" y="6" width="8" height="12" rx="1.5"/>
+        <path d="M13.5 12h7M17.5 9l3 3-3 3"/>
+      </svg>
+    </button>
+    <button id="syncToMap" type="button" class="maptoggle" hidden
+            title="Point the map at what the 3D view is showing">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="13.5" y="6" width="8" height="12" rx="1.5"/>
+        <path d="M10.5 12h-7M6.5 9l-3 3 3 3"/>
+      </svg>
+    </button>
+
     <!-- Overhead lines, from the national register. Its own control rather than
          part of the ground picker, because it is a hazard layer and not a
          backdrop: it belongs on the map AND in the survey, at the same time. -->

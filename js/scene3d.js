@@ -453,6 +453,34 @@ export function createScene3D(canvas) {
       }
     },
 
+    // The same two calls js/view3d.js answers, so the app can sync whichever
+    // 3D view is up without asking which. A place on the ground and how much
+    // of it is in shot; the camera's height above the target is its own
+    // business and is left alone.
+    where() {
+      if (!mission || !controls) return null;
+      const t = controls.target;
+      const g = mission.frame.toLatLon(t.x, -t.z);
+      const dist = camera.position.distanceTo(t);
+      return { lat: g.lat, lon: g.lon,
+               spanM: Math.max(20, 2 * dist * Math.tan((camera.fov * Math.PI) / 360)) };
+    },
+
+    lookAt({ lat, lon, spanM }) {
+      if (!mission || !controls) return;
+      const l = mission.frame.toLocal(lat, lon);
+      // Keep the direction the camera is already pointing from and only move
+      // it: a sync that also reset the angle would throw away the view you had
+      // spent time getting to.
+      const offset = camera.position.clone().sub(controls.target);
+      const want = (spanM / 2) / Math.tan((camera.fov * Math.PI) / 360);
+      offset.setLength(Math.max(20, want));
+      controls.target.set(l.x, 0, -l.y);
+      camera.position.copy(controls.target).add(offset);
+      controls.update();
+      render();
+    },
+
     close() { running = false; inFlight?.abort?.(); inFlight = null; },
     resize() { render(); },
     ready: () => Boolean(loaded),

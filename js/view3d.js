@@ -993,5 +993,26 @@ export function createView3D(canvas) {
     draw,
     reset() { framedKey = null; build(); draw(); },
     get view() { return view; },
+
+    // Where this view is looking, as a place on the ground and how much of it
+    // is in shot. The map speaks lat/lon and zoom and this speaks local metres
+    // and a camera distance, so the pair of them meet in the middle: a centre
+    // and a span. Both 3D views answer the same two calls, so js/app.js can
+    // sync whichever one is up without knowing which it is.
+    where() {
+      if (!mission) return null;
+      const g = mission.frame.toLatLon(view.target.x, view.target.y);
+      // The inverse of the framing in build(): dist is set to span * 2.2 for a
+      // site of that span, so a span comes back out the same way.
+      return { lat: g.lat, lon: g.lon, spanM: Math.max(20, view.dist / 2.2) };
+    },
+
+    lookAt({ lat, lon, spanM }) {
+      if (!mission) return;
+      const l = mission.frame.toLocal(lat, lon);
+      view.target = { x: l.x, y: l.y, z: view.target.z };
+      view.dist = Math.max(5, Math.min(6000, spanM * 2.2));
+      draw();
+    },
   };
 }

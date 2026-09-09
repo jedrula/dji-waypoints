@@ -32,6 +32,11 @@ body {
 #bar { flex: 0 0 auto; min-height: var(--bar); max-height: 50dvh; overflow-y: auto;
        background: var(--panel); border-bottom: 1px solid var(--line);
        padding: var(--pad) var(--pad) 10px; display: flex; flex-direction: column; gap: 9px; }
+/* The band SCROLLS when it runs out of room; it does not squash what is in it.
+   A flex child shrinks by default, so once the band hit its half-screen cap a
+   long alert flattened the numbers above it to a nine-pixel stripe -- content
+   still there, nothing readable. */
+#bar > * { flex-shrink: 0; }
 #stage { flex: 1 1 auto; position: relative; min-height: 0; }
 #map { position: absolute; inset: 0; background: #0b0e11; }
 #map[hidden] { display: none; }
@@ -262,6 +267,12 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
    control offering to take you somewhere you already are is just clutter. */
 #recentre { top: 272px; }
 #findplace { top: 226px; }
+/* Each sync belongs to the pane it READS from, so it sits with that pane's own
+   controls: on the right of the map under the basemap picker, on the right of
+   the 3D under the ground picker. The left stack was seven buttons deep with
+   these in it, and on a short window the bottom two fell off the pane. */
+#syncTo3d, #syncToMap { top: 82px; left: auto; right: 10px; }
+#stage.split #syncTo3d { right: calc(100% - var(--split) + 10px); }
 /* Wires belong to both views at once -- they are a hazard, not a backdrop --
    so this is the one .maptoggle that stays put when the 3D comes up. */
 #wiresBtn { top: 180px; }
@@ -407,6 +418,9 @@ code { background: var(--panel2); border-radius: 4px; padding: 1px 5px; font-siz
                         inset: var(--split) 0 0 0; width: 100%; height: calc(100% - var(--split));
                         border-left: 0; border-top: 1px solid var(--line); }
   #stage.split #basetabs { right: 10px; }
+  /* Stacked panes: the map is on top, so its control keeps the top-right. */
+  #stage.split #syncTo3d { right: 10px; }
+  #stage.split #syncToMap { top: calc(var(--split) + 36px); }
   #splitter { inset: var(--split) 0 auto 0; width: auto; height: 24px;
               margin: -12px 0 0 0; cursor: row-resize; }
   #splitter::after { inset: 11px 0; }

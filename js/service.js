@@ -7,22 +7,61 @@ import { KEY_OK } from '../sync/protocol.js';
 // grew its own copy of this rule and its own localStorage key, which meant
 // hosting the thing was two edits in two files that had to agree.
 //
-// A local page talks to a local service, so a laptop already running one needs
-// no configuring. Every other page goes to the hosted one.
-const LOCAL = /^(localhost|127\.0\.0\.1)$/.test(globalThis.location?.hostname ?? '');
-
-// Hosted 2026-09-08 on the home Linux box: a second hostname on the Cloudflare
-// tunnel that already fronts api.topomatch.com -- the same tunnel and the same
+// There are two of these and there is one table of them. `hosted` went up
+// 2026-09-08 on the home Linux box: a second hostname on the Cloudflare tunnel
+// that already fronts api.topomatch.com -- the same tunnel and the same
 // connector, with the service in the tmux session start-dev.sh builds.
 //
 // Routing it through that box's gateway on :8000, the way the other services
-// there are reached, was the other option and would have cost the allowlist
-// below: the gateway sets Access-Control-Allow-Origin: * and Starlette
-// overwrites rather than appends, so ORIGIN_OK would have become decorative.
-const DEFAULT_URL = LOCAL ? 'http://localhost:8130' : 'https://drone.topomatch.com';
+// there are reached, was the other option and would have cost the allowlist in
+// server/src/server.js: the gateway sets Access-Control-Allow-Origin: * and
+// Starlette overwrites rather than appends, so ORIGIN_OK would have become
+// decorative.
+export const SERVICES = {
+  local: { url: 'http://localhost:8130', label: 'this machine' },
+  hosted: { url: 'https://drone.topomatch.com', label: 'drone.topomatch.com' },
+  // Not a service, and in the table because it is a choice: no service at all.
+  // Every height stays the marked estimate it was and every list stays on this
+  // device, which is how the whole app worked before any of this existed and is
+  // still a working way to use it. Naming it keeps that path reachable -- and
+  // exercised -- rather than leaving it as code nothing can enter.
+  off: { url: '', label: 'none, work offline' },
+};
 
-// For pointing one browser somewhere else without touching the source.
-export const OVERRIDE = 'dji.serviceUrl';
+const LOCAL = /^(localhost|127\.0\.0\.1)$/.test(globalThis.location?.hostname ?? '');
+
+// Which one, by name, and it is a name rather than a URL on purpose: this used
+// to be localStorage['dji.serviceUrl'] holding an address you had to know and
+// type into a console, which is not a way to switch backend. There are two
+// backends. Naming them means the app can offer both, say which one it is on,
+// and say whether that one is answering -- see the Advanced pane.
+//
+// `auto` is the default and is almost always right: a page served from this
+// machine talks to a service on this machine, and a page served from anywhere
+// else has no local service to talk to. Naming one overrules that, which is
+// what a local page pointed at the hosted service needs.
+export const CHOICE_STORE = 'dji.service';
+export const CHOICES = ['auto', ...Object.keys(SERVICES)];
+
+export function serviceChoice() {
+  try {
+    const got = globalThis.localStorage?.getItem(CHOICE_STORE);
+    return CHOICES.includes(got) ? got : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+export function setServiceChoice(name) {
+  if (!CHOICES.includes(name)) throw new Error(`No service called ${name}.`);
+  try {
+    globalThis.localStorage?.setItem(CHOICE_STORE, name);
+  } catch { /* blocked; the choice lasts this page load, like the key */ }
+  return name;
+}
+
+// Which one `auto` means here.
+export const autoService = () => (LOCAL ? 'local' : 'hosted');
 
 // One key, one library. Generated on this device the first time anything needs
 // it and kept, so a fresh install is isolated from every other install by
@@ -88,10 +127,7 @@ export function setServiceKey(key) {
 export const serviceHeaders = (extra = {}) => ({ 'X-Sync-Key': serviceKey(), ...extra });
 
 export function serviceUrl() {
-  try {
-    return (globalThis.localStorage?.getItem(OVERRIDE) ?? DEFAULT_URL).replace(/\/$/, '');
-  } catch {
-    // A browser with storage blocked still gets the default.
-    return DEFAULT_URL;
-  }
+  const pick = serviceChoice();
+  const name = pick === 'auto' ? autoService() : pick;
+  return SERVICES[name].url.replace(/\/$/, '');
 }

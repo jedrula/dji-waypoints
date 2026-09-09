@@ -1940,10 +1940,39 @@ console.log('\ncontroller bridge');
 // touches the service: the tile is a Uint8Array this test writes by hand.
 {
   console.log('\nmeasured heights');
-  globalThis.localStorage = { getItem: () => 'http://heights.test', setItem() {} };
+  globalThis.localStorage = { getItem: () => 'local', setItem() {} };
   const { measure, surveyCeiling, serviceUrl, _internals } = await import('../js/heights.js');
   const { toPuwg92 } = await import('../js/puwg92.js');
-  ok('reads the service url from storage', serviceUrl() === 'http://heights.test');
+  ok('takes the service it is told to', serviceUrl() === 'http://localhost:8130');
+
+  // Which backend, by name. There are two of them and an off switch, and the
+  // choice used to be a URL you typed into a console -- which told you where
+  // you were pointed and gave you no way to point.
+  {
+    const svc = await import('../js/service.js');
+    const kept = globalThis.localStorage;
+    const at = (v) => { globalThis.localStorage = { getItem: () => v, setItem() {} }; };
+    ok('the names are the two services and an off switch',
+       svc.CHOICES.join() === 'auto,local,hosted,off');
+    at('local');
+    ok('local is this machine', svc.serviceUrl() === 'http://localhost:8130');
+    at('hosted');
+    ok('hosted is the box on the tunnel', svc.serviceUrl() === 'https://drone.topomatch.com');
+    at('off');
+    ok('off is no service, which every caller already handles',
+       svc.serviceUrl() === '' && svc.serviceChoice() === 'off');
+    // A stale value from an older build, or junk, must not leave the app with
+    // no address at all -- it falls back to working it out.
+    at('http://whatever-this-used-to-be');
+    ok('an address where a name should be falls back to automatic',
+       svc.serviceChoice() === 'auto' && svc.serviceUrl() !== '');
+    at(null);
+    ok('and so does nothing at all', svc.serviceChoice() === 'auto');
+    let threw = null;
+    try { svc.setServiceChoice('staging'); } catch (e) { threw = e.message; }
+    ok('a service that does not exist is refused', /staging/.test(threw ?? ''), String(threw));
+    globalThis.localStorage = kept;
+  }
 
   const SIZE = 500, TILE = 500;
   // A tile where one 40 m patch is 30 m tall, one is no-data, rest is flat.
@@ -2142,10 +2171,10 @@ console.log('\ncontroller bridge');
      dead.measured === 0 && dead.obstacles[0].height === 24 && /refused/.test(dead.reason));
 
   _internals.reset();
-  globalThis.localStorage = { getItem: () => '', setItem() {} };
+  globalThis.localStorage = { getItem: () => 'off', setItem() {} };
   const off = await measure([box(at, on, 20)], { fetchImpl, waitMs: 0 });
   ok('no service configured means no round trip', off.reason === 'no service' && off.measured === 0);
-  globalThis.localStorage = { getItem: () => 'http://heights.test', setItem() {} };
+  globalThis.localStorage = { getItem: () => 'local', setItem() {} };
 
   // Tiles are fetched once each however many obstacles sit on them.
   _internals.reset();
@@ -2158,7 +2187,7 @@ console.log('\ncontroller bridge');
 // -- overhead lines as obstacles --------------------------------------------
 {
   console.log('\noverhead lines as obstacles');
-  globalThis.localStorage = { getItem: () => 'http://heights.test', setItem() {} };
+  globalThis.localStorage = { getItem: () => 'local', setItem() {} };
   const { fetchLines, lineToObstacles, tilesFor, _internals } = await import('../js/lines.js');
   const { toPuwg92 } = await import('../js/puwg92.js');
   const { isImported, isEstimated, labelOf } = await import('../js/site.js');
@@ -2218,7 +2247,7 @@ console.log('\ncontroller bridge');
   ok('and each line comes back as one strip', got.obstacles.length === got.lines,
      `${got.obstacles.length} for ${got.lines}`);
 
-  globalThis.localStorage = { getItem: () => '', setItem() {} };
+  globalThis.localStorage = { getItem: () => 'off', setItem() {} };
   _internals.reset();
   const off = await fetchLines({ south: 53.205, north: 53.21, west: 15.832, east: 15.839 }, { fetchImpl });
   ok('no service means no round trip', off.reason === 'no service' && off.obstacles.length === 0);

@@ -65,18 +65,15 @@ Two servers: the app on 8123 as usual, this one on 8130.
 cd server && npm install && npm start
 ```
 
-That is all the wiring there is. The app turns this on by itself when the page
-is on localhost, so open the app, pan to somewhere in Poland, switch to
-Obstacles and press **Obstacles here**. To point it at a service running
-anywhere else:
+That is all the wiring there is. The app talks to a service on this machine by
+itself when the page is on localhost, so open the app, pan to somewhere in
+Poland, switch to Obstacles and press **Obstacles here**.
 
-```js
-localStorage['dji.serviceUrl'] = 'https://dji.example.com'   // '' to switch off
-```
-
-One address for the whole service -- heights, lines, the rough model and the
-two synced lists. `js/service.js` owns it, and it is the only thing that has to
-change to host this somewhere.
+Which backend is a named choice in **Advanced** -- automatic, this machine, the
+hosted one, or none -- with the address it resolved to and a Check button that
+does one round trip to `/v1/health`. The names live in `js/service.js`, which
+owns the one address for the whole service: heights, lines, the rough model and
+the two synced lists. Adding a third deployment is a row in that table.
 
 The first import over new ground is slow and says so -- the button counts
 tiles, and a toast warns that the survey is coming down. Over Cybulskiego at

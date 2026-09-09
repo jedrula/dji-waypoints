@@ -126,6 +126,14 @@
   <div class="sheetbody">
 
     <div class="sheetpane" id="pane-adv" hidden>
+      <!-- Everything below this line goes through the service, so which service
+           it is belongs at the top of the pane rather than in a console. -->
+      <div class="syncrow">
+        <select id="servicePick" aria-label="Which service to use"></select>
+        <button id="servicePing" type="button">Check</button>
+      </div>
+      <p class="hint" id="serviceHint"></p>
+
       <button id="clearOsm" class="block" type="button">Remove imported obstacles</button>
       <p class="hint"><b>Obstacles here</b>, over the map in obstacle mode, brings in buildings,
       trees and power lines from OpenStreetMap for whatever is on screen. It knows where they

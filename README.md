@@ -1112,8 +1112,7 @@ tests run against it over a real socket.
 `server/` is hosted at **https://drone.topomatch.com** as of 2026-09-08, on a
 home Linux box, as a second hostname on the Cloudflare tunnel that already
 fronts another service there — the same tunnel and the same connector, not a
-second one. The address is `http://localhost:8130` when the page is itself
-local, so a laptop running its own copy needs no configuring.
+second one.
 
 One address, in `js/service.js`, for the whole service: heights, overhead
 lines, the rough model and both synced lists. Heights and sync each used to
@@ -1121,6 +1120,35 @@ carry their own copy of that rule and their own localStorage key, so hosting
 this was two edits in two files that had to agree; it was one when the day
 came, and turning on measured heights and two-device sync was that single
 edit, because they were always the same decision.
+
+### Which backend, and is it up
+
+There are two of them and one table of them, in `js/service.js`. **Advanced**
+offers the names — automatic, this machine, drone.topomatch.com, or none — with
+the address it resolved to and a **Check** button.
+
+Automatic is the default and is almost always right: a page served from this
+machine talks to a service on this machine, and a page served from anywhere
+else has no local one to talk to. Naming one overrules that, which is what a
+page on localhost pointed at the hosted service needs — testing the thing you
+are about to deploy against is the whole reason this is in the UI.
+
+*None* is in the list because it is a real state and not a broken one: every
+height stays the marked estimate it was, every list stays on this device, and
+that is how the whole app worked before there was a service. Naming it keeps
+that path reachable and exercised rather than leaving it as code nothing can
+enter.
+
+The choice was `localStorage['dji.serviceUrl']` holding an address, which is a
+way to know where you are pointed and not a way to point. It is
+`localStorage['dji.service']` holding a name now, and anything else in there —
+junk, or an address from the old scheme — falls back to automatic rather than
+leaving the app with no address at all.
+
+**Check** exists because two failures look identical from the browser: nothing
+running on this laptop, and a tunnel that is down. One round trip to
+`/v1/health` tells them apart and names the address in either answer. It is the
+only request in the app nobody has to make.
 
 Every route needs the `X-Sync-Key` header now, not just the two list routes.
 That gate used to sit inside them, which left `/v1/*` open — and a `/v1/tile`

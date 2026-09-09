@@ -40,7 +40,8 @@ import { createHistory } from './history.js';
 import { judgeFix, parseHeight, MAX_ACCURACY } from './walk.js';
 import { bestFix, watchAccuracy, GPS_ERRORS, STALE_MS } from './gps.js';
 import { sampleTerrain, verdict as terrainVerdict } from './terrain.js';
-import { serviceUrl } from './service.js';
+import { serviceUrl, serviceHeaders, serviceChoice, setServiceChoice, autoService, SERVICES, CHOICES }
+  from './service.js';
 
 const cam = CAMERAS.mini5pro;
 const $ = (id) => document.getElementById(id);
@@ -977,6 +978,71 @@ async function importHere() {
     } finally {
       btn.disabled = false;
       btn.textContent = was;
+    }
+  });
+}
+
+// Which service, and is it answering.
+//
+// There are two and they are named in js/service.js, so this offers the names
+// rather than an address to type: `auto` -- a page from this machine talks to a
+// service on this machine -- or either one on purpose. It was a URL you set in
+// localStorage from the console, which is a way to know where you are pointed
+// and not a way to point.
+//
+// The Check button exists because the two failure modes look identical from
+// here: nothing running on this laptop, and a tunnel that is down. One round
+// trip to /v1/health tells them apart, and it is the only request in the app
+// nobody has to make.
+{
+  const pick = $('servicePick');
+  for (const name of CHOICES) {
+    const o = document.createElement('option');
+    o.value = name;
+    o.textContent = name === 'auto'
+      ? `Service: automatic (${SERVICES[autoService()].label})`
+      : `Service: ${SERVICES[name].label}`;
+    pick.append(o);
+  }
+
+  const say = (text) => { $('serviceHint').textContent = text; };
+  const describe = () => {
+    const url = serviceUrl();
+    say(url ? `Talking to ${url}. Heights, overhead lines, the 3D model and`
+      + ' syncing your plans all go there.'
+      : 'No service. Heights stay estimates and your lists stay on this device.');
+  };
+
+  // Reading the choice rather than assuming: another tab may have changed it.
+  pick.value = serviceChoice();
+  describe();
+
+  pick.addEventListener('change', () => {
+    setServiceChoice(pick.value);
+    // Nothing to reload: every caller asks serviceUrl() per request, so the
+    // next height, line or sync goes to the new one.
+    describe();
+    renderReadout();
+  });
+
+  $('servicePing').addEventListener('click', async () => {
+    const url = serviceUrl();
+    if (!url) { describe(); return; }
+    $('servicePing').disabled = true;
+    say(`Asking ${url}…`);
+    try {
+      const res = await fetch(`${url}/v1/health`, { headers: serviceHeaders() });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) { say(`${url} answered ${res.status}.`); return; }
+      const busy = (body.building ?? 0) + (body.queued ?? 0);
+      say(`${url} is answering${busy ? `, building ${busy} tile${busy === 1 ? '' : 's'}` : ''}.`
+        + ` Survey grid ${body.tileMetres ?? '?'} m.`);
+    } catch (e) {
+      // A local service that is not running and a tunnel that is down both
+      // land here, which is why the address is in the message.
+      say(`${url} did not answer — ${e.message}.`);
+    } finally {
+      $('servicePing').disabled = false;
     }
   });
 }

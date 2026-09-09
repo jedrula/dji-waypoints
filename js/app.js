@@ -127,12 +127,16 @@ let lidar = null;
 // tools/wire-spike.mjs for the attempt and why it found nothing -- so it comes
 // from the national register instead, and is worth its own switch.
 let wiresOn = false;
+// Shown by default: the first question anyone asks of a 3D route is which way
+// the camera is facing, and answering it unasked is cheaper than a discovery.
+let looksOn = true;
 let wirePaths = [];
 
 async function lidarView() {
   if (!lidar) {
     const { createScene3D } = await import('./scene3d.js');
     lidar = createScene3D($('lidar'));
+    lidar.setLooks(looksOn);
     lidar.onStatus((text) => toast(text, { sticky: /minutes|Asking|Downloading/.test(text) }));
   }
   return lidar;
@@ -186,6 +190,7 @@ function setView(name) {
   // is no sense in aiming the 3D at a map you cannot see.
   $('syncTo3d').hidden = !showMap;
   $('syncToMap').hidden = !show3d;
+  $('looksBtn').hidden = !show3d;
   $('findplace').hidden = !showMap;
   if (!showMap) openPlace(false);
   showRecentre();
@@ -265,6 +270,7 @@ function writeUrl() {
   q.set('z', String(map.getZoom()));
   if (groundMode !== 'imagery') q.set('s', groundMode);
   if (wiresOn) q.set('w', '1');
+  if (!looksOn) q.set('k', '0');
   for (const k of MOCK_KEYS) if (opened.has(k)) q.set(k, opened.get(k));
   const code = planCode();
   window.history.replaceState(null, '', `?${q}${code ? `#plan=${code}` : ''}`);
@@ -276,6 +282,7 @@ function readUrl() {
   if (['map', 'split', '3d'].includes(q.get('v'))) setView(q.get('v'));
   if (GROUNDS.includes(q.get('s'))) setGround(q.get('s'));
   if (q.get('w') === '1') { wiresOn = true; drawWires(); }
+  if (q.get('k') === '0') setLooks(false);
   const [lat, lon] = (q.get('c') ?? '').split(',').map(Number);
   const zoom = Number(q.get('z'));
   if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
@@ -1442,6 +1449,17 @@ $('syncToMap').addEventListener('click', () => {
 // Overhead lines: on, and fetch any this view has not asked about yet. The
 // register is the only source for them, so the switch does the asking too --
 // there is nothing else to turn on.
+// Which way every lens is facing, drawn in the space it faces into. One line
+// of state, because the picture is built from the plan the view already has --
+// yaw and pitch are resolved by the planner for every heading mode, so there is
+// nothing to fetch and nothing to keep in step.
+function setLooks(on) {
+  looksOn = on;
+  lidar?.setLooks(looksOn);
+  $('looksBtn').classList.toggle('on', looksOn);
+}
+$('looksBtn').addEventListener('click', () => { setLooks(!looksOn); writeUrl(); });
+
 $('wiresBtn').addEventListener('click', async () => {
   wiresOn = !wiresOn;
   drawWires();

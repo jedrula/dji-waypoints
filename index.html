@@ -123,6 +123,23 @@
       </svg>
     </button>
 
+    <!-- What each camera is pointed at, as the pyramid it sees. Belongs to the
+         3D pane, because it is the one view that can show a direction in the
+         space the direction is in. A switch rather than always-on: seventy
+         wedges is the answer to "where does it look" and clutter to every
+         other question. -->
+    <!-- Lit from the start, because looksOn starts true; the address bar can
+         turn it off, and does that through setLooks like the button. -->
+    <button id="looksBtn" type="button" class="maptoggle on" hidden
+            title="Show what each camera is pointed at">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="4.5" r="2"/>
+        <path d="M10.6 6.2 4 19.5M13.4 6.2 20 19.5"/>
+        <path d="M4 19.5 20 19.5"/>
+      </svg>
+    </button>
+
     <!-- Overhead lines, from the national register. Its own control rather than
          part of the ground picker, because it is a hazard layer and not a
          backdrop: it belongs on the map AND in the survey, at the same time. -->

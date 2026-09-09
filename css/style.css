@@ -256,6 +256,9 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
    these in it, and on a short window the bottom two fell off the pane. */
 #syncTo3d, #syncToMap { top: 82px; left: auto; right: 10px; }
 #stage.split #syncTo3d { right: calc(100% - var(--split) + 10px); }
+/* Under the two sync buttons on the 3D pane's own right-hand stack, because it
+   acts on the 3D and nothing else. */
+#looksBtn { top: 118px; left: auto; right: 10px; }
 /* Wires belong to both views at once -- they are a hazard, not a backdrop --
    so this is the one .maptoggle that stays put when the 3D comes up. */
 #wiresBtn { top: 180px; }

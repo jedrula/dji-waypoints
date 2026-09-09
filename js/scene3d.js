@@ -27,6 +27,7 @@ import { toPuwg92 } from './puwg92.js';
 import { groundAt, puwgToLocal, drapeWire } from './surface.js';
 import { serviceUrl, serviceHeaders } from './service.js';
 import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, asHex } from './palette.js';
+import { fov, orientation } from './camera.js';
 
 // How much ground round the flight, and how fine. The tile is 500 m of
 // half-metre cells -- a million of them -- and a site is a couple of hundred
@@ -95,6 +96,7 @@ export function createScene3D(canvas) {
   let missionGroup = null;
   let wireGroup = null;
   let wirePaths = [];
+  let looksOn = true;
   let surfaceMesh = null;
   let loaded = null;       // { tn, te, meta, height, kind, base }
   let mission = null;
@@ -368,6 +370,8 @@ export function createScene3D(canvas) {
       })));
     }
 
+    if (looksOn) buildLooks(path, at);
+
     // The legs the collision check flagged, drawn over the top in its colours.
     // A strike and a near miss are not the same news, so they are not the same
     // colour here either.
@@ -378,6 +382,78 @@ export function createScene3D(canvas) {
       })));
     }
     scene.add(missionGroup);
+  }
+
+  // Where each camera is pointed, as the pyramid it actually sees -- apex at
+  // the aircraft, base a rectangle at the camera's real field of view. Which is
+  // the picture you cannot get from the route alone: an orbit and a nadir grid
+  // can fly the same circle and photograph completely different things, and
+  // "inward", "outward" and "straight down" are properties of the camera and
+  // not of the path.
+  //
+  // The same wedges js/view3d.js draws over its flat plane, and deliberately
+  // the same numbers, so the two views agree about where the lens is looking:
+  // yaw and pitch come resolved from the planner (js/planner.js sets w.yaw for
+  // every heading mode, and w.shots is the pitch fan at the stop), the cone
+  // comes from the camera in js/camera.js, and the direction comes from the
+  // orientation() that the coverage scorer uses -- so a wedge drawn here and a
+  // frame counted as covered can never disagree.
+  //
+  // One LineSegments per pass rather than per wedge: 200 waypoints with a fan
+  // at each is thousands of lines, and thousands of draw calls is how an
+  // on-demand renderer becomes a slideshow when you drag.
+  function buildLooks(path, at) {
+    if (!path.length) return;
+    // ENU (x east, y north, z up) to three.js (x east, y up, z south).
+    const dir = (o) => new THREE.Vector3(o.x, o.z, -o.y);
+
+    // Readable rather than to scale, and the same rule view3d.js uses so a
+    // wedge is the same size in both views: a tenth of the site, capped by the
+    // height flown so a low pass cannot draw a cone through the ground.
+    const box = new THREE.Box3();
+    for (const w of path) box.expandByPoint(at(w));
+    const size = box.getSize(new THREE.Vector3());
+    const span = Math.max(size.x, size.z, 20);
+    const len = Math.max(2, Math.min(span * 0.09, Math.max(box.max.y, 1) * 0.7));
+
+    // Every waypoint is too many to see through, and this is a diagram of the
+    // camera work rather than an inventory. Same thinning rule as view3d.
+    const step = Math.max(1, Math.ceil(path.length / 70));
+    const fv = fov(mission.cam);
+    const th = Math.tan(fv.h / 2);
+    const tv = Math.tan(fv.v / 2);
+    const corners = [[1, 1], [1, -1], [-1, -1], [-1, 1]];
+
+    const byPass = new Map();
+    for (let i = 0; i < path.length; i += step) {
+      const w = path[i];
+      const apex = at(w);
+      for (const pitch of w.shots?.length ? w.shots : [w.pitch ?? -90]) {
+        const o = orientation(w.yaw ?? 0, pitch);
+        const f = dir(o.forward);
+        const r = dir(o.right);
+        const u = dir(o.up);
+        const far = corners.map(([sx, sy]) => apex.clone().add(
+          f.clone().addScaledVector(r, sx * th).addScaledVector(u, sy * tv)
+            .normalize().multiplyScalar(len)));
+        if (!byPass.has(w.pass)) byPass.set(w.pass, []);
+        const seg = byPass.get(w.pass);
+        // Four rays out to the corners, and the rectangle they land on.
+        for (let k = 0; k < 4; k++) {
+          seg.push(apex, far[k]);
+          seg.push(far[k], far[(k + 1) % 4]);
+        }
+      }
+    }
+
+    for (const [pass, pts] of byPass) {
+      const g = new THREE.BufferGeometry().setFromPoints(pts);
+      missionGroup.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({
+        color: asHex(PASS_COLOR[pass] ?? PASS_FALLBACK),
+        // Faint: they are context for the route, and there are a lot of them.
+        transparent: true, opacity: 0.34,
+      })));
+    }
   }
 
   // The flight is the subject and the ground is what it is in, so the frame is
@@ -484,6 +560,14 @@ export function createScene3D(canvas) {
       wirePaths = paths ?? [];
       if (!renderer) return;
       buildWires();
+      render();
+    },
+
+    // Whether to draw what each camera is pointed at.
+    setLooks(on) {
+      looksOn = !!on;
+      if (!renderer || !mission) return;
+      buildMission();
       render();
     },
 

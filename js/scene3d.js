@@ -848,51 +848,85 @@ export function createScene3D(canvas) {
     geom.setAttribute('position', new THREE.BufferAttribute(position, 3));
     geom.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     geom.setIndex(new THREE.BufferAttribute(index, 1));
-    geom.computeVertexNormals();
 
-    const tex = await new Promise((done) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => done(img);
-      img.onerror = () => done(null);
-      img.src = `${serviceUrl()}/v1/mesh.jpg?lat=${lat0}&lon=${lon0}`;
-    });
+    // Fetched as a blob, NOT as an <img src>. Every /v1 route wants an
+    // X-Sync-Key and an <img> cannot send a header, so the tag 401s and the
+    // mesh draws flat grey -- which is exactly what happened, and exactly what
+    // docs/2026-09-08-hosting-the-service.md already records happening to
+    // server/public/scene.html's orthophoto. Twice is a pattern: if a picture
+    // comes from this service, it is a fetch and a bitmap.
+    const tex = await ask(`/v1/mesh.jpg?lat=${lat0}&lon=${lon0}`, { signal })
+      .then((r) => (r.ok ? r.blob() : null))
+      // FLIPPED HERE, not on the texture. Texture.flipY is IGNORED for an
+      // ImageBitmap -- three.js can only flip a source it uploads itself -- so
+      // setting it did nothing, twice, and the mesh came up with black patches
+      // where faces sampled the mirrored position of a chart. OBJ counts v from
+      // the bottom and the JPEG decodes from the top, and this is the only
+      // place that difference can be settled.
+      .then((b) => (b ? createImageBitmap(b, { imageOrientation: 'flipY' }) : null))
+      .catch(() => null);
     let map = null;
     if (tex) {
       map = new THREE.Texture(tex);
       // Raw, like every other picture here: our shaders write straight out.
       map.colorSpace = THREE.NoColorSpace;
-      // OBJ texture coordinates count up from the BOTTOM; three.js flips by
-      // default, which would put the roofs on the pavement.
-      map.flipY = false;
+      // Nothing to set here: the flip happened at createImageBitmap, because
+      // Texture.flipY cannot touch an ImageBitmap.
+      // The atlas is 8192 x 4096 over one 100 m tile -- about 2 cm of ground
+      // per pixel -- and without this the ground reads as a smear at any
+      // oblique angle, which is every angle you actually look from. Trilinear
+      // filtering samples a mipmap chosen for the SHORT axis of a stretched
+      // pixel, so a surface seen edge-on gets a level meant for something far
+      // away. Anisotropy is the fix and it is the single biggest thing between
+      // this data and how it looked.
+      map.anisotropy = renderer.capabilities.getMaxAnisotropy();
       map.needsUpdate = true;
     }
 
     meshGroup = new THREE.Mesh(geom, new THREE.ShaderMaterial({
       uniforms: { uMap: { value: map }, uHas: { value: map ? 1 : 0 } },
       side: THREE.DoubleSide,
+      // The normal is taken from the DERIVATIVES of the view-space position,
+      // not from the geometry. computeVertexNormals was the obvious thing and
+      // it painted whole roofs black: a photogrammetric mesh is full of
+      // degenerate triangles -- zero area, duplicate corners -- and a zero-area
+      // face normalises to NaN, which poisons the shading term and comes out
+      // black however high the ambient floor is. A fragment always has a
+      // well-defined derivative, so this cannot produce one. It is flat
+      // shading, which for half-metre triangles is what smooth would have
+      // looked like anyway, and it saves computing and shipping normals.
       vertexShader: `
         varying vec2 vUv;
-        varying vec3 vN;
+        varying vec3 vPos;
         void main() {
           vUv = uv;
-          vN = normalMatrix * normal;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          vPos = mv.xyz;
+          gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: `
         uniform sampler2D uMap;
         uniform int uHas;
         varying vec2 vUv;
-        varying vec3 vN;
+        varying vec3 vPos;
         ${LAMBERT_GLSL}
         void main() {
+          vec3 n = normalize(cross(dFdx(vPos), dFdy(vPos)));
           vec3 base = uHas == 1 ? texture2D(uMap, vUv).rgb : vec3(0.72, 0.70, 0.66);
-          gl_FragColor = vec4(base * lambert(vN), 1.0);
+          // Two-sided: the mesh does not promise a winding, and a facade lit
+          // from behind is not information.
+          gl_FragColor = vec4(base * lambert(gl_FrontFacing ? n : -n), 1.0);
         }`,
     }));
     scene.add(meshGroup);
+    // The LiDAR surface covers the same ground, half a metre to the mesh's few
+    // centimetres, and the two interpenetrate: a roof modelled twice shows as
+    // whichever won the depth test per pixel. While this is a prototype the
+    // mesh simply wins, so what is on screen is one thing and can be judged.
+    if (surfaceMesh) surfaceMesh.visible = false;
     onStatus(`Photogrammetric mesh: ${nt.toLocaleString()} triangles, `
-      + '0.09 m in position, flown 2025-03-20.');
+      + `${(raw.byteLength / 1e6).toFixed(1)} MB, 0.09 m in position, flown 2025-03-20. `
+      + 'The LiDAR surface is hidden under it.');
     render();
   }
 

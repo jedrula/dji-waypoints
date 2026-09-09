@@ -1409,7 +1409,7 @@ console.log('\nthe shape a thing actually is');
 
 console.log('\nreading a survey tile');
 {
-  const { cellAt, onTile, groundAt, puwgToLocal, drapeWire } = await import('../js/surface.js');
+  const { cellAt, onTile, groundAt, puwgToLocal, localToTile, drapeWire } = await import('../js/surface.js');
   const { toPuwg92, toWgs84 } = await import('../js/puwg92.js');
   const { frame } = await import('../js/geo.js');
 
@@ -1466,6 +1466,29 @@ console.log('\nreading a survey tile');
   }
   ok(`the affine stands in for the projection over a whole tile (worst ${(worst * 1000).toFixed(0)} mm)`,
      worst < 0.08, `${worst} m`);
+
+  // And back again. The camera lives in the mission's frame and the drape is a
+  // patch of the tile, so the survey view has to turn one into the other -- and
+  // a sign error here would fetch a sharp picture of the wrong ground, which
+  // looks exactly like a sharp picture of the right ground until you notice the
+  // river has moved.
+  const toTile = localToTile(f, meta.origin.east, meta.origin.north);
+  let back = 0;
+  let asym = 0;
+  for (let de = 0; de <= 500; de += 25) {
+    for (let dn = 0; dn <= 500; dn += 25) {
+      const l = toLocal(meta.origin.east + de, meta.origin.north + dn);
+      const t = toTile(l.x, l.y);
+      back = Math.max(back, Math.hypot(t.e - de, t.n - dn));
+      // North and east are not interchangeable, and at Wroclaw they are close
+      // enough in magnitude that a swap stays plausible -- so assert the axes
+      // separately somewhere they differ.
+      if (de === 500 && dn === 0) asym = Math.hypot(t.e - 500, t.n - 0);
+    }
+  }
+  ok(`local metres round-trip back to the tile (worst ${(back * 1000).toFixed(1)} mm)`,
+     back < 0.001, `${back} m`);
+  ok('and 500 m east comes back as east, not north', asym < 0.001, `${asym} m`);
 
   // A wire hangs above the GROUND under it, not above the takeoff point. Drawn
   // at one altitude the run sinks into the first rise it meets.

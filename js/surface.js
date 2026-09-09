@@ -70,6 +70,34 @@ export function puwgToLocal(frame, e0, n0) {
   });
 }
 
+// The other direction: the mission's local metres back to the tile's own.
+//
+// Same linearisation as above and for the same reason -- over 500 m the
+// projection is affine to well under a centimetre -- so this inverts the 2x2 it
+// builds rather than round-tripping through lat/lon. Returns metres from the
+// tile's origin, which is the frame the drape and the building rings use.
+//
+// Needed because the camera lives in the mission's frame and the picture it is
+// asking for is a patch of the tile.
+export function localToTile(frame, e0, n0) {
+  const at = (e, n) => {
+    const g = toWgs84(e, n);
+    return frame.toLocal(g.lat, g.lon);
+  };
+  const o = at(e0, n0);
+  const de = at(e0 + 100, n0);
+  const dn = at(e0, n0 + 100);
+  const ex = (de.x - o.x) / 100;
+  const ey = (de.y - o.y) / 100;
+  const nx = (dn.x - o.x) / 100;
+  const ny = (dn.y - o.y) / 100;
+  const det = ex * ny - nx * ey;
+  return (x, y) => ({
+    e: ((x - o.x) * ny - nx * (y - o.y)) / det,
+    n: (ex * (y - o.y) - (x - o.x) * ey) / det,
+  });
+}
+
 // A wire hangs at the height its voltage implies ABOVE THE GROUND UNDER IT, not
 // above the takeoff point -- so every vertex is lifted by the surface it
 // crosses. Drawn at one altitude the whole run sinks into the first rise it

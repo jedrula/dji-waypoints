@@ -23,9 +23,9 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { toPuwg92 } from './puwg92.js';
+import { toPuwg92, toWgs84 } from './puwg92.js';
 import { pickZoom, tileRange, tileBounds, TILE_PX } from './tiles.js';
-import { groundAt, puwgToLocal, drapeWire } from './surface.js';
+import { groundAt, puwgToLocal, localToTile, drapeWire } from './surface.js';
 import { serviceUrl, serviceHeaders } from './service.js';
 import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, asHex } from './palette.js';
 import { fov, orientation } from './camera.js';
@@ -150,7 +150,7 @@ export function createScene3D(canvas) {
     // bug this comment is standing on: "Maximum call stack size exceeded", the
     // first time the view was ever opened.
     controls.enableDamping = false;
-    controls.addEventListener('change', () => render());
+    controls.addEventListener('change', () => { render(); scheduleRedrape(); });
     // No lights. The surface shades itself -- see surfaceMaterial() -- and
     // everything else in this scene is lines and points, which are unlit.
     //
@@ -172,6 +172,86 @@ export function createScene3D(canvas) {
     float lambert(vec3 n) {
       return 0.42 + 0.58 * max(dot(normalize(n), SUN), 0.0);
     }`;
+
+  // Re-drape at the scale you are actually looking at.
+  //
+  // This is what makes zooming in worth doing. The picture is a fixed number
+  // of pixels over whatever patch it covers, so zooming into a whole-tile
+  // drape just magnifies 24 cm pixels while the map beside it keeps fetching
+  // sharper tiles. Settling the camera asks for the ground now in shot, at the
+  // zoom the map itself would use for that scale.
+  //
+  // On settling, not on moving: composing is up to 160 tile fetches and a
+  // 2048-square canvas, and doing that per frame of a drag would be absurd.
+  let redrapeAt = 0;
+  let redraping = false;
+
+  function visibleBox() {
+    if (!loaded?.meta || !camera || !controls) return null;
+    const span = loaded.meta.tileMetres;
+    // What the camera can see of the ground plane, as a square about the point
+    // it is looking at. A square, and generous, because an oblique camera sees
+    // a trapezoid running off towards the horizon and there is no point being
+    // clever about a bound that only decides how much picture to fetch.
+    const dist = camera.position.distanceTo(controls.target);
+    const half = Math.max(30, dist * Math.tan((camera.fov * Math.PI) / 360) * 1.4);
+    // controls.target is in the mission's local frame and the drape is in the
+    // tile's, so it has to come back the other way. three.js z is south.
+    if (!loaded.toTile) return null;
+    const { e, n } = loaded.toTile(controls.target.x, -controls.target.z);
+    const clamp = (v) => Math.max(0, Math.min(span, v));
+    const box = {
+      e0: clamp(e - half), n0: clamp(n - half),
+      e1: clamp(e + half), n1: clamp(n + half),
+    };
+    if (box.e1 - box.e0 < 20 || box.n1 - box.n0 < 20) return null;
+    return box;
+  }
+
+  function scheduleRedrape() {
+    if (!loaded?.meta || !groundSpec?.url) return;
+    const at = ++redrapeAt;
+    setTimeout(async () => {
+      if (at !== redrapeAt || redraping || !running) return;
+      const box = visibleBox();
+      if (!box) return;
+      const have = loaded.orthoBox;
+      // Only when it would actually be sharper, or when the patch has moved
+      // off what is drawn. Otherwise every nudge of the mouse refetches the
+      // same picture.
+      const want = (box.e1 - box.e0) / 2048;
+      const sharper = !loaded.orthoMpp || want < loaded.orthoMpp * 0.7;
+      const outside = !have || box.e0 < have.e0 - 1 || box.e1 > have.e1 + 1
+        || box.n0 < have.n0 - 1 || box.n1 > have.n1 + 1;
+      if (!sharper && !outside) return;
+      redraping = true;
+      try {
+        const got = await basemapTexture(loaded.meta, box);
+        if (!got || at !== redrapeAt) return;
+        loaded.ortho?.dispose?.();
+        loaded.ortho = got.tex;
+        loaded.orthoBox = got.box;
+        loaded.orthoMpp = got.metresPerPixel;
+        if (surfaceMesh) {
+          surfaceMesh.material.uniforms.uOrtho.value = got.tex;
+          surfaceMesh.material.uniforms.uHasOrtho.value = 1;
+          surfaceMesh.material.uniforms.uPatch.value = patchUv();
+        }
+        render();
+      } catch { /* keep the picture we have */ } finally { redraping = false; }
+    }, 350);
+  }
+
+  // Where the drape sits, as the tile-wide UV rect the shader needs.
+  function patchUv() {
+    const span = loaded?.meta?.tileMetres ?? 1;
+    const b = loaded?.orthoBox;
+    if (!b) return new THREE.Vector4(0, 0, 1, 1);
+    return new THREE.Vector4(
+      b.e0 / span, b.n0 / span,
+      (b.e1 - b.e0) / span, (b.n1 - b.n0) / span,
+    );
+  }
 
   // The surface's own shader, which is the service viewer's fragment shader
   // ported: see server/public/scene.html. The two draw the same tile from the
@@ -196,6 +276,10 @@ export function createScene3D(canvas) {
       uniforms: {
         uOrtho: { value: loaded.ortho ?? null },
         uHasOrtho: { value: loaded.ortho ? 1 : 0 },
+        // Which part of the tile the picture covers, in the tile's own 0..1
+        // UV space: origin then size. The whole tile is (0,0,1,1); a patch
+        // draped at a higher zoom is a smaller rect inside it.
+        uPatch: { value: patchUv() },
       },
       vertexShader: `
         attribute vec3 color;
@@ -215,6 +299,7 @@ export function createScene3D(canvas) {
       fragmentShader: `
         uniform sampler2D uOrtho;
         uniform int uHasOrtho;
+        uniform vec4 uPatch;
         varying vec2 vUv;
         varying vec3 vColor, vNormal2;
         varying float vWall, vKind;
@@ -225,7 +310,14 @@ export function createScene3D(canvas) {
           // No photo here means most of the country outside the towns, and
           // then the classification stands in -- one palette, KIND_COLOUR,
           // arriving as a vertex colour so it is not written twice.
-          vec3 base = uHasOrtho == 1 ? texture2D(uOrtho, vUv).rgb : vColor;
+          // The picture covers a patch of the tile, not always the whole of
+          // it, so the tile-wide UV is mapped into the patch. Outside it the
+          // clamp would smear the edge pixel across the rest of the ground, so
+          // the classification colour stands in instead -- honest, and it is
+          // ground you are not looking at.
+          vec2 pUv = (vUv - uPatch.xy) / uPatch.zw;
+          bool inPatch = pUv.x >= 0.0 && pUv.x <= 1.0 && pUv.y >= 0.0 && pUv.y <= 1.0;
+          vec3 base = (uHasOrtho == 1 && inPatch) ? texture2D(uOrtho, pUv).rgb : vColor;
 
           // Cells nothing was measured in -- the river, mostly, and 38% of
           // this tile -- read as a flat sheet, and saying so is better than
@@ -282,33 +374,47 @@ export function createScene3D(canvas) {
   // to well under a pixel, so three corners give the transform and drawImage
   // does the rest. Same trick view3d.js uses per triangle, needed once per tile
   // here because the target is flat rather than a perspective camera.
-  async function basemapTexture(meta) {
+  //
+  // `box` is the patch of the tile to cover, in the tile's own metres, and it
+  // is what makes this behave like a map rather than like a photograph. Draped
+  // once over the whole 500 m tile the picture has a fixed 24 cm a pixel, so
+  // zooming in magnifies it and nothing new arrives -- the map beside it keeps
+  // getting sharper and this did not. Covering a smaller patch at a higher
+  // zoom is how a map answers that, and it is the same answer here.
+  async function basemapTexture(meta, box = null) {
     if (!groundSpec?.url) return null;
-    const { south, west, north, east } = meta.bounds;
-    // A bigger tile budget than the flat view's, because this is fetched once
-    // per 500 m tile rather than on every frame, and it is the only picture
-    // there is. Zoom 19 over a tile is about 121 requests of a few tens of
-    // kilobytes, which is what a map pane loads while you pan.
+    const span = meta.tileMetres;
+    const b = box ?? { e0: 0, n0: 0, e1: span, n1: span };
+    const { east: E0, north: N0 } = meta.origin;
+    // The patch, in lat/lon, for choosing a zoom and listing the tiles.
+    const sw = toWgs84(E0 + b.e0, N0 + b.n0);
+    const ne = toWgs84(E0 + b.e1, N0 + b.n1);
+    const bbox = { south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon };
+
+    // A bigger tile budget than the flat view's, because this is fetched on a
+    // camera settling rather than on every frame. Zoom 19 over a whole tile is
+    // about 121 requests of a few tens of kilobytes, which is what a map pane
+    // loads while you pan.
     const z = Math.min(
-      pickZoom({ south, west, north, east }, { maxTiles: 160, maxZoom: 19 }),
+      pickZoom(bbox, { maxTiles: 160, maxZoom: 22 }),
       groundSpec.maxZoom ?? 19,
     );
-    const r = tileRange({ south, west, north, east }, z);
+    const r = tileRange(bbox, z);
 
-    // 2048 over 500 m is 24 cm a pixel -- the same as the national orthophoto
-    // this replaced, and finer than the half-metre height grid it is draped on,
-    // so the geometry stays the limit rather than the picture. Zoom 19 is
-    // 18 cm at the source, so nothing is being enlarged.
+    // 2048 across the patch. Over a whole tile that is 24 cm a pixel -- what
+    // the national orthophoto was, and finer than the half-metre height grid it
+    // is draped on. Over a 100 m patch it is 5 cm.
     const P = 2048;
     const c = document.createElement('canvas');
     c.width = P;
     c.height = P;
     const ctx = c.getContext('2d');
-    const { east: e0, north: n0 } = meta.origin;
-    const span = meta.tileMetres;
-    // PUWG92 metres to canvas pixels. Row 0 is the NORTH edge, which is the
-    // convention the surface's own UVs already use.
-    const px = (e, n) => ({ x: ((e - e0) / span) * P, y: ((n0 + span - n) / span) * P });
+    // PUWG92 metres to canvas pixels, over the patch. Row 0 is the NORTH edge,
+    // which is the convention the surface's own UVs already use.
+    const px = (e, n) => ({
+      x: ((e - (E0 + b.e0)) / (b.e1 - b.e0)) * P,
+      y: (((N0 + b.n1) - n) / (b.n1 - b.n0)) * P,
+    });
 
     const load = (url) => new Promise((done) => {
       const img = new Image();
@@ -351,10 +457,17 @@ export function createScene3D(canvas) {
     if (!drawn) return null;
 
     const tex = new THREE.CanvasTexture(c);
-    // Raw, like the GUGiK drape and for the same reason -- see the note there.
+    // Written straight out by our shader with no encode, so no decode on the
+    // way in either.
     tex.colorSpace = THREE.NoColorSpace;
+    // The patch does not tile: sampling past its edge must not wrap round to
+    // the far side of the picture.
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
     tex.needsUpdate = true;
-    return tex;
+    // The rect goes with the texture, because the shader has to know which
+    // part of the tile these pixels are of.
+    return { tex, box: b, zoom: z, metresPerPixel: (b.e1 - b.e0) / P };
   }
 
   // The sky, as a vertical two-stop gradient on a 2 px-wide canvas. Cheaper
@@ -547,6 +660,9 @@ export function createScene3D(canvas) {
     loaded.clipped = wantC0 < 0 || wantR0 < 0 || wantC1 > N - 1 || wantR1 > N - 1;
 
     loaded.datum = datum;
+    // The inverse of toLocal, for turning where the camera is looking back
+    // into a patch of the tile -- see visibleBox.
+    loaded.toTile = localToTile(frame, e0, n0);
     // The crop, so the buildings are clipped to the ground that was actually
     // drawn. Without this they arrive for the whole 500 m tile and the ones
     // past the edge of the crop hang in the sky with nothing under them.
@@ -852,7 +968,10 @@ export function createScene3D(canvas) {
     // asserted -- see basemapTexture -- and the two agree to under a metre.
     onStatus('Draping the map…');
     try {
-      next.ortho = await basemapTexture(meta);
+      const got = await basemapTexture(meta);
+      next.ortho = got?.tex ?? null;
+      next.orthoBox = got?.box ?? null;
+      next.orthoMpp = got?.metresPerPixel ?? null;
     } catch { /* colour by classification instead, which is no less true */ }
 
     // The buildings, as solids with walls -- the one thing the surface cannot
@@ -917,10 +1036,12 @@ export function createScene3D(canvas) {
       groundSpec = spec ?? null;
       const now = groundSpec?.url?.(0, 0, 0) ?? null;
       if (was === now || !loaded || !renderer) return;
-      const tex = await basemapTexture(loaded.meta).catch(() => null);
-      if (!tex) return;
+      const got = await basemapTexture(loaded.meta, loaded.orthoBox).catch(() => null);
+      if (!got) return;
       loaded.ortho?.dispose?.();
-      loaded.ortho = tex;
+      loaded.ortho = got.tex;
+      loaded.orthoMpp = got.metresPerPixel;
+      const tex = got.tex;
       // Swap the texture on the material rather than rebuilding the surface.
       // buildSurface ends by re-framing the camera, so re-draping through it
       // threw away whatever view you had orbited to -- for a change of

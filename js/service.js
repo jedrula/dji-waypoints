@@ -7,61 +7,34 @@ import { KEY_OK } from '../sync/protocol.js';
 // grew its own copy of this rule and its own localStorage key, which meant
 // hosting the thing was two edits in two files that had to agree.
 //
-// There are two of these and there is one table of them. `hosted` went up
-// 2026-09-08 on the home Linux box: a second hostname on the Cloudflare tunnel
-// that already fronts api.topomatch.com -- the same tunnel and the same
+// One address, always. There is no way to choose, on purpose.
+//
+// There were two ways, and two is worse than one: a localhost page silently
+// went to a service on localhost, and `localStorage['dji.serviceUrl']` could
+// point any browser anywhere. Between them, "which service am I talking to?"
+// had no answer you could read off the source -- it depended on the hostname
+// the page happened to be served from and on a value invisible in the UI. That
+// is a bad property for the thing that decides whether a clearance is measured
+// or guessed.
+//
+// The localhost branch was written when nothing hosted `server/` and the only
+// service that could exist was one on your own laptop. Something hosts it now,
+// so that branch was answering a question nobody has any more.
+//
+// Hosted 2026-09-08 on the home Linux box: a second hostname on the Cloudflare
+// tunnel that already fronts api.topomatch.com -- the same tunnel and the same
 // connector, with the service in the tmux session start-dev.sh builds.
 //
 // Routing it through that box's gateway on :8000, the way the other services
 // there are reached, was the other option and would have cost the allowlist in
-// server/src/server.js: the gateway sets Access-Control-Allow-Origin: * and
-// Starlette overwrites rather than appends, so ORIGIN_OK would have become
-// decorative.
-export const SERVICES = {
-  local: { url: 'http://localhost:8130', label: 'this machine' },
-  hosted: { url: 'https://drone.topomatch.com', label: 'drone.topomatch.com' },
-  // Not a service, and in the table because it is a choice: no service at all.
-  // Every height stays the marked estimate it was and every list stays on this
-  // device, which is how the whole app worked before any of this existed and is
-  // still a working way to use it. Naming it keeps that path reachable -- and
-  // exercised -- rather than leaving it as code nothing can enter.
-  off: { url: '', label: 'none, work offline' },
-};
-
-const LOCAL = /^(localhost|127\.0\.0\.1)$/.test(globalThis.location?.hostname ?? '');
-
-// Which one, by name, and it is a name rather than a URL on purpose: this used
-// to be localStorage['dji.serviceUrl'] holding an address you had to know and
-// type into a console, which is not a way to switch backend. There are two
-// backends. Naming them means the app can offer both, say which one it is on,
-// and say whether that one is answering -- see the Advanced pane.
+// the service: the gateway sets Access-Control-Allow-Origin: * and Starlette
+// overwrites rather than appends, so ORIGIN_OK would have become decorative.
 //
-// `auto` is the default and is almost always right: a page served from this
-// machine talks to a service on this machine, and a page served from anywhere
-// else has no local service to talk to. Naming one overrules that, which is
-// what a local page pointed at the hosted service needs.
-export const CHOICE_STORE = 'dji.service';
-export const CHOICES = ['auto', ...Object.keys(SERVICES)];
-
-export function serviceChoice() {
-  try {
-    const got = globalThis.localStorage?.getItem(CHOICE_STORE);
-    return CHOICES.includes(got) ? got : 'auto';
-  } catch {
-    return 'auto';
-  }
-}
-
-export function setServiceChoice(name) {
-  if (!CHOICES.includes(name)) throw new Error(`No service called ${name}.`);
-  try {
-    globalThis.localStorage?.setItem(CHOICE_STORE, name);
-  } catch { /* blocked; the choice lasts this page load, like the key */ }
-  return name;
-}
-
-// Which one `auto` means here.
-export const autoService = () => (LOCAL ? 'local' : 'hosted');
+// Developing against a local service means editing this line, which is the
+// honest cost of having one fact in one place -- and mostly you should not,
+// because the hosted one already holds the LiDAR and re-downloading it per
+// laptop is hundreds of megabytes asked of a public agency for nothing.
+const SERVICE_URL = 'https://drone.topomatch.com';
 
 // One key, one library. Generated on this device the first time anything needs
 // it and kept, so a fresh install is isolated from every other install by
@@ -126,8 +99,4 @@ export function setServiceKey(key) {
 // who reads the source.
 export const serviceHeaders = (extra = {}) => ({ 'X-Sync-Key': serviceKey(), ...extra });
 
-export function serviceUrl() {
-  const pick = serviceChoice();
-  const name = pick === 'auto' ? autoService() : pick;
-  return SERVICES[name].url.replace(/\/$/, '');
-}
+export const serviceUrl = () => SERVICE_URL;

@@ -5,6 +5,35 @@ learned, what broke, what state something was left in. What *changed in the code
 is already in `git log` and does not belong here twice; what is still open is in
 `TODO.md`. A line earns its place if you would not find it in either.
 
+## 2026-09-09 — one service address, and a warning that lied
+
+Two fixes, both from using the thing.
+
+**The terrain warning said BELOW when it meant ABOVE.** On flat ground at 5 m
+with a 15 m clearance the app said "the flight is 5 m BELOW the highest
+ground". It is 5 m *above*; what fired the warning was the clearance, not the
+ground. The readout printed `Math.abs(aboveHighestGround)` and then the
+hardcoded word BELOW, so the hillside case and the flat case came out
+identical and the safe one came out false. `verdict()` was right the whole
+time. It now says which of the two problems it means, and drops the "ground
+rises 0 m" opener when the ground is flat.
+
+**There is one service address and no way to choose it.** There were three
+ways by the end, which is worse than one: a named-backend chooser in Advanced
+(built on the Mac that morning), a hostname rule that sent a localhost page to
+a localhost service, and `localStorage['dji.serviceUrl']` holding an address. Between them, "which service is this talking to?" could not
+be answered from the source — it depended on the hostname the page came from
+and on a value invisible in the UI, for the thing that decides whether a
+clearance is measured or guessed.
+
+The localhost branch was written when nothing hosted `server/`, so it was
+answering a question that no longer exists. Deleting them took the whole
+"no service configured" state with it: the guards in `measure`, `fetchLines`
+and `surveyCeiling`, the two tests that covered it, and the hiding of the two
+buttons that needed a service to be useful. `js/service.js` is 30 lines of
+code now. Developing against a local service means editing the constant, and
+mostly you should not — the hosted one already holds the LiDAR.
+
 ## 2026-09-09 (later still) — planning against the ground
 
 First piece of mission planning v2: `surveyCeiling` in `js/heights.js`, and a

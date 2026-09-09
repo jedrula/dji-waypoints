@@ -40,8 +40,7 @@ import { createHistory } from './history.js';
 import { judgeFix, parseHeight, MAX_ACCURACY } from './walk.js';
 import { bestFix, watchAccuracy, GPS_ERRORS, STALE_MS } from './gps.js';
 import { sampleTerrain, verdict as terrainVerdict } from './terrain.js';
-import { serviceUrl, serviceHeaders, serviceChoice, setServiceChoice, autoService, SERVICES, CHOICES }
-  from './service.js';
+import { serviceUrl, serviceHeaders } from './service.js';
 
 const cam = CAMERAS.mini5pro;
 const $ = (id) => document.getElementById(id);
@@ -993,39 +992,15 @@ async function importHere() {
 // trip to /v1/health tells them apart, and it is the only request in the app
 // nobody has to make.
 {
-  const pick = $('servicePick');
-  for (const name of CHOICES) {
-    const o = document.createElement('option');
-    o.value = name;
-    o.textContent = name === 'auto'
-      ? `Service: automatic (${SERVICES[autoService()].label})`
-      : `Service: ${SERVICES[name].label}`;
-    pick.append(o);
-  }
-
   const say = (text) => { $('serviceHint').textContent = text; };
   const describe = () => {
-    const url = serviceUrl();
-    say(url ? `Talking to ${url}. Heights, overhead lines, the 3D model and`
-      + ' syncing your plans all go there.'
-      : 'No service. Heights stay estimates and your lists stay on this device.');
+    say(`Talking to ${serviceUrl()}. Heights, overhead lines, the 3D model and`
+      + ' syncing your plans all go there.');
   };
-
-  // Reading the choice rather than assuming: another tab may have changed it.
-  pick.value = serviceChoice();
   describe();
-
-  pick.addEventListener('change', () => {
-    setServiceChoice(pick.value);
-    // Nothing to reload: every caller asks serviceUrl() per request, so the
-    // next height, line or sync goes to the new one.
-    describe();
-    renderReadout();
-  });
 
   $('servicePing').addEventListener('click', async () => {
     const url = serviceUrl();
-    if (!url) { describe(); return; }
     $('servicePing').disabled = true;
     say(`Asking ${url}…`);
     try {

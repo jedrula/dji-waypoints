@@ -65,15 +65,25 @@ Two servers: the app on 8123 as usual, this one on 8130.
 cd server && npm install && npm start
 ```
 
-That is all the wiring there is. The app talks to a service on this machine by
-itself when the page is on localhost, so open the app, pan to somewhere in
-Poland, switch to Obstacles and press **Obstacles here**.
+That is all the wiring there is. Open the app, pan to somewhere in Poland,
+switch to Obstacles and press **Obstacles here**.
 
-Which backend is a named choice in **Advanced** -- automatic, this machine, the
-hosted one, or none -- with the address it resolved to and a Check button that
-does one round trip to `/v1/health`. The names live in `js/service.js`, which
-owns the one address for the whole service: heights, lines, the rough model and
-the two synced lists. Adding a third deployment is a row in that table.
+One address for the whole service -- heights, lines, the rough model and the
+two synced lists -- and **no way to choose it**. `js/service.js` holds the one
+constant, and pointing the app at a service running somewhere else means
+editing that line.
+
+That is deliberate. There used to be two ways to choose: a page served from
+localhost silently talked to a service on localhost, and
+`localStorage['dji.serviceUrl']` could point any browser anywhere. Between
+them, "which service is this talking to?" could not be answered from the
+source -- it depended on the hostname the page happened to come from and on a
+value invisible in the UI. For the thing that decides whether a clearance is
+measured or guessed, that is the wrong property.
+
+So developing against a local service means editing the constant. Mostly you
+should not: the hosted service already holds the LiDAR, and re-fetching it per
+laptop is hundreds of megabytes asked of a public agency for nothing.
 
 The first import over new ground is slow and says so -- the button counts
 tiles, and a toast warns that the survey is coming down. Over Cybulskiego at

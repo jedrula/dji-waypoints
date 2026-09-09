@@ -1121,34 +1121,31 @@ this was two edits in two files that had to agree; it was one when the day
 came, and turning on measured heights and two-device sync was that single
 edit, because they were always the same decision.
 
-### Which backend, and is it up
+### One service, and is it up
 
-There are two of them and one table of them, in `js/service.js`. **Advanced**
-offers the names — automatic, this machine, drone.topomatch.com, or none — with
-the address it resolved to and a **Check** button.
+`js/service.js` holds one constant, and there is no way to choose. Briefly
+there were three ways — a table of named backends in Advanced, a hostname rule
+that sent a localhost page to a localhost service, and
+`localStorage['dji.serviceUrl']` holding an address. All of them are gone.
 
-Automatic is the default and is almost always right: a page served from this
-machine talks to a service on this machine, and a page served from anywhere
-else has no local one to talk to. Naming one overrules that, which is what a
-page on localhost pointed at the hosted service needs — testing the thing you
-are about to deploy against is the whole reason this is in the UI.
+Two is worse than one here. "Which service is this talking to?" could not be
+answered from the source: it depended on the hostname the page happened to be
+served from and on a value invisible in the UI. That is the wrong property for
+the thing deciding whether a clearance is measured or guessed.
 
-*None* is in the list because it is a real state and not a broken one: every
-height stays the marked estimate it was, every list stays on this device, and
-that is how the whole app worked before there was a service. Naming it keeps
-that path reachable and exercised rather than leaving it as code nothing can
-enter.
+Losing the picker took the *none* state with it, and the
+`if (!url) return { reason: 'no service' }` guards in `heights.js` and
+`lines.js` that only that state could reach. Being unreachable is a different
+thing and is still handled, by the request failing.
 
-The choice was `localStorage['dji.serviceUrl']` holding an address, which is a
-way to know where you are pointed and not a way to point. It is
-`localStorage['dji.service']` holding a name now, and anything else in there —
-junk, or an address from the old scheme — falls back to automatic rather than
-leaving the app with no address at all.
+Developing against a local service means editing the constant. Mostly you
+should not: the hosted service already holds the LiDAR, and re-fetching it per
+laptop is hundreds of megabytes asked of a public agency for nothing.
 
-**Check** exists because two failures look identical from the browser: nothing
-running on this laptop, and a tunnel that is down. One round trip to
-`/v1/health` tells them apart and names the address in either answer. It is the
-only request in the app nobody has to make.
+**Check** stays, because the one question worth asking is still open — the
+service lives in a tmux pane on a home box and does not survive a reboot. One
+round trip to `/v1/health`, naming the address either way. It is the only
+request in the app nobody has to make.
 
 Every route needs the `X-Sync-Key` header now, not just the two list routes.
 That gate used to sit inside them, which left `/v1/*` open — and a `/v1/tile`

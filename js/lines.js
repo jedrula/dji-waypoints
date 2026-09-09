@@ -68,7 +68,6 @@ export function lineToObstacles(line, { tn, te, tileMetres }) {
 // on doing it when the service is down.
 export async function fetchLines(bounds, { fetchImpl = globalThis.fetch, signal, onProgress } = {}) {
   const url = serviceUrl();
-  if (!url) return { obstacles: [], lines: 0, reason: 'no service' };
   if (!inPoland((bounds.north + bounds.south) / 2, (bounds.east + bounds.west) / 2)) {
     return { obstacles: [], paths: [], lines: 0, reason: 'outside Poland' };
   }

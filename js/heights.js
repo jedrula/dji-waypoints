@@ -152,9 +152,8 @@ function tilesFor(rects, { tileMetres }) {
 export async function measure(found, {
   fetchImpl = globalThis.fetch, signal, waitMs = 240000, onWait, onProgress,
 } = {}) {
-  const url = serviceUrl();
   const wanted = found.filter((f) => f.assumed);
-  if (!url || !wanted.length) return { obstacles: found, measured: 0, reason: url ? null : 'no service' };
+  if (!wanted.length) return { obstacles: found, measured: 0, reason: null };
   if (!wanted.every((f) => inPoland(f.north, f.east))) {
     // Mixed or outside: measure what is in Poland, leave the rest.
   }
@@ -217,8 +216,6 @@ export async function measure(found, {
 export async function surveyCeiling(bounds, {
   fetchImpl = globalThis.fetch, signal, waitMs = 240000, onWait, onProgress,
 } = {}) {
-  const url = serviceUrl();
-  if (!url) return { height: null, reason: 'no service' };
   // The corners, not the centre: a site straddling the border is half a survey
   // and the half outside it is unknown, not flat.
   if (!inPoland(bounds.north, bounds.east) || !inPoland(bounds.south, bounds.west)) {

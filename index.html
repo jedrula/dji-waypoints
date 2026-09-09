@@ -82,23 +82,35 @@
         <circle cx="3" cy="18" r="1.6" fill="currentColor"/>
       </svg>
     </button>
-    <button id="lidarBtn" type="button" class="maptoggle" hidden
-            title="Swap the flat imagery for the LiDAR survey, with the flight inside it">
-      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
-           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M3 17.5 8 12l3.5 3L16 8.5 21 15"/>
-        <path d="M3 20.5h18"/>
-        <circle cx="16" cy="5" r="1.6"/>
-      </svg>
-    </button>
-    <button id="ground" type="button" class="maptoggle" hidden
-            title="Paint the map imagery onto the ground in the 3D view">
-      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
-           stroke-width="1.7" stroke-linejoin="round">
-        <path d="M3 8.5 12 4l9 4.5-9 4.5z"/>
-        <path d="M3 13.5 12 18l9-4.5"/>
-      </svg>
-    </button>
+    <!-- What the flight is drawn over. One setting with three answers rather
+         than two toggles that can disagree: nothing, the map's own photograph,
+         or the LiDAR survey with the flight inside it. -->
+    <div id="groundtabs" hidden>
+      <button type="button" data-ground="simple"
+              title="No ground — just the grid and the flight">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+             stroke-width="1.6" stroke-linecap="round">
+          <path d="M3 9h18M3 15h18M9 3v18M15 3v18"/>
+        </svg>
+      </button>
+      <button type="button" data-ground="imagery" class="on"
+              title="The map's own imagery, painted flat under the flight">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+             stroke-width="1.7" stroke-linejoin="round">
+          <path d="M3 8.5 12 4l9 4.5-9 4.5z"/>
+          <path d="M3 13.5 12 18l9-4.5"/>
+        </svg>
+      </button>
+      <button type="button" data-ground="survey"
+              title="The LiDAR survey, with the flight inside it">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+             stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 17.5 8 12l3.5 3L16 8.5 21 15"/>
+          <path d="M3 20.5h18"/>
+          <circle cx="16" cy="5" r="1.6"/>
+        </svg>
+      </button>
+    </div>
     <button id="findplace" type="button" class="maptoggle" title="Go to an address or coordinates">
       <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
            stroke-width="1.9" stroke-linecap="round">

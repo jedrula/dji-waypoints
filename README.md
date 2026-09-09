@@ -676,16 +676,25 @@ Obstacles also block the **camera**, not just the aircraft: the coverage score
 stops counting a surface it can only see through a box. They are never scored
 themselves — a tree next to the house is not a surface you failed to photograph.
 
-## Imagery on the ground
+## What the flight is drawn over
 
-The 3D view paints the map's own tiles onto the ground plane, so the flight
-sits over the actual roofs rather than over a wireframe grid. It is **on by
-default** — the button is top-right whenever a 3D pane is on screen, and the
-choice rides in the URL, so turning it off sticks too.
+Three answers to one question, as a segmented picker under the view tabs
+whenever a 3D pane is on screen — the same shape as the basemap picker,
+because it is the same kind of choice. It rides in the URL.
 
-It was opt-in while it was the only thing the view could put under a flight and
-it looked like a debug overlay. A flight over bare grid is the less useful
-picture of the two, so the default flipped.
+| | |
+|---|---|
+| **simple** | the grid, and nothing else |
+| **imagery** | the map's own tiles on a flat plane — the default |
+| **survey** | the LiDAR as a real surface, with the flight inside it |
+
+It was two independent toggles — imagery on/off and survey on/off — which is
+two controls that can disagree about one thing. There is one ground under a
+flight, so there is one setting for it.
+
+Imagery is the default. It was opt-in while it was the only thing the view
+could put under a flight and it looked like a debug overlay; a flight over bare
+grid is the least useful of the three.
 
 **What it is not.** Satellite imagery is a photograph, not a model of the
 ground. Anything with height leans away from nadir, so a roof gets painted

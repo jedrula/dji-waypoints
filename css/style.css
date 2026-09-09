@@ -177,6 +177,7 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
                       inset: 0 0 0 var(--split); width: calc(100% - var(--split));
                       border-left: 1px solid var(--line); }
 #stage.split #basetabs { right: calc(100% - var(--split) + 10px); }
+#stage.split #groundtabs { right: 10px; }
 /* Squeeze the map narrower than its own controls and the basemap picker lands
    on the zoom buttons. Below that width it hides rather than overlapping. */
 #stage.split.tight #basetabs { display: none; }
@@ -237,10 +238,20 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 .maptoggle.on { color: var(--accent); border-color: #3d4753; }
 .maptoggle[hidden] { display: none; }
 /* The route toggle belongs to the map, so it sits with the map's own controls
-   on the left. Imagery belongs to the 3D view, and the 3D view draws its
-   altitude scale down that same left edge -- so it takes the right-hand slot
-   the basemap picker leaves empty whenever the 3D is up. */
-#ground { top: 46px; left: auto; right: 10px; }
+   on the left. What the flight is drawn OVER belongs to the 3D view, and that
+   view draws its altitude scale down the same left edge -- so the group takes
+   the right-hand slot the basemap picker leaves empty whenever the 3D is up,
+   and looks like the basemap picker because it is the same kind of choice. */
+#groundtabs { position: absolute; top: 46px; right: 10px; z-index: 500;
+              display: flex; background: rgba(16,20,24,0.9); border: 1px solid var(--line);
+              border-radius: 8px; overflow: hidden; }
+#groundtabs[hidden] { display: none; }
+#groundtabs button { border: 0; border-radius: 0; background: transparent; color: var(--dim);
+                     width: 38px; height: 34px; padding: 0; min-height: 0;
+                     display: flex; align-items: center; justify-content: center; }
+#groundtabs button svg { width: 19px; height: 19px; }
+#groundtabs button:hover:not(.on) { color: var(--text); }
+#groundtabs button.on { background: var(--panel2); color: var(--accent); }
 /* Third in the left stack, and only there when you have lost the site: a
    control offering to take you somewhere you already are is just clutter. */
 #recentre { top: 226px; }

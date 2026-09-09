@@ -102,17 +102,22 @@ const basemaps = createBasemaps({ map, onChange: () => { pushGround(); writeUrl(
 /* ---------- 3D ---------- */
 const view3d = createView3D($('scene'));
 let activeView = 'map';
-// Painted by default. It was opt-in while it was the only thing the 3D view
+// What the flight is drawn over. Three answers to one question, so one setting
+// rather than two toggles that can disagree about it:
+//
+//   simple    the grid, and nothing else
+//   imagery   the map's own tiles on a flat plane -- a photograph of the ground
+//   survey    the LiDAR as a real surface, with the flight inside it
+//
+// `imagery` is the default. It was opt-in while it was the only thing this view
 // could put under a flight and it looked like a debug overlay; a flight over
-// bare grid is the less useful picture of the two.
-let groundOn = true;
-
-// The other 3D view: the LiDAR surface with the flight in it. Off until asked
-// for, and the module is not even fetched until then -- it brings three.js with
-// it, which is most of a megabyte nobody planning over imagery needs. See
-// js/scene3d.js for why this is a second renderer rather than a mode of the
-// first.
-let lidarOn = false;
+// bare grid is the least useful of the three.
+//
+// `survey` is a different renderer, not a different layer -- see js/scene3d.js
+// -- and its module is not even fetched until it is first picked, because it
+// brings three.js with it and nobody planning over imagery needs the megabyte.
+const GROUNDS = ['simple', 'imagery', 'survey'];
+let groundMode = 'imagery';
 let lidar = null;
 
 async function lidarView() {
@@ -124,15 +129,16 @@ async function lidarView() {
   return lidar;
 }
 
-async function setLidar(on) {
-  lidarOn = on;
-  $('lidarBtn').classList.toggle('on', on);
-  // Only one surface at a time, and the flat one keeps its own toggle -- so the
-  // imagery button is about the flat view and hides while the survey is up.
-  $('ground').hidden = on || activeView === 'map';
+async function setGround(name) {
+  if (!GROUNDS.includes(name)) return;
+  groundMode = name;
+  for (const b of document.querySelectorAll('#groundtabs button')) {
+    b.classList.toggle('on', b.dataset.ground === name);
+  }
+  pushGround();
   applyViewCanvases();
   writeUrl();
-  if (!on) { lidar?.close(); return; }
+  if (name !== 'survey') { lidar?.close(); return; }
   const view = await lidarView();
   view.setMission(state.mission, state.hazard);
   await view.open();
@@ -143,10 +149,13 @@ async function setLidar(on) {
 // owns it has to be told once it is visible again.
 function applyViewCanvases() {
   const show3d = activeView !== 'map';
-  $('scene').hidden = !show3d || lidarOn;
-  $('lidar').hidden = !show3d || !lidarOn;
-  if (show3d && lidarOn) lidar?.resize();
+  const survey = groundMode === 'survey';
+  $('scene').hidden = !show3d || survey;
+  $('lidar').hidden = !show3d || !survey;
+  if (show3d && survey) lidar?.resize();
 }
+
+
 
 function setView(name) {
   activeView = name;
@@ -163,15 +172,14 @@ function setView(name) {
   // Each belongs to the view it acts on: the route toggle hides clutter on the
   // map, the imagery button paints the ground under the 3D.
   $('routeToggle').hidden = !showMap;
-  $('ground').hidden = !show3d || lidarOn;
-  $('lidarBtn').hidden = !show3d;
+  $('groundtabs').hidden = !show3d;
   $('findplace').hidden = !showMap;
   if (!showMap) openPlace(false);
   showRecentre();
   if (name === 'split') setSplit(splitPct, { store: false });
   if (showMap) map.invalidateSize();
   applyViewCanvases();
-  if (show3d && !lidarOn) view3d.draw();
+  if (show3d && groundMode !== 'survey') view3d.draw();
   writeUrl();
 }
 
@@ -230,8 +238,7 @@ for (const btn of document.querySelectorAll('#viewtabs button')) {
 
 function pushGround() {
   if (!ready) return;
-  view3d.setGround(basemaps.groundSpec(groundOn));
-  $('ground').classList.toggle('on', groundOn);
+  view3d.setGround(basemaps.groundSpec(groundMode === 'imagery'));
 }
 
 /* ---------- the address bar is where the view lives ---------- */
@@ -243,8 +250,7 @@ function writeUrl() {
   const c = map.getCenter();
   q.set('c', `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`);
   q.set('z', String(map.getZoom()));
-  if (!groundOn) q.set('g', '0');
-  if (lidarOn) q.set('l', '1');
+  if (groundMode !== 'imagery') q.set('s', groundMode);
   for (const k of MOCK_KEYS) if (opened.has(k)) q.set(k, opened.get(k));
   const code = planCode();
   window.history.replaceState(null, '', `?${q}${code ? `#plan=${code}` : ''}`);
@@ -254,8 +260,7 @@ function readUrl() {
   const q = new URLSearchParams(location.search);
   basemaps.set(q.get('b') ?? basemaps.name());
   if (['map', 'split', '3d'].includes(q.get('v'))) setView(q.get('v'));
-  if (q.get('g') === '0') { groundOn = false; pushGround(); }
-  if (q.get('l') === '1') setLidar(true);
+  if (GROUNDS.includes(q.get('s'))) setGround(q.get('s'));
   const [lat, lon] = (q.get('c') ?? '').split(',').map(Number);
   const zoom = Number(q.get('z'));
   if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
@@ -1608,11 +1613,11 @@ async function findMe({ quiet = false } = {}) {
 }
 $('findme').addEventListener('click', () => findMe());
 
-// The survey, or the photograph. Two pictures of the same ground: one is the
-// map's own imagery on a flat plane, the other is the LiDAR as a surface with
-// the flight in it. They answer different questions, so this is a swap and not
-// a setting -- see js/scene3d.js.
-$('lidarBtn').addEventListener('click', () => { setLidar(!lidarOn); });
+// Nothing, a photograph, or the survey. Same kind of choice as the basemap
+// picker it sits under, so it is the same kind of control.
+for (const b of document.querySelectorAll('#groundtabs button')) {
+  b.addEventListener('click', () => setGround(b.dataset.ground));
+}
 
 // The button over the map is obstacle mode's, and it asks OpenStreetMap about
 // the view rather than the receiver. Capture mode had one beside it that placed
@@ -1794,7 +1799,7 @@ $('clearance').addEventListener('change', () => {
 });
 // A button, not a checkbox: it belongs over the 3D view it paints, not in a
 // sheet you have to go and open.
-$('ground').addEventListener('click', () => { groundOn = !groundOn; pushGround(); writeUrl(); });
+
 $('syncNow').addEventListener('click', () => site.sync().then(renderIdentity));
 
 /* ---------- startup ---------- */

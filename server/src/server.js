@@ -32,6 +32,7 @@ import { KEY_OK } from '../../sync/protocol.js';
 import { createScene, GRID, CELL_M, KIND } from './scene.js';
 import { createOrthoStore, ORTHO_PX } from './ortho.js';
 import { createBdotStore } from './bdot.js';
+import { createBuildingStore } from './buildings.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = process.env.DATA_DIR ?? path.join(HERE, '..', 'var');
@@ -48,7 +49,9 @@ const TILE_DIR = path.join(ROOT, 'tile');
 const SCENE_DIR = path.join(ROOT, 'scene');
 const orthoStore = createOrthoStore({ dir: path.join(ROOT, 'ortho') });
 const bdotStore = createBdotStore({ dir: path.join(ROOT, 'bdot') });
+const buildingStore = createBuildingStore({ dir: path.join(ROOT, 'budynki3d') });
 const LINES_DIR = path.join(ROOT, 'lines');
+const BUILDINGS_DIR = path.join(ROOT, 'buildings');
 
 // ---------------------------------------------------------------- tile build
 
@@ -460,6 +463,29 @@ const server = http.createServer(async (req, res) => {
       try {
         const out = await throttle(() => bdotStore.linesFor(tn, te));
         await mkdir(LINES_DIR, { recursive: true });
+        await writeFile(cache, JSON.stringify(out));
+        return send(res, 200, out, origin, { 'Cache-Control': 'public, max-age=604800' });
+      } catch (err) {
+        return send(res, 502, { error: String(err.message ?? err) }, origin);
+      }
+    }
+
+    // The buildings standing over one scene tile, as solids with walls, from
+    // GUGiK's CityGML rather than from the raster -- see src/buildings.js.
+    // Cached per tile beside the lines for the same reason: the answer is a few
+    // tens of kilobytes and the question is asked on every scene open.
+    const bldgMatch = url.pathname.match(/^\/v1\/buildings\/(-?\d+)\/(-?\d+)$/);
+    if (bldgMatch) {
+      const tn = Number(bldgMatch[1]);
+      const te = Number(bldgMatch[2]);
+      const cache = path.join(BUILDINGS_DIR, `${tn}_${te}.json`);
+      try {
+        const hit = JSON.parse(await readFile(cache, 'utf8'));
+        return send(res, 200, hit, origin, { 'Cache-Control': 'public, max-age=604800' });
+      } catch { /* build it */ }
+      try {
+        const out = await throttle(() => buildingStore.buildingsFor(tn, te));
+        await mkdir(BUILDINGS_DIR, { recursive: true });
         await writeFile(cache, JSON.stringify(out));
         return send(res, 200, out, origin, { 'Cache-Control': 'public, max-age=604800' });
       } catch (err) {

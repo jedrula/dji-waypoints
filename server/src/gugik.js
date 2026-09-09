@@ -7,12 +7,7 @@
 // than the LAZ, for the same ground. So: point cloud, once per tile, cached
 // forever, because a 2024 survey is not going to change its mind.
 
-import { createHash } from 'node:crypto';
-import { createWriteStream } from 'node:fs';
-import { mkdir, stat, rename, readFile } from 'node:fs/promises';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
-import path from 'node:path';
+import { createDownloadCache } from './download.js';
 
 const WFS = 'https://mapy.geoportal.gov.pl/wss/service/PZGIK/'
   + 'DanePomiaroweLidarEVRF2007/WFS/Skorowidze';
@@ -71,35 +66,12 @@ export async function findTiles({ e0, n0, e1, n1 }, { fetchImpl = fetch, signal 
 
 // Downloads are the slow, rude part: tens of megabytes each, from a public
 // agency doing us a favour. Every one is written once and kept, and a download
-// already in flight is joined rather than started again.
-const inFlight = new Map();
+// already in flight is joined rather than started again -- see src/download.js.
 
 export function createTileStore({ dir, fetchImpl = fetch }) {
-  const fileFor = (url) => path.join(dir, `${createHash('sha1').update(url).digest('hex')}.laz`);
-
-  async function fetchLaz(url, { signal } = {}) {
-    const file = fileFor(url);
-    try {
-      const s = await stat(file);
-      if (s.size > 0) return { file, bytes: s.size, cached: true };
-    } catch { /* not cached */ }
-
-    if (inFlight.has(file)) return inFlight.get(file);
-    const job = (async () => {
-      await mkdir(dir, { recursive: true });
-      const res = await fetchImpl(url, { signal });
-      if (!res.ok) throw new Error(`GUGiK returned ${res.status} for ${url}`);
-      // Write to a temporary name and rename: a half-downloaded file that
-      // looks complete is a cache poisoned until someone deletes it by hand.
-      const tmp = `${file}.part`;
-      await pipeline(Readable.fromWeb(res.body), createWriteStream(tmp));
-      await rename(tmp, file);
-      const s = await stat(file);
-      return { file, bytes: s.size, cached: false };
-    })().finally(() => inFlight.delete(file));
-    inFlight.set(file, job);
-    return job;
-  }
-
-  return { fetchLaz, read: (url) => readFile(fileFor(url)) };
+  // See src/download.js: the write-then-rename and the shared in-flight
+  // promise used to live here, and in bdot.js, and were about to live in
+  // buildings.js too.
+  const cache = createDownloadCache({ dir, ext: '.laz', fetchImpl, what: 'GUGiK' });
+  return { fetchLaz: cache.get, read: cache.read };
 }

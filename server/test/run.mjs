@@ -12,6 +12,7 @@ import { createStore, LISTS } from '../src/store.js';
 import { createScene, GRID, CELL_M, KIND } from '../src/scene.js';
 import { createOrthoStore, ORTHO_PX } from '../src/ortho.js';
 import { createBdotStore, findPackage, LINE_KIND } from '../src/bdot.js';
+import { parseBuildings, findPackage as findBuildings } from '../src/buildings.js';
 
 let fails = 0;
 const ok = (name, cond, extra = '') => {
@@ -441,6 +442,73 @@ console.log('\noverhead lines');
   ok('the package is fetched once and kept', again.lines.length === out.lines.length);
 
   rmSync(dir, { recursive: true, force: true });
+}
+
+console.log('\nbuildings with walls (LoD1 CityGML)');
+{
+  // One LoD1 solid, cut down from 0264_M-33-35-A-c-4-3.gml but with a footprint
+  // made deliberately NOT square: 20 m of easting by 5 m of northing. A square
+  // one would pass with the axes swapped, which is the mistake this guards.
+  const solid = (rings) => `<bldg:Building gml:id="ID-TEST-1">
+      <bldg:roofType>1000</bldg:roofType><bldg:lod1Solid><gml:Solid>
+      ${rings.map((r) => `<gml:surfaceMember><gml:Polygon><gml:exterior>
+        <gml:LinearRing><gml:posList>${r}</gml:posList></gml:LinearRing>
+      </gml:exterior></gml:Polygon></gml:surfaceMember>`).join('')}
+      </gml:Solid></bldg:lod1Solid></bldg:Building>`;
+  const xml = solid([
+    // footprint at 120.00, easting 362000..362020, northing 362500..362505
+    '362000 362500 120 362020 362500 120 362020 362505 120 362000 362505 120 362000 362500 120',
+    // one wall, carrying the roof height
+    '362000 362500 120 362020 362500 120 362020 362500 132.5 362000 362500 132.5 362000 362500 120',
+  ]);
+  const [b] = parseBuildings(xml);
+
+  // The load-bearing assertion. posList is EASTING first -- measured against
+  // our own LiDAR, 73% of centroids on a building cell and a median 0.55 m
+  // between roof and surface, against 16% and 17.15 m for the other reading.
+  const es = b.ring.map(([e]) => e);
+  const ns = b.ring.map(([, n]) => n);
+  ok('a footprint is read easting first', Math.max(...es) - Math.min(...es) === 20
+     && Math.max(...ns) - Math.min(...ns) === 5,
+     `${Math.max(...es) - Math.min(...es)} x ${Math.max(...ns) - Math.min(...ns)}`);
+  ok('the ring does not repeat its closing point', b.ring.length === 4, String(b.ring.length));
+  ok('the base is the footprint height', b.base === 120, String(b.base));
+  ok('the top is the tallest vertex of the whole solid', b.top === 132.5, String(b.top));
+  ok('the roof type survives', b.roof === '1000');
+
+  // A wall is what this dataset is FOR, so a prism with no height is not a
+  // building -- it is a footprint the source failed to extrude.
+  const flat = parseBuildings(solid([
+    '362000 362500 120 362020 362500 120 362020 362505 120 362000 362500 120',
+  ]));
+  ok('a solid with no height is dropped', flat.length === 0, String(flat.length));
+
+  // Overlap, not containment: the building an aircraft at the edge of the tile
+  // can hit is the one hanging over that edge.
+  const straddling = { e0: 362010, n0: 362400, e1: 362510, n1: 362900 };
+  ok('a building over the edge of the box is kept',
+     parseBuildings(xml, straddling).length === 1);
+  ok('a building outside the box is not',
+     parseBuildings(xml, { e0: 400000, n0: 400000, e1: 400500, n1: 400500 }).length === 0);
+
+  // The index is a WMS GetFeatureInfo returning HTML, which is the only
+  // published way to resolve a coordinate to a package. Recorded response.
+  const html = `<table><tr><th>Jednostka</th><td>m. Wroc\u0142aw</td></tr>
+    <tr><th>TERYT</th><td>0264</td></tr>
+    <tr><th>Liczba budynk\u00f3w</th><td>63090</td></tr>
+    <tr><td><a href="https://integracja.gugik.gov.pl/Budynki3D/pobierz.php?d=2&plik=powiaty/lod1/0264_gml.zip">Pobierz</a></td></tr></table>`;
+  const pkg = await findBuildings(362219, 362939, {
+    fetchImpl: async () => ({ ok: true, text: async () => html }),
+  });
+  ok('the index yields a package URL', pkg.url.endsWith('0264_gml.zip'), pkg.url);
+  ok('and the unit it covers', pkg.teryt === '0264' && /Wroc/.test(pkg.unit), `${pkg.teryt} ${pkg.unit}`);
+  ok('LoD1 by default, because LoD2 does not cover Wroclaw', pkg.lod === 'lod1');
+
+  // No link in the fragment means no coverage, and that is not an error.
+  const none = await findBuildings(362219, 362939, {
+    fetchImpl: async () => ({ ok: true, text: async () => '<table></table>' }),
+  });
+  ok('no package is null rather than a throw', none === null);
 }
 
 console.log(`\n${fails === 0 ? 'ALL PASS' : `${fails} FAILURES`}`);

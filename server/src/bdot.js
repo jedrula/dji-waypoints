@@ -13,12 +13,8 @@
 // the OpenStreetMap importer already does it. But where they run is the half
 // that was missing, and it is the half you cannot guess.
 
-import { createHash } from 'node:crypto';
-import { createWriteStream } from 'node:fs';
-import { mkdir, stat, rename, readFile } from 'node:fs/promises';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
-import path from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { createDownloadCache } from './download.js';
 import { unzip } from '../../js/kmzread.js';
 import { ASSUMED } from '../../js/lines.js';
 import { TILE_M } from './ndsm.js';
@@ -64,30 +60,10 @@ export async function findPackage(east, north, { fetchImpl = fetch } = {}) {
   return { url: plain, powiat: (plain.match(/(\d{4})_GML\.zip$/) ?? [])[1] ?? '?' };
 }
 
-const inFlight = new Map();
-
 export function createBdotStore({ dir, fetchImpl = fetch }) {
-  const fileFor = (url) => path.join(dir, `${createHash('sha1').update(url).digest('hex')}.zip`);
-
-  async function fetchPackage(url) {
-    const file = fileFor(url);
-    try {
-      const s = await stat(file);
-      if (s.size > 0) return { file, bytes: s.size, cached: true };
-    } catch { /* not cached */ }
-    if (inFlight.has(file)) return inFlight.get(file);
-    const job = (async () => {
-      await mkdir(dir, { recursive: true });
-      const res = await fetchImpl(url);
-      if (!res.ok) throw new Error(`BDOT10k download answered ${res.status}`);
-      const tmp = `${file}.part`;
-      await pipeline(Readable.fromWeb(res.body), createWriteStream(tmp));
-      await rename(tmp, file);
-      return { file, bytes: (await stat(file)).size, cached: false };
-    })().finally(() => inFlight.delete(file));
-    inFlight.set(file, job);
-    return job;
-  }
+  // See src/download.js -- this was the second copy of it.
+  const cache = createDownloadCache({ dir, ext: '.zip', fetchImpl, what: 'BDOT10k' });
+  const fetchPackage = cache.get;
 
   // Every overhead line crossing one scene tile, in tile-local metres.
   async function linesFor(tn, te) {

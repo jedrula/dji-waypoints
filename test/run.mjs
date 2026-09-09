@@ -1507,9 +1507,9 @@ console.log('\nthe shape a thing actually is');
   }
 }
 
-console.log('\nwalking the site');
+console.log('\nwhat a tap leaves behind');
 {
-  const { sampleRect, walkRect, judgeFix, spanOf, SIZES, MAX_ACCURACY } = await import('../js/walk.js');
+  const { sampleRect, parseHeight } = await import('../js/site.js');
   const { ringFloor } = await import('../js/collide.js');
   const { mPerDegLat: mLat, mPerDegLon: mLon } = await import('../js/geo.js');
   const spanM = (r) => ({
@@ -1517,52 +1517,27 @@ console.log('\nwalking the site');
     y: mLat((r.north + r.south) / 2) * (r.north - r.south),
   });
 
-  const exact = sampleRect({ lat: 50.06, lon: 19.93, accuracy: 0 }, spanOf('medium'));
-  const sp = spanM(exact);
-  ok(`a perfect fix gives the size you asked for (${sp.x.toFixed(1)} x ${sp.y.toFixed(1)} m)`,
-     near(sp.x, 8, 0.05) && near(sp.y, 8, 0.05));
-
-  // The whole point of the inflation: the box has to enclose the thing wherever
-  // inside the accuracy circle you actually stood.
-  const rough = spanM(sampleRect({ lat: 50.06, lon: 19.93, accuracy: 6 }, spanOf('medium')));
-  ok(`a ±6 m fix grows the box by 6 m on every side (${rough.x.toFixed(1)} m)`,
-     near(rough.x, 8 + 12, 0.05) && near(rough.y, 8 + 12, 0.05));
-  ok('a bigger size makes a bigger box',
-     spanM(sampleRect({ lat: 50.06, lon: 19.93, accuracy: 3 }, spanOf('large'))).x
-     > spanM(sampleRect({ lat: 50.06, lon: 19.93, accuracy: 3 }, spanOf('small'))).x);
-  ok('every size is a real number of metres', SIZES.every((z) => z.span > 0 && z.hint));
+  // A tap is all the shape there is, so it leaves a square of the span asked
+  // for. It used to be grown by the accuracy of the fix that placed it, back
+  // when a point could be placed by standing next to the thing.
+  const sq = spanM(sampleRect({ lat: 50.06, lon: 19.93 }, 8));
+  ok(`a tap gives the size you asked for (${sq.x.toFixed(1)} x ${sq.y.toFixed(1)} m)`,
+     near(sq.x, 8, 0.05) && near(sq.y, 8, 0.05));
+  ok('a bigger span makes a bigger box',
+     spanM(sampleRect({ lat: 50.06, lon: 19.93 }, 20)).x
+     > spanM(sampleRect({ lat: 50.06, lon: 19.93 }, 3)).x);
   ok('a box never collapses to nothing',
-     spanM(sampleRect({ lat: 50.06, lon: 19.93, accuracy: 0 }, 0)).x > 0.9);
+     spanM(sampleRect({ lat: 50.06, lon: 19.93 }, 0)).x > 0.9);
 
   // A comma is what a Polish keyboard puts there, and `type=number` reads that
   // back as the empty string -- which coerced with + is 0, a silently wrong
   // height and a ring floor to match.
-  const { parseHeight } = await import('../js/walk.js');
   ok('a comma decimal is a number', parseHeight('2,5') === 2.5);
   ok('so is a point', parseHeight('2.5') === 2.5);
   ok('an empty field is nothing, not zero', parseHeight('') === null && parseHeight('  ') === null);
   ok('so is junk', parseHeight('tall') === null && parseHeight('12x') === null);
   ok('and so is a height no drone will fly', parseHeight('-3') === null && parseHeight('900') === null);
   ok('zero is a real answer', parseHeight('0') === 0);
-
-  ok('a vague fix is refused, not rounded off', judgeFix({ accuracy: MAX_ACCURACY + 1 }).ok === false);
-  ok('a good one is accepted silently', judgeFix({ accuracy: 4 }).ok && !judgeFix({ accuracy: 4 }).note);
-  ok('a loose but usable one says so', judgeFix({ accuracy: 15 }).ok && judgeFix({ accuracy: 15 }).note);
-  ok('no fix at all is refused', judgeFix(null).ok === false);
-
-  // The walk defines the capture area.
-  const stops = [
-    sampleRect({ lat: 50.0600, lon: 19.9300, accuracy: 2 }, 3),
-    sampleRect({ lat: 50.0604, lon: 19.9306, accuracy: 2 }, 3),
-  ];
-  const wr = walkRect(stops, 5);
-  ok('the box covers every stop', stops.every((r) =>
-     wr.north > r.north && wr.south < r.south && wr.east > r.east && wr.west < r.west));
-  const inner = walkRect(stops, 0);
-  ok('the margin is real and outward',
-     mLat(50.06) * (wr.north - inner.north) > 4.9);
-  ok('one stop still makes a box', walkRect([stops[0]], 5) !== null);
-  ok('no stops makes no box', walkRect([], 5) === null);
 
   // ringFloor is still how "how low may anything fly here" is worked out; what
   // changed is who asks. There is no single perimeter ring to lift any more, so

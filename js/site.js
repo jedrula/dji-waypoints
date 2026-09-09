@@ -3,10 +3,11 @@
 // The app used to keep this in three: a rectangle you dragged, an obstacle list
 // with its own view, and a walk that made obstacles from where you stood. They
 // were three ways of saying the same two things -- what to capture, and what to
-// stay away from -- so they are one thing now, and the only difference between
-// a tap and a GPS stop is where the coordinates came from.
+// stay away from -- so they are one thing now.
 //
-// A point is a tap. Both kinds carry a height, because both questions are about
+// A point is a tap. There was a second way to make one -- a button that placed
+// it where the phone said you were standing -- and it is gone; a tap is the
+// whole gesture. Both kinds carry a height, because both questions are about
 // height: how tall is the thing I want photographed, and how tall is the thing
 // I must not hit.
 //
@@ -22,9 +23,42 @@
 //             already made. Nothing about the sync format changes.
 
 import { createObstacleStore, normalizeRect, DEFAULT_HEIGHT } from './obstacles.js';
-import { sampleRect, SIZES, DEFAULT_SIZE, spanOf } from './walk.js';
+import { mPerDegLat, mPerDegLon } from './geo.js';
 
-export { SIZES, DEFAULT_SIZE, spanOf, DEFAULT_HEIGHT };
+export { DEFAULT_HEIGHT };
+
+// The square a tap leaves behind: centred on the tap, sized by the span.
+//
+// It used to be grown by the accuracy of the GPS fix that placed it, because a
+// stop meant standing beside the thing rather than inside it and the fix had
+// its own radius of doubt. Nothing places one from a fix any more, so the
+// growing had nothing left to grow by.
+export function sampleRect({ lat, lon }, span) {
+  const half = Math.max(0.5, span / 2);
+  return {
+    north: lat + half / mPerDegLat(lat),
+    south: lat - half / mPerDegLat(lat),
+    east: lon + half / mPerDegLon(lat),
+    west: lon - half / mPerDegLon(lat),
+  };
+}
+
+// A height typed on a phone, which is not the same thing as a number.
+//
+// `type=number` looked like the right input and is not: on a locale with a
+// comma decimal separator -- Polish, where this app is being used -- typing
+// "2,5" leaves the field INVALID, and `.value` reads back as the empty string.
+// Coerced with `+`, that is 0, so a 2.5 m obstacle silently becomes a 0 m one
+// and the ring floor drops with it. A text field parsed here accepts either
+// separator and says plainly when it has nothing.
+export function parseHeight(text) {
+  const t = String(text ?? '').trim().replace(',', '.');
+  if (!t) return null;
+  const v = Number(t);
+  if (!Number.isFinite(v) || v < 0 || v > 120) return null;
+  return Math.round(v * 10) / 10;
+}
+
 
 // The height a point starts at, before you say otherwise. Three metres is a
 // hedge, a van, a garden wall -- the commonest thing you point at, and low
@@ -144,9 +178,9 @@ export function createSite({ onChange = () => {}, onSync = () => {}, storage, fe
     /* ---------- what to capture ---------- */
     capture: () => capture,
 
-    addCapture({ lat, lon, accuracy = 0, height = DEFAULT_POINT_HEIGHT }) {
+    addCapture({ lat, lon, height = DEFAULT_POINT_HEIGHT }) {
       if (capture.length >= MAX_CAPTURE_POINTS) return null;
-      const p = { id: newId(), lat, lon, height, accuracy };
+      const p = { id: newId(), lat, lon, height };
       capture = [...capture, p];
       changed({ capture: true });
       return p;
@@ -189,11 +223,10 @@ export function createSite({ onChange = () => {}, onSync = () => {}, storage, fe
     /* ---------- what to avoid ---------- */
     obstacles: () => obstacles.list(),
 
-    // A tap plus a span is a small square, grown by whatever the fix was unsure
-    // about. On the map that is nothing; standing next to the thing it is the
-    // phone's accuracy, and erring outward is the safe direction for an obstacle.
-    addObstacle({ lat, lon, accuracy = 0, height = DEFAULT_POINT_HEIGHT, span = DEFAULT_OBSTACLE_SPAN }) {
-      const rect = sampleRect({ lat, lon, accuracy }, span);
+    // A tap plus a span is a small square, because a tap is all the shape there
+    // is. Anything with a real outline is imported and carries one.
+    addObstacle({ lat, lon, height = DEFAULT_POINT_HEIGHT, span = DEFAULT_OBSTACLE_SPAN }) {
+      const rect = sampleRect({ lat, lon }, span);
       const o = obstacles.put({ ...normalizeRect(rect), height, name: '' });
       changed({ obstacles: true });
       return o;
@@ -244,8 +277,7 @@ export function createSite({ onChange = () => {}, onSync = () => {}, storage, fe
     },
 
     // Moving one keeps its size and height and puts the same box somewhere
-    // else -- the accuracy it was originally grown by is already baked into
-    // the span, and dragging it does not make the phone any surer.
+    // else.
     moveObstacle(id, lat, lon) {
       const o = obstacles.list().find((x) => x.id === id);
       if (!o) return;

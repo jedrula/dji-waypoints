@@ -1,22 +1,25 @@
-// A pretend receiver, for working on the walk without walking.
+// A pretend receiver, for working on the find-me path without going outside.
 //
 // NOT PART OF THE APP. Nothing imports this at load time: app.js reaches for it
 // only when the address bar says `?mockgps`, so on a phone, on GitHub Pages, and
-// in every ordinary run the file is never even fetched. It exists because the
-// half of this app that matters most is the half you use standing in a field,
-// and a laptop indoors either has no fix at all or has one from a Wi-Fi lookup
-// several kilometres and several minutes away -- neither of which exercises the
-// code, and both of which waste the trip outside to find out.
+// in every ordinary run the file is never even fetched. It exists because a
+// laptop indoors either has no fix at all or has one from a Wi-Fi lookup several
+// kilometres and several minutes away -- neither of which exercises the code,
+// and both of which waste the trip outside to find out.
 //
 //   ?mockgps            drop the puck in the middle of the map
 //   ?mockgps=50.06,19.93        put it somewhere specific
 //   &acc=12             report ±12 m instead of the default ±4
 //   &age=180            report a fix three minutes old, to see the stale path
 //
-// Drag the puck to walk. Everything that asks the browser where you are gets
-// the puck's position, including the accuracy, so a stop's box is grown by the
-// number you chose and the "too vague to place" refusal can be provoked on
-// purpose by asking for ±30.
+// Drag the puck to move. Everything that asks the browser where you are gets
+// the puck's position, including the accuracy and the age, so the readout after
+// centring and the "from a fix three minutes old" line can both be provoked on
+// purpose.
+//
+// There used to be more to exercise here: a button that placed a capture point
+// where you were standing, which grew its box by the accuracy and refused a fix
+// past 25 m. That is gone, and with it the reason to pretend to be vague.
 
 const $ = (id) => document.getElementById(id);
 

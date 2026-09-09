@@ -31,14 +31,14 @@ import { encodePlan, decodePlan } from './share.js';
 import { initPlans } from './plansui.js';
 import { routeFromRead } from './route.js';
 import { createBasemaps } from './basemap.js';
-import { createSite, pointOf, spanMOf, spansOf, isEstimated, isImported, labelOf,
+import { createSite, parseHeight, pointOf, spanMOf, spansOf, isEstimated, isImported, labelOf,
   DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS } from './site.js';
 import { overlaps } from './obstacles.js';
 import { localPrisms, localSolid, ringLatLon } from './prism.js';
 import { checkObstacles, clearingAltitude } from './collide.js';
 import { createHistory } from './history.js';
-import { judgeFix, parseHeight, MAX_ACCURACY } from './walk.js';
-import { bestFix, watchAccuracy, GPS_ERRORS, STALE_MS } from './gps.js';
+
+import { bestFix, GPS_ERRORS, STALE_MS } from './gps.js';
 import { sampleTerrain, verdict as terrainVerdict } from './terrain.js';
 import { serviceUrl, serviceHeaders } from './service.js';
 
@@ -445,12 +445,6 @@ const siteForPlanner = () => ({
 const MODES = {
   capture: {
     label: 'capture point',
-    // What the big button over the map does in this mode. A capture point is
-    // one you are sure of because you walked to it, so here the button reports
-    // the phone's position -- and it says "where I stand" rather than "here"
-    // because "here" on a map reads as "here on the map", which is exactly
-    // what obstacle mode means by it.
-    here: 'Capture where I stand',
     colour: '#4da3ff',
     tip: 'Tap the map on what you want captured. Tap a point to set how tall it is.',
     list: () => site.capture(),
@@ -486,15 +480,15 @@ function setMode(mode) {
   for (const b of document.querySelectorAll('#modes button')) b.classList.toggle('on', b.dataset.mode === mode);
   $('tip').textContent = MODES[mode].tip;
   showTip();
-  $('hereBtn').classList.toggle('obstacle', mode === 'obstacle');
-  // Obstacle mode's button asks OpenStreetMap about the view, so it works on a
-  // machine with no receiver in it at all. Capture mode's needs one, and stays
-  // away when there is none.
-  $('hereBtn').hidden = mode === 'capture' && !navigator.geolocation;
-  if (!importing) $('hereBtn').textContent = MODES[mode].here;
-  $('hereBtn').title = mode === 'capture'
-    ? 'Put a capture point at the position your phone reports, rather than where you tap the map'
-    : 'Buildings, trees and overhead lines from OpenStreetMap, for whatever is on screen';
+  // The button over the map belongs to obstacle mode: it asks OpenStreetMap
+  // about the view. Capture mode had one too -- a point placed where the phone
+  // said you were standing -- and it is gone, so a capture point is a tap and
+  // only a tap.
+  $('hereBtn').classList.add('obstacle');
+  $('hereBtn').hidden = mode !== 'obstacle';
+  if (!importing) $('hereBtn').textContent = MODES.obstacle.here;
+  $('hereBtn').title =
+    'Buildings, trees and overhead lines from OpenStreetMap, for whatever is on screen';
   $('clearMode').textContent = mode === 'capture' ? 'Clear points' : 'Clear obstacles';
   renderPoints();
   renderPointBar();
@@ -1535,26 +1529,22 @@ function showFix({ lat, lon, accuracy, age }) {
 const goToFix = ({ lat, lon }) => map.setView([lat, lon], Math.max(map.getZoom(), 20), { animate: false });
 
 let finding = false;
-async function findMe({ quiet = false, then = null } = {}) {
+async function findMe({ quiet = false } = {}) {
   // Locating takes a moment and a second press cannot make it faster, so say
   // that rather than swallowing the tap and looking broken.
   if (finding) { toast('Still looking for a position…'); return null; }
   finding = true;
   $('findme').classList.add('busy');
-  // Only capture mode's button is the one being pressed; obstacle mode's is an
-  // import and has nothing to wait for.
-  if (state.mode === 'capture') $('hereBtn').disabled = true;
   try {
     if (!quiet) toast('Asking your device where you are…', { sticky: true });
     const fix = await bestFix({
       onProgress: (f) => { if (!quiet) toast(`±${f.accuracy.toFixed(0)} m so far…`, { sticky: true }); },
     });
     showFix(fix);
-    if (!then) goToFix(fix);
+    goToFix(fix);
     if (quiet) toast(`Map centred where you are (±${fix.accuracy.toFixed(0)} m).`);
-    else if (!then) toast(`You are here — ±${fix.accuracy.toFixed(0)} m`
+    else toast(`You are here — ±${fix.accuracy.toFixed(0)} m`
       + `${fix.age > STALE_MS ? `, from a fix ${Math.round(fix.age / 60000)} min old` : ''}.`);
-    then?.(fix);
     return fix;
   } catch (err) {
     if (!quiet) toast(GPS_ERRORS[err.code] ?? `Could not locate you: ${err.message}`);
@@ -1562,65 +1552,16 @@ async function findMe({ quiet = false, then = null } = {}) {
   } finally {
     finding = false;
     $('findme').classList.remove('busy');
-    $('hereBtn').disabled = importing;
   }
 }
-$('findme').addEventListener('click', () => { watchFix(); findMe(); });
+$('findme').addEventListener('click', () => findMe());
 
-// Walking a site, the number that decides everything is how sure the phone is:
-// a stop is refused past MAX_ACCURACY, and a loose one grows the box it leaves
-// behind. Showing it live means you can wait for it to come good rather than
-// pressing Here and being told no.
-//
-// The watch is not started until location is in use, and it stops itself when
-// the page goes away -- one left running is the fastest way to flatten the
-// phone you are surveying with.
-let stopWatch = null;
-function watchFix() {
-  if (stopWatch || !navigator.geolocation) return;
-  $('fix').hidden = false;
-  stopWatch = watchAccuracy(
-    (f) => {
-      const a = f.accuracy;
-      const grade = a > MAX_ACCURACY ? 'bad' : a > 8 ? 'rough' : 'good';
-      $('fix').className = `fix ${grade}`;
-      $('fixAcc').textContent = `±${a.toFixed(0)} m`;
-      $('fixNote').textContent = grade === 'bad' ? 'too vague — Here will refuse'
-        : grade === 'rough' ? 'usable, box will be grown'
-        : 'good';
-      showFix(f);
-    },
-    (err) => {
-      $('fix').className = 'fix bad';
-      $('fixAcc').textContent = '—';
-      $('fixNote').textContent = GPS_ERRORS[err.code] ? 'no position' : 'no position';
-    },
-  );
-}
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden && stopWatch) { stopWatch(); stopWatch = null; $('fix').hidden = true; }
-});
-
-// The one button over the map, and it means a different thing in each mode --
-// which is the point. In capture mode it is standing next to the thing rather
-// than looking at it on a map: a point placed where the phone says you are,
-// grown by how unsure it is. In obstacle mode it is the map view instead.
-$('hereBtn').addEventListener('click', () => {
-  if (state.mode === 'obstacle') { importHere(); return; }
-  watchFix();
-  findMe({
-    then: (fix) => {
-      const verdict = judgeFix(fix);
-      if (!verdict.ok) { toast(verdict.why); return; }
-      const added = MODES[state.mode].add({ lat: fix.lat, lon: fix.lon, accuracy: fix.accuracy });
-      if (added) state.selected = { kind: state.mode, id: added.id };
-      goToFix(fix);
-      renderPointBar();
-      toast(`${MODES[state.mode].label} placed where you are (±${fix.accuracy.toFixed(0)} m)`
-        + `${fix.age > STALE_MS ? ' — from a stale fix, check it' : ''}.`);
-    },
-  });
-});
+// The button over the map is obstacle mode's, and it asks OpenStreetMap about
+// the view rather than the receiver. Capture mode had one beside it that placed
+// a point where the phone said you were standing; it is gone, and with it the
+// live accuracy readout, whose whole job was telling you whether that button
+// was about to refuse your fix.
+$('hereBtn').addEventListener('click', () => importHere());
 
 /* ---------- the controller ---------- */
 const bridge = initInstall({
@@ -1843,11 +1784,9 @@ writeUrl();
 // has not already named somewhere more specific.
 const onPhone = window.matchMedia('(max-width: 720px)').matches;
 if (onPhone && !fromHash && !urlNamedAPlace) findMe({ quiet: true });
-// A phone is being carried round the site, so the fix matters the whole time.
-if (onPhone) watchFix();
 
-// Not part of the app: a pretend receiver so the walk can be worked on indoors.
-// Nothing fetches this file unless the address bar asks for it.
+// Not part of the app: a pretend receiver, so finding yourself can be worked on
+// indoors. Nothing fetches this file unless the address bar asks for it.
 if (opened.has('mockgps')) {
   import('./gpsmock.js').then((m) => m.installMock(map, opened)).catch((e) => console.error(e));
 }

@@ -67,32 +67,25 @@ ring itself is as long as the orbit's, which on a large site is a quarter of a
 battery spent on something other than the subject. Auto-fit drops it before it
 drops anything else, and says so.
 
-### Walking the site
+### Finding yourself on the map
 
-The desk workflow taps points over satellite imagery, which works until the
-thing you need is not visible from above: what is under the canopy, how tall the
-climbing frame is, the wire nobody can see. **Here** answers all three, because
-the phone already knows where you are standing -- stand next to the thing, say
-how tall it is, move on.
+A phone carried to the site opens where you are standing rather than at a
+hardcoded city centre, and the crosshair button re-centres on demand. That is
+all the receiver is used for.
 
-Two things make it honest rather than a toy:
+It used to be used for more. **Capture where I stand** placed a capture point at
+the position the phone reported, grew its box by the accuracy of that fix so it
+enclosed the thing wherever inside the circle you had actually stood, refused
+anything looser than +/-25 m, and showed a live accuracy readout over the button
+so you could wait for it to come good rather than pressing it and being told no.
+All of that is **removed**. A capture point is a tap and only a tap, in one
+place, and the receiver's job is to tell you where to tap.
 
-- **The point's box is grown by the accuracy the phone reported**, so it
-  encloses the thing wherever inside that circle you actually stood. A +/-6 m fix
-  gives an 18 m box, not a 6 m one. Erring outward is the safe direction for an
-  obstacle -- the cost is an altitude a few metres higher than it needed to be.
-- **A fix looser than +/-25 m is refused.** A 60 m square dropped because the
-  phone was unsure reads exactly like a real obstacle, vetoes altitudes that
-  were fine, and says nothing about why.
-
-**How sure the phone is, live.** The number that decides everything out there is
-the accuracy the receiver admits to: a stop is refused past 25 m, and a loose
-one grows the box it leaves behind. So it sits over the Here button and updates
-as you walk, in the same three answers Here itself gives -- good, usable but the
-box will be grown, or too vague and it will refuse. You can wait for it to come
-good instead of pressing Here and being told no. The watch starts only once
-location is in use and stops when the page goes away; one left running is the
-fastest way to flatten the phone you are surveying with.
+What went with it, because none of it had a caller left: the +/-25 m refusal, the
+box-growing, the live readout and its geolocation watch, and the three-way
+good / usable / too-vague grade. `js/walk.js` is gone; the square a tap leaves
+and the height parser -- the only two things in it anything still called -- moved
+into `js/site.js`.
 
 For scale: a phone in open sky reports single-digit metres, and 3 to 5 m is a
 good day. Sub-metre is not something a phone browser does -- that needs RTK
@@ -858,23 +851,22 @@ the map sets it, on the point you just placed or any earlier one. A wide thing
 is several taps, the same way a wide capture is; there is no second gesture for
 drawing an outline.
 
-**A tap is a tap wherever the coordinates came from.** *Capture where I stand*
-places the same point at the position the phone reports, grown by the accuracy
-it admits to, which is what walking a site now is. There is no separate walk
-mode, because a stop was never anything but a tap you made with your feet. The
-button used to say *Here*, which reads as "here on the map, where I tapped" --
-the other gesture entirely, and the wrong one.
+**A tap is the only way to place a point.** There were two for a while: a tap,
+and *Capture where I stand*, which put one at the position the phone reported.
+Two gestures for one thing meant two answers to "where exactly is this point",
+and the second one carried a threshold, a box-growing rule and a live accuracy
+readout to support it. It is removed. Marking a tree you are standing next to
+is a tap on the map, with your own position drawn on it.
 
-**One button over the map, meaning a different thing in each mode.** Obstacle
-mode's says *Obstacles here*, and *here* is the map view: it pulls in what is
-already standing there. It used to offer *Obstacle where I stand* instead, which
-was the wrong gesture twice over. You do not walk to an obstacle -- a pylon is a
-thing you keep well away from, and the wires that matter most cannot be stood
-under and read off a phone -- and it put the one part of describing a site that
-needs no receiver behind the one thing that does. A mission can now be planned
-at a desk, with no fix at all: pan to the site, tap *Obstacles here*, tap the
-corners of what you want photographed. Marking a tree you are standing next to
-is still a tap on the map, with your own position drawn on it.
+**One button over the map, and it is obstacle mode's.** It says *Obstacles
+here*, and *here* is the map view: it pulls in what is already standing there.
+It offered *Obstacle where I stand* before that, which was the wrong gesture
+twice over. You do not walk to an obstacle -- a pylon is a thing you keep well
+away from, and the wires that matter most cannot be stood under and read off a
+phone -- and it put the one part of describing a site that needs no receiver
+behind the one thing that does. A mission is planned at a desk with no fix at
+all: pan to the site, tap *Obstacles here*, tap the corners of what you want
+photographed.
 
 **Getting back to what you are working on.** Pan far enough and your points are
 off the edge with nothing on screen to say which way. A frame button on the map
@@ -1016,7 +1008,7 @@ claimed it was and whether the flight clears it. Drag the divider, double-click
 to even it up. On a narrow screen the panes stack instead, because half of a
 phone screen is not a map.
 
-### Testing the walk without walking
+### Testing find-me without going outside
 
 The half of this app that matters most is the half you use standing in a field,
 and a laptop indoors either has no fix at all or has one from a Wi-Fi lookup
@@ -1031,9 +1023,11 @@ ordinary run the file is never even fetched. The address bar turns it on.
     &acc=12                  report +/-12 m instead of the default +/-4
     &age=180                 report a fix three minutes old, for the stale path
 
-Drag the puck to walk. Everything that asks the browser where you are gets its
-position and its accuracy, so a point's box is grown by the number you chose and
-the "too vague to place" refusal can be provoked on purpose by asking for +/-30.
+Drag the puck to move. Everything that asks the browser where you are gets its
+position, accuracy and age, so the readout after centring and the "from a fix
+three minutes old" line can both be provoked on purpose. There was more to
+exercise before *Capture where I stand* was removed -- the box-growing and the
++/-30 refusal -- and with it went the reason to pretend to be vague.
 
 ### What a rectangle became
 

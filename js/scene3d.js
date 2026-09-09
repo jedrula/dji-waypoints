@@ -34,8 +34,27 @@ import { fov, orientation } from './camera.js';
 // metres, so cropping to the flight and its margin is both smaller and sharper
 // than decimating the lot. The vertex cap is what keeps a big site from asking
 // for ten million triangles: past it the step coarsens instead.
-const MARGIN_M = 60;
-const MAX_VERTS = 420_000;
+// How much ground around the flight. 60 m was the flight plus a shoulder, and
+// on a small site in a dense block that put the camera at street level facing
+// a wall with no neighbourhood behind it -- which is why the service's own
+// viewer, which always draws the whole 500 m tile, looked so much better than
+// this did. A site is usually tens of metres and the interesting hazards are
+// the things around it, so the margin is now most of a tile.
+const MARGIN_M = 200;
+// Enough that the 200 m margin above stays at the survey's own half-metre
+// cells instead of being halved to one metre. Measured over Cybulskiego 22,
+// tile 725/724: the crop is 857x622 = 533k vertices with 54,936 wall triangles
+// and takes 335 ms to build, against 214 ms for the same crop decimated to
+// 1 m. 121 ms, once, on a view whose first tile is minutes of downloading --
+// and a metre is the width of the things this picture exists to show.
+const MAX_VERTS = 600_000;
+
+// A step between neighbouring cells this big is a vertical face rather than a
+// slope. Same 1.75 m the service's viewer defaults its "mark walls at" slider
+// to -- see the vertex shader in server/public/scene.html, which these two
+// rules are deliberately a copy of.
+const WALL_STEP_M = 1.75;
+const KIND_BUILDING = 2;
 
 // The same four the map uses, so a red line is a red line in both pictures.
 const WIRE_COLOUR = {
@@ -130,23 +149,30 @@ export function createScene3D(canvas) {
     // first time the view was ever opened.
     controls.enableDamping = false;
     controls.addEventListener('change', () => render());
-    // Sun high and to the south for the shaping, and a hemisphere for the
-    // fill: sky above, ground bounce below.
+    // The service's own viewer shades the same surface as
     //
-    // The numbers are not taste. three.js lights a MeshStandardMaterial
-    // physically, so a lit-up surface leaves as albedo * irradiance / PI --
-    // meaning the old sun 1.6 plus flat ambient 0.85 showed flat ground at
-    // (1.6 * 0.9 + 0.85) / PI = 0.7 of the orthophoto's real brightness, and
-    // every steep face darker still. That is why it looked like dusk: an
-    // orthophoto is a photograph taken in sunlight, so shading it again dims a
-    // picture that already has the sun in it. These add to PI over flat
-    // ground, so the photo is shown at the brightness it was taken at, and the
-    // relief still reads because slopes fall off from there.
-    const sun = new THREE.DirectionalLight(0xfff6e8, 1.5);
-    sun.position.set(-0.45, 1, 0.55);
-    // Sky and ground bounce rather than one flat number, so a north wall is
-    // lit by something with a direction to it instead of going grey.
-    scene.add(sun, new THREE.HemisphereLight(0xbcd8f2, 0x6f6455, 1.8));
+    //     lambert = 0.42 + 0.58 * max(dot(normal, SUN), 0)
+    //
+    // applied straight to the orthophoto -- see the fragment shader in
+    // server/public/scene.html. A wall therefore never falls below 0.42 of the
+    // photo, and nothing ever exceeds it. That is the right model for a drape:
+    // the photo is a photograph taken in sunlight and already has the sun in
+    // it, so the shading is only there to give the relief an edge.
+    //
+    // three.js lights physically -- what leaves a diffuse surface is
+    // albedo * irradiance / PI -- so multiplying both terms by PI reproduces
+    // that expression exactly, with no shader of our own.
+    //
+    // A HemisphereLight was tried here and is what made this view so much
+    // worse than the viewer on a dense street: its fill is keyed to how far a
+    // normal points at the sky, so every facade collapsed towards the
+    // ground-bounce colour, and in a city block seen from a low camera almost
+    // everything you look at IS a facade. Flat ambient is the honest one,
+    // because a drape has no more information about a wall than a floor.
+    const sun = new THREE.DirectionalLight(0xffffff, Math.PI * 0.58);
+    // The viewer's SUN, in the same frame: x east, y up, z south.
+    sun.position.set(0.45, 0.8, 0.35);
+    scene.add(sun, new THREE.AmbientLight(0xffffff, Math.PI * 0.42));
   }
 
   // The sky, as a vertical two-stop gradient on a 2 px-wide canvas. Cheaper
@@ -249,11 +275,50 @@ export function createScene3D(canvas) {
       }
     }
 
-    const index = [];
+    // A wall is a smear. The survey was flown looking straight down, so there
+    // are no pixels for a vertical face: whatever the photo puts there is the
+    // roof edge stretched down the side of the building, and a stretched roof
+    // is the one thing in this picture that is not evidence. The service's
+    // viewer paints those cells flat instead of dressing them up, and not
+    // doing the same here is most of why ours looked worse on a street of
+    // tenements -- every facade in shot was a smear being presented as ground
+    // truth.
+    //
+    // Only a BUILDING, and only where the step is real -- the same two guards
+    // the viewer's shader carries, for its reasons: a tree crown has metres of
+    // variance between neighbouring half-metre cells, so the step test fires
+    // all over a canopy where there is no flat face and nothing being
+    // occluded; and a step between cells nothing was measured in is the
+    // hole-filling showing through, which points at the wrong thing entirely.
+    const isWall = (row, col) => {
+      if (kind[row * N + col] !== KIND_BUILDING) return false;
+      const l = heightAt(row, Math.max(col - 1, 0));
+      const r = heightAt(row, Math.min(col + 1, N - 1));
+      const u = heightAt(Math.max(row - 1, 0), col);
+      const d = heightAt(Math.min(row + 1, N - 1), col);
+      // Full-resolution neighbours whatever the decimation, because the step is
+      // a property of the ground and not of how coarsely we chose to draw it.
+      return Math.max(Math.abs(r - l), Math.abs(d - u)) * 0.5 >= WALL_STEP_M;
+    };
+    const wallVert = new Uint8Array(cols * rows);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        wallVert[r * cols + c] = isWall(r0 + r * step, c0 + c * step) ? 1 : 0;
+      }
+    }
+
+    // Two index buffers over one set of vertices: the photographed surface, and
+    // the faces that photograph cannot speak for. A quad goes to the second if
+    // any corner of it is a wall, so a facade is marked whole rather than
+    // dithered.
+    const skin = [];
+    const walls = [];
     for (let r = 0; r < rows - 1; r++) {
       for (let c = 0; c < cols - 1; c++) {
         const a = r * cols + c;
-        index.push(a, a + cols, a + 1, a + 1, a + cols, a + cols + 1);
+        const to = (wallVert[a] || wallVert[a + 1] || wallVert[a + cols] || wallVert[a + cols + 1])
+          ? walls : skin;
+        to.push(a, a + cols, a + 1, a + 1, a + cols, a + cols + 1);
       }
     }
 
@@ -261,17 +326,26 @@ export function createScene3D(canvas) {
     geom.setAttribute('position', new THREE.BufferAttribute(verts, 3));
     geom.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
     geom.setAttribute('color', new THREE.BufferAttribute(colours, 3));
-    geom.setIndex(index);
+    // Both draws share these vertices and so share one normal per vertex,
+    // which is what makes the marked faces sit flush in the same light.
+    geom.setIndex(skin.concat(walls));
     geom.computeVertexNormals();
+    geom.clearGroups();
+    geom.addGroup(0, skin.length, 0);
+    geom.addGroup(skin.length, walls.length, 1);
 
     if (surfaceMesh) { scene.remove(surfaceMesh); surfaceMesh.geometry.dispose(); }
-    const material = new THREE.MeshStandardMaterial({
+    // Lambert, not Standard: the viewer's rule is pure Lambert with no
+    // specular term, and a roughness lobe over a photograph of a roof is
+    // inventing a highlight that nothing measured.
+    const skinMat = new THREE.MeshLambertMaterial({
       map: loaded.ortho ?? null,
       vertexColors: !loaded.ortho,
-      roughness: 0.95,
-      metalness: 0,
     });
-    surfaceMesh = new THREE.Mesh(geom, material);
+    // The viewer's own "building wall (not seen)" brown, so the two pictures
+    // agree about what the colour means as well as where it goes.
+    const wallMat = new THREE.MeshLambertMaterial({ color: 0x8a6a4a });
+    surfaceMesh = new THREE.Mesh(geom, [skinMat, wallMat]);
     scene.add(surfaceMesh);
 
     // Did the crop hit the edge of the tile rather than the margin it asked
@@ -475,10 +549,19 @@ export function createScene3D(canvas) {
     }
     const centre = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
-    const span = Math.max(size.x, size.z, 60) * 1.35;
+    // Floored at 180 m, which is the fix for the thing that made this view
+    // unreadable on a tight site: fitting a 30 m flight put the camera 40 m
+    // out, and 40 m from the middle of a street of tenements is inside the
+    // block, facing a wall, with no neighbourhood behind it. The flight is
+    // still the subject; it just is not the whole picture.
+    const span = Math.max(size.x, size.z, 180) * 1.35;
     const dist = (span / 2) / Math.tan((camera.fov * Math.PI) / 360);
     controls.target.set(centre.x, 0, centre.z);
-    camera.position.set(centre.x, dist * 0.45, centre.z + dist * 0.9);
+    // 0.62 rad above the horizon, the angle the service's viewer opens at, so
+    // the two pictures of the same ground start from the same place. Still low
+    // enough that you are looking ACROSS the site -- which is what shows a
+    // tower standing beside your orbit -- rather than down on a map of it.
+    camera.position.set(centre.x, dist * Math.sin(0.62), centre.z + dist * Math.cos(0.62));
     // The one place update() belongs: the camera was moved from code, so the
     // controls have to be told before the next draw.
     controls.update();

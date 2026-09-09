@@ -70,6 +70,49 @@ export function puwgToLocal(frame, e0, n0) {
   });
 }
 
+// One raster out of several tiles.
+//
+// The survey grid is 500 m squares that know nothing about where anybody flies,
+// so a site near an edge -- which is most of them -- used to have half its
+// orbit hanging over nothing. Each tile is copied into a square covering the
+// ground the flight actually crosses, and everything downstream goes on reading
+// one `meta` and one array.
+//
+// The catch is the datum. A tile stores heights as CENTIMETRES ABOVE ITS OWN
+// LOWEST POINT, and two tiles do not share a lowest point -- one whose valley
+// floor is 20 m lower stores the same roof as a smaller number. Copied
+// verbatim, neighbouring tiles would step at the seam by the difference in
+// their bases. So the stitch takes the lowest base of the lot and lifts every
+// tile onto it.
+//
+// Cells no tile covered stay 0 and KIND none, which the view already draws as
+// unmeasured rather than as ground at zero.
+export function stitch(parts, { e0, n0, side, cell }) {
+  const cells = Math.round(side / cell);
+  const base = Math.min(...parts.map((q) => q.meta.base));
+  const height = new Uint16Array(cells * cells);
+  const kind = new Uint8Array(cells * cells);
+  for (const q of parts) {
+    const g = q.meta.grid;
+    const { east: qe, north: qn } = q.meta.origin;
+    const lift = Math.round((q.meta.base - base) * 100);
+    for (let row = 0; row < g; row++) {
+      // Row 0 is the north edge, in a tile and in the stitch alike.
+      const n = qn + q.meta.tileMetres - (row + 0.5) * cell;
+      const dr = Math.floor((n0 + side - n) / cell);
+      if (dr < 0 || dr >= cells) continue;
+      for (let col = 0; col < g; col++) {
+        const e = qe + (col + 0.5) * cell;
+        const dc = Math.floor((e - e0) / cell);
+        if (dc < 0 || dc >= cells) continue;
+        height[dr * cells + dc] = Math.min(65535, q.height[row * g + col] + lift);
+        kind[dr * cells + dc] = q.kind[row * g + col];
+      }
+    }
+  }
+  return { base: +base.toFixed(2), height, kind, cells };
+}
+
 // The other direction: the mission's local metres back to the tile's own.
 //
 // Same linearisation as above and for the same reason -- over 500 m the

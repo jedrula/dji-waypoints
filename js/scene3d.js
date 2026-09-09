@@ -25,7 +25,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { toPuwg92, toWgs84 } from './puwg92.js';
 import { tileRange, tileCount, tileBounds, mPerPx, TILE_PX } from './tiles.js';
-import { groundAt, puwgToLocal, localToTile, drapeWire } from './surface.js';
+import { groundAt, puwgToLocal, localToTile, drapeWire, stitch } from './surface.js';
 import { serviceUrl, serviceHeaders } from './service.js';
 import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, asHex } from './palette.js';
 import { fov, orientation } from './camera.js';
@@ -707,16 +707,17 @@ export function createScene3D(canvas) {
     surfaceMesh = new THREE.Mesh(geom, surfaceMaterial());
     scene.add(surfaceMesh);
 
-    // Did the crop hit the edge of the tile rather than the margin it asked
-    // for? A tile is 500 m and a site can sit anywhere in it, so this is the
-    // common case rather than the exotic one -- and a surface that stops in a
-    // straight line under half your flight has to say why. Stitching the
-    // neighbouring tiles is the fix; saying so is the honest stopgap.
+    // Does the surface still stop short of the flight? It used to, always, at
+    // the edge of the one 500 m tile -- the raster is stitched from every tile
+    // the flight crosses now, so this is left to catch the two cases that can
+    // still bite: the MAX_SIDE_M cap on a very large site, and a tile the
+    // service could not build.
     const wantC0 = Math.floor((eMin - MARGIN_M - e0) / cell);
     const wantC1 = Math.ceil((eMax + MARGIN_M - e0) / cell);
     const wantR0 = Math.floor((n0 + meta.tileMetres - (nMax + MARGIN_M)) / cell);
     const wantR1 = Math.ceil((n0 + meta.tileMetres - (nMin - MARGIN_M)) / cell);
     loaded.clipped = wantC0 < 0 || wantR0 < 0 || wantC1 > N - 1 || wantR1 > N - 1;
+    loaded.missing = (meta.wanted ?? 1) - (meta.tiles?.length ?? 1);
 
     loaded.datum = datum;
     // The inverse of toLocal, for turning where the camera is looking back
@@ -981,31 +982,126 @@ export function createScene3D(canvas) {
     controls.update();
   }
 
+  // One raster over the ground the flight actually crosses, stitched from
+  // however many 500 m tiles that takes.
+  //
+  // The view used to load the ONE tile /v1/locate named, and a site near a tile
+  // edge -- which is most of them, since the grid knows nothing about where
+  // anybody flies -- had half its orbit hanging over nothing. The status line
+  // admitted it and that was all.
+  //
+  // Stitching rather than drawing a mesh per tile, because every other thing
+  // here already reads one `meta`: the crop, the wall mask, the drape, the
+  // datum, groundAt. A synthesised meta over the crop keeps all of it working
+  // and is one array instead of a scene graph.
+  //
+  // Square, because the grid is indexed as `row * grid + col` throughout, and
+  // capped, because this is memory: 1200 m of side is 2400 cells, 5.8 M of
+  // them, 17 MB across the two arrays.
+  const MAX_SIDE_M = 1200;
+
   async function loadFor(lat, lon, { signal } = {}) {
     boot();
     const here = await ask(`/v1/locate?lat=${lat}&lon=${lon}`, { signal });
     if (!here.ok) throw new Error('outside the survey');
     const { tile } = await here.json();
-    if (loaded && loaded.tn === tile.tn && loaded.te === tile.te) return loaded;
 
-    onStatus('Asking for the survey…');
-    const metaRes = await poll(`/v1/scene/${tile.tn}/${tile.te}.json`, {
-      signal,
-      onWait: () => onStatus('First look at this ground — building it from the LiDAR. A few minutes.'),
-    });
-    const meta = await metaRes.json();
-    if (meta.empty) throw new Error(meta.reason ?? 'no LiDAR here');
+    // The ground to cover: the flight, plus the margin, squared off.
+    const path = mission?.exported ?? mission?.waypoints ?? [];
+    let eMin = Infinity; let eMax = -Infinity; let nMin = Infinity; let nMax = -Infinity;
+    for (const w of path) {
+      const q = toPuwg92(w.lat, w.lon);
+      eMin = Math.min(eMin, q.east); eMax = Math.max(eMax, q.east);
+      nMin = Math.min(nMin, q.north); nMax = Math.max(nMax, q.north);
+    }
+    if (!Number.isFinite(eMin)) {
+      const q = toPuwg92(lat, lon);
+      eMin = eMax = q.east; nMin = nMax = q.north;
+    }
+    const CELL = 0.5;
+    const TILE = 500;
+    const side = Math.min(
+      MAX_SIDE_M,
+      Math.max(eMax - eMin, nMax - nMin) + 2 * MARGIN_M,
+    );
+    const cells = Math.round(side / CELL);
+    // Snapped to the cell grid the tiles use, so a stitched cell lines up with
+    // the cell it is copied from and nothing is resampled.
+    const e0 = Math.round(((eMin + eMax) / 2 - side / 2) / CELL) * CELL;
+    const n0 = Math.round(((nMin + nMax) / 2 - side / 2) / CELL) * CELL;
 
-    onStatus('Downloading the surface…');
-    const raw = await poll(`/v1/scene/${tile.tn}/${tile.te}`, { signal }).then((r) => r.arrayBuffer());
-    const N = meta.grid;
+    const teA = Math.floor(e0 / TILE);
+    const teB = Math.floor((e0 + side - 0.001) / TILE);
+    const tnA = Math.floor(n0 / TILE);
+    const tnB = Math.floor((n0 + side - 0.001) / TILE);
+    const want = [];
+    for (let tn = tnA; tn <= tnB; tn++) {
+      for (let te = teA; te <= teB; te++) want.push({ tn, te });
+    }
+    const key = `${cells}|${e0}|${n0}|${want.map((t) => `${t.tn}/${t.te}`).join(',')}`;
+    if (loaded && loaded.key === key) return loaded;
+
+    // Every tile is asked for, and a tile nobody has built yet gets built --
+    // which is minutes and a couple of hundred megabytes of LiDAR from GUGiK,
+    // so the status says which one and how many are left rather than sitting
+    // silent. A tile that fails is skipped: better a surface with a hole in it,
+    // marked as unmeasured, than no surface at all.
+    const parts = [];
+    for (let i = 0; i < want.length; i++) {
+      const t = want[i];
+      const which = want.length > 1 ? ` (${i + 1} of ${want.length})` : '';
+      onStatus(`Asking for the survey${which}…`);
+      try {
+        const metaRes = await poll(`/v1/scene/${t.tn}/${t.te}.json`, {
+          signal,
+          onWait: () => onStatus(
+            `First look at this ground${which} — building it from the LiDAR. A few minutes.`,
+          ),
+        });
+        const m = await metaRes.json();
+        if (m.empty) continue;
+        onStatus(`Downloading the surface${which}…`);
+        const buf = await poll(`/v1/scene/${t.tn}/${t.te}`, { signal }).then((r) => r.arrayBuffer());
+        const g = m.grid;
+        parts.push({
+          t,
+          meta: m,
+          height: new Uint16Array(buf, 0, g * g),
+          kind: new Uint8Array(buf, g * g * 2, g * g),
+        });
+      } catch (e) {
+        if (signal?.aborted) throw e;
+        console.warn(`tile ${t.tn}/${t.te} could not be loaded:`, e);
+      }
+    }
+    if (!parts.length) throw new Error('no LiDAR here');
+
+    const { base, height, kind } = stitch(parts, { e0, n0, side, cell: CELL });
+
+    const meta = {
+      grid: cells,
+      cellMetres: CELL,
+      tileMetres: side,
+      origin: { east: e0, north: n0 },
+      base: +base.toFixed(2),
+      bounds: (() => {
+        const sw = toWgs84(e0, n0);
+        const ne = toWgs84(e0 + side, n0 + side);
+        return { south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon };
+      })(),
+      // Which tiles this is made of, so the buildings can be asked for per tile
+      // and the status can say how wide the picture really is.
+      tiles: parts.map((q) => q.t),
+      wanted: want.length,
+    };
     const next = {
+      key,
       tn: tile.tn,
       te: tile.te,
       meta,
       base: meta.base,
-      height: new Uint16Array(raw, 0, N * N),
-      kind: new Uint8Array(raw, N * N * 2, N * N),
+      height,
+      kind,
       ortho: null,
     };
 
@@ -1043,11 +1139,27 @@ export function createScene3D(canvas) {
     // hold. Not fatal if it fails: the surface stands on its own and the wall
     // marking goes back to being the only thing said about a facade, which is
     // what yesterday's behaviour was.
+    // Per tile, like the surface, and the rings arrive in THAT tile's metres --
+    // so each is shifted into the stitch before anything downstream sees a
+    // mixture. Getting this wrong would mark walls half a kilometre from the
+    // buildings they belong to.
     onStatus('Asking for the buildings…');
-    try {
-      const got = await ask(`/v1/buildings/${tile.tn}/${tile.te}`, { signal });
-      if (got.ok) next.buildings = (await got.json()).buildings ?? [];
-    } catch { /* the surface alone, and the smear marked as unknown */ }
+    next.buildings = [];
+    for (const t of meta.tiles) {
+      try {
+        const got = await ask(`/v1/buildings/${t.tn}/${t.te}`, { signal });
+        if (!got.ok) continue;
+        const de = t.te * TILE - e0;
+        const dn = t.tn * TILE - n0;
+        for (const b of (await got.json()).buildings ?? []) {
+          next.buildings.push({ ...b, ring: b.ring.map(([e, n]) => [e + de, n + dn]) });
+        }
+      } catch (e) {
+        // The surface stands on its own; the wall marking falls back to the
+        // step heuristic, which is what it did before there were footprints.
+        console.warn(`buildings for ${t.tn}/${t.te} could not be loaded:`, e);
+      }
+    }
 
     loaded = next;
     return loaded;
@@ -1139,12 +1251,18 @@ export function createScene3D(canvas) {
       try {
         await loadFor(c.lat0, c.lon0, { signal: ctl.signal });
         buildSurface();
+        const n = loaded.meta.tiles?.length ?? 1;
         onStatus(`${loaded.meta.sources?.[0]?.year ?? 'LiDAR'} survey, `
           + `${loaded.meta.cellMetres * loaded.step} m cells, `
           + `${(loaded.cells / 1000).toFixed(0)}k points, `
+          + `${n === 1 ? 'one tile' : `${n} tiles stitched`}, `
           + 'heights above your takeoff point.'
+          + (loaded.missing
+            ? ` ${loaded.missing} tile${loaded.missing === 1 ? '' : 's'} would not build, so there `
+              + `${loaded.missing === 1 ? 'is a hole' : 'are holes'} in it.`
+            : '')
           + (loaded.clipped
-            ? ' The site runs off the edge of this survey tile — what you see stops there.'
+            ? ' The site is bigger than this view will stitch — what you see stops there.'
             : ''));
         render();
       } catch (e) {

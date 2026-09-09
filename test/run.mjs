@@ -1409,7 +1409,7 @@ console.log('\nthe shape a thing actually is');
 
 console.log('\nreading a survey tile');
 {
-  const { cellAt, onTile, groundAt, puwgToLocal, localToTile, drapeWire } = await import('../js/surface.js');
+  const { cellAt, onTile, groundAt, puwgToLocal, localToTile, drapeWire, stitch } = await import('../js/surface.js');
   const { toPuwg92, toWgs84 } = await import('../js/puwg92.js');
   const { frame } = await import('../js/geo.js');
 
@@ -1489,6 +1489,57 @@ console.log('\nreading a survey tile');
   ok(`local metres round-trip back to the tile (worst ${(back * 1000).toFixed(1)} mm)`,
      back < 0.001, `${back} m`);
   ok('and 500 m east comes back as east, not north', asym < 0.001, `${asym} m`);
+
+  // Several tiles into one raster. The survey grid knows nothing about where
+  // anybody flies, so a site near an edge used to have half its orbit hanging
+  // over nothing.
+  {
+    const CELL = 0.5;
+    const TILE = 20;                 // toy tiles, 20 m square
+    const G = TILE / CELL;           // 40 x 40 cells
+    // Two tiles side by side in easting, with DIFFERENT bases -- which is the
+    // whole difficulty, since a tile stores centimetres above its own lowest
+    // point. Both hold ground at a true 110.00 m.
+    const tileAt = (e, n, base) => {
+      const height = new Uint16Array(G * G);
+      const kind = new Uint8Array(G * G);
+      height.fill(Math.round((110 - base) * 100));
+      kind.fill(1);
+      return { meta: { grid: G, cellMetres: CELL, tileMetres: TILE, origin: { east: e, north: n }, base },
+               height, kind };
+    };
+    const west = tileAt(1000, 2000, 100);      // stores 1000 cm
+    const east = tileAt(1020, 2000, 90);       // stores 2000 cm for the same height
+    const out = stitch([west, east], { e0: 1000, n0: 2000, side: 40, cell: CELL });
+
+    ok('the stitch takes the lowest base of the tiles in it', out.base === 90, String(out.base));
+    const at = (e, n) => {
+      const c = Math.floor((e - 1000) / CELL);
+      const r = Math.floor((2000 + 40 - n) / CELL);
+      return out.base + out.height[r * out.cells + c] / 100;
+    };
+    // The seam is at easting 1020. Both sides must read the same real height.
+    ok('a cell from the west tile reads its true height', Math.abs(at(1005, 2005) - 110) < 0.01, String(at(1005, 2005)));
+    ok('and a cell from the east tile reads the same, despite a different base',
+       Math.abs(at(1035, 2005) - 110) < 0.01, String(at(1035, 2005)));
+    ok('so there is no step at the seam',
+       Math.abs(at(1019.75, 2005) - at(1020.25, 2005)) < 0.01,
+       `${at(1019.75, 2005)} vs ${at(1020.25, 2005)}`);
+
+    // Ground the tiles do not cover stays unmeasured rather than becoming
+    // ground at zero, which the view draws as a hole and not as a floor.
+    const wide = stitch([west], { e0: 1000, n0: 2000, side: 40, cell: CELL });
+    const kindAt = (e, n) => wide.kind[Math.floor((2000 + 40 - n) / CELL) * wide.cells + Math.floor((e - 1000) / CELL)];
+    ok('covered ground is classified', kindAt(1005, 2005) === 1);
+    ok('and ground no tile covered is left unmeasured', kindAt(1035, 2005) === 0);
+
+    // North is up: row 0 is the north edge, in a tile and in the stitch alike.
+    const tall = tileAt(1000, 2000, 100);
+    tall.height[0] = Math.round((150 - 100) * 100);         // the tile's NW corner
+    const o2 = stitch([tall], { e0: 1000, n0: 2000, side: 20, cell: CELL });
+    ok('the north-west corner stays north-west', o2.height[0] === o2.height[0] && (o2.base + o2.height[0] / 100) === 150,
+       String(o2.base + o2.height[0] / 100));
+  }
 
   // A wire hangs above the GROUND under it, not above the takeoff point. Drawn
   // at one altitude the run sinks into the first rise it meets.

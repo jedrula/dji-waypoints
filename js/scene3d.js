@@ -114,6 +114,7 @@ export function createScene3D(canvas) {
   let controls = null;
   let missionGroup = null;
   let wireGroup = null;
+  let buildingGroup = null;
   let wirePaths = [];
   let looksOn = true;
   let surfaceMesh = null;
@@ -157,6 +158,37 @@ export function createScene3D(canvas) {
     // to how far a normal points at the sky, so every facade collapsed towards
     // the ground-bounce colour, and in a city block seen from a low camera
     // almost everything you look at IS a facade.
+  }
+
+  // The one shading rule in this view, and the reason it is a string: the
+  // surface and the buildings must be lit identically or a wall reads as a
+  // different material from the roof it holds up, and they are different
+  // shaders because one samples a photograph and the other has nothing to
+  // sample. Straight from server/public/scene.html.
+  const LAMBERT_GLSL = `
+    // The viewer's SUN, in the same frame: x east, y up, z south.
+    const vec3 SUN = normalize(vec3(0.45, 0.8, 0.35));
+    float lambert(vec3 n) {
+      return 0.42 + 0.58 * max(dot(normalize(n), SUN), 0.0);
+    }`;
+
+  // A solid of known position and unknown appearance -- see buildBuildings.
+  function solidMaterial(colour) {
+    return new THREE.ShaderMaterial({
+      uniforms: { uColour: { value: new THREE.Color(colour) } },
+      side: THREE.DoubleSide,
+      vertexShader: `
+        varying vec3 vNormal2;
+        void main() {
+          vNormal2 = normalMatrix * normal;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: `
+        uniform vec3 uColour;
+        varying vec3 vNormal2;
+        ${LAMBERT_GLSL}
+        void main() { gl_FragColor = vec4(uColour * lambert(vNormal2), 1.0); }`,
+    });
   }
 
   // The surface's own shader, which is the service viewer's fragment shader
@@ -205,8 +237,7 @@ export function createScene3D(canvas) {
         varying vec3 vColor, vNormal2;
         varying float vWall, vKind;
 
-        // The viewer's SUN, in the same frame: x east, y up, z south.
-        const vec3 SUN = normalize(vec3(0.45, 0.8, 0.35));
+        ${LAMBERT_GLSL}
 
         void main() {
           // No photo here means most of the country outside the towns, and
@@ -228,8 +259,7 @@ export function createScene3D(canvas) {
           // A photograph taken in sunlight already has the sun in it, so this
           // only gives the relief an edge: never below 0.42 of the photo,
           // never above it.
-          float lambert = 0.42 + 0.58 * max(dot(normalize(vNormal2), SUN), 0.0);
-          gl_FragColor = vec4(base * lambert, 1.0);
+          gl_FragColor = vec4(base * lambert(vNormal2), 1.0);
         }`,
     });
   }
@@ -418,9 +448,14 @@ export function createScene3D(canvas) {
     loaded.clipped = wantC0 < 0 || wantR0 < 0 || wantC1 > N - 1 || wantR1 > N - 1;
 
     loaded.datum = datum;
+    // The crop, so the buildings are clipped to the ground that was actually
+    // drawn. Without this they arrive for the whole 500 m tile and the ones
+    // past the edge of the crop hang in the sky with nothing under them.
+    loaded.crop = { c0, c1, r0, r1 };
     loaded.cells = cols * rows;
     loaded.step = step;
     buildMission();
+    buildBuildings();
     buildWires();
     frameCamera();
   }
@@ -436,6 +471,110 @@ export function createScene3D(canvas) {
   // The register knows where they run and not how high they hang -- see
   // js/lines.js -- so this is an assumption drawn as confidently as the
   // geometry it hangs on, which is worth remembering when it looks precise.
+  // The buildings as the prisms they are: a real footprint, real vertical
+  // faces, and a flat roof at the eaves.
+  //
+  // Drawn OVER the surface rather than instead of it, and that is the honest
+  // arrangement rather than a shortcut. The two sources are good at opposite
+  // halves of a building: LoD1 has the wall, which a heightfield cannot hold at
+  // all, and the raster has the roof, which LoD1 flattens to the eaves and the
+  // laser actually measured. So the roof you see is still the measured one with
+  // the photograph on it -- these prisms only reach the eaves -- and the walls
+  // stop being a smear.
+  //
+  // No texture on them, on purpose. There are no pixels of a wall anywhere in
+  // this dataset; the whole reason to draw the wall is that its POSITION is
+  // known, and painting a guessed facade on it would give back exactly the
+  // false confidence the brown marking exists to avoid.
+  function buildBuildings() {
+    if (!scene) return;
+    if (buildingGroup) { scene.remove(buildingGroup); buildingGroup = null; }
+    const list = loaded?.buildings;
+    if (!list?.length || !mission || loaded.datum === undefined) return;
+
+    const { meta, crop } = loaded;
+    const frame = mission.frame;
+    // Rings arrive tile-local, in the tile's own metres -- see the service's
+    // buildingsFor -- so the tile origin goes back on before projecting.
+    const e0 = meta.origin.east;
+    const n0 = meta.origin.north;
+    const cell = meta.cellMetres;
+    const toLocal = puwgToLocal(frame, e0, n0);
+    const datum = loaded.datum;
+
+    // The measured maximum over a footprint is NOT used, and the attempt is
+    // worth recording: it was reached for because almost every prism drawn to
+    // the eaves is buried inside the raster's own plateau and invisible. The
+    // cause of the burial is not the eaves though -- it is that a BDOT10k
+    // footprint sits INSIDE the roof outline the raster measured, because a
+    // roof overhangs and a half-metre grid smears it further out. Raising the
+    // walls to the ridge only fenced the roof off and hid it.
+
+    const verts = [];
+    const norms = [];
+    const push = (x, y, z, nx, ny, nz) => {
+      verts.push(x, y, z);
+      norms.push(nx, ny, nz);
+    };
+
+    for (const b of list) {
+      // Clipped to the drawn crop, in the tile's own grid.
+      if (crop) {
+        const cs = b.ring.map(([e]) => e / cell);
+        const rs = b.ring.map(([, n]) => (meta.tileMetres - n) / cell);
+        if (Math.max(...cs) < crop.c0 || Math.min(...cs) > crop.c1
+            || Math.max(...rs) < crop.r0 || Math.min(...rs) > crop.r1) continue;
+      }
+      const ring = b.ring.map(([e, n]) => {
+        const l = toLocal(e0 + e, n0 + n);
+        return { x: l.x, z: -l.y };
+      });
+      if (ring.length < 3) continue;
+      const lo = b.base - datum;
+      // The eaves, which is what LoD1 actually says, and NOT the measured
+      // maximum over the footprint. Raising the walls to that maximum was
+      // tried: on a pitched roof it puts the wall up at the ridge, so every
+      // building becomes a box with a fence round the top and the measured,
+      // photographed roof is hidden inside it. The roof is the half the raster
+      // is better at; the wall stops where the model says the wall stops.
+      const hi = b.top - datum;
+
+      for (let i = 0; i < ring.length; i++) {
+        const a = ring[i];
+        const c = ring[(i + 1) % ring.length];
+        // The outward normal of a wall, which is the segment turned a quarter
+        // turn. Whether it points out or in depends on the ring's winding, and
+        // the source does not promise one -- so the material is double-sided
+        // and this only has to be consistent along a building.
+        const dx = c.x - a.x;
+        const dz = c.z - a.z;
+        const len = Math.hypot(dx, dz) || 1;
+        const nx = dz / len;
+        const nz = -dx / len;
+        push(a.x, lo, a.z, nx, 0, nz);
+        push(c.x, lo, c.z, nx, 0, nz);
+        push(c.x, hi, c.z, nx, 0, nz);
+        push(a.x, lo, a.z, nx, 0, nz);
+        push(c.x, hi, c.z, nx, 0, nz);
+        push(a.x, hi, a.z, nx, 0, nz);
+      }
+
+      // No cap. The roof is already in the picture, measured at half a metre
+      // with the orthophoto on it, and a flat lid over the top of that would
+      // replace the one part of a building this dataset is WORSE at.
+    }
+    if (!verts.length) return;
+
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+    geom.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(norms), 3));
+    // The colour of a thing that is known to be there and not known to look
+    // like anything: the viewer's "not seen" brown, lightened, because here it
+    // is not standing in for a missing measurement.
+    buildingGroup = new THREE.Mesh(geom, solidMaterial(0xb9a58c));
+    scene.add(buildingGroup);
+  }
+
   function buildWires() {
     if (!scene) return;
     if (wireGroup) { scene.remove(wireGroup); wireGroup = null; }
@@ -677,6 +816,16 @@ export function createScene3D(canvas) {
         }
       } catch { /* colour by classification instead */ }
     }
+
+    // The buildings, as solids with walls -- the one thing the surface cannot
+    // hold. Not fatal if it fails: the surface stands on its own and the wall
+    // marking goes back to being the only thing said about a facade, which is
+    // what yesterday's behaviour was.
+    onStatus('Asking for the buildings…');
+    try {
+      const got = await ask(`/v1/buildings/${tile.tn}/${tile.te}`, { signal });
+      if (got.ok) next.buildings = (await got.json()).buildings ?? [];
+    } catch { /* the surface alone, and the smear marked as unknown */ }
 
     loaded = next;
     return loaded;

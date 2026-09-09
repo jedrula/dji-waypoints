@@ -1761,8 +1761,24 @@ console.log('\ncontroller bridge');
   globalThis.localStorage = { getItem: () => 'http://heights.test', setItem() {} };
   const { measure, surveyCeiling, serviceUrl, _internals } = await import('../js/heights.js');
   const { toPuwg92 } = await import('../js/puwg92.js');
-  ok('there is one service address and no way to choose it',
-     serviceUrl() === 'https://drone.topomatch.com');
+  // The address is decided by the page's own hostname and by nothing else --
+  // no stored value, no UI, no argument. Both branches are asserted here
+  // because the failure that matters is silent: a localhost address shipped to
+  // GitHub Pages cannot reach anything, and main is what Pages serves.
+  ok('with no location at all -- a test -- it is the hosted service',
+     serviceUrl() === 'https://drone.topomatch.com', serviceUrl());
+  const realLocation = globalThis.location;
+  try {
+    globalThis.location = { hostname: 'jedrula.github.io' };
+    ok('a hosted page talks to the hosted service',
+       serviceUrl() === 'https://drone.topomatch.com', serviceUrl());
+    globalThis.location = { hostname: 'localhost' };
+    ok('a page from this machine talks to the service on this machine',
+       serviceUrl() === 'http://localhost:8130', serviceUrl());
+  } finally {
+    if (realLocation === undefined) delete globalThis.location;
+    else globalThis.location = realLocation;
+  }
 
   const SIZE = 500, TILE = 500;
   // A tile where one 40 m patch is 30 m tall, one is no-data, rest is flat.

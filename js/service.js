@@ -30,11 +30,23 @@ import { KEY_OK } from '../sync/protocol.js';
 // the service: the gateway sets Access-Control-Allow-Origin: * and Starlette
 // overwrites rather than appends, so ORIGIN_OK would have become decorative.
 //
-// Developing against a local service means editing this line, which is the
-// honest cost of having one fact in one place -- and mostly you should not,
-// because the hosted one already holds the LiDAR and re-downloading it per
-// laptop is hundreds of megabytes asked of a public agency for nothing.
-const SERVICE_URL = 'https://drone.topomatch.com';
+// A page served from this machine talks to the service on this machine; every
+// other page talks to the hosted one. Two constants, one rule, and the answer
+// is readable off the source without running anything.
+//
+// This is a hostname rule restored, not the old mess brought back. What made
+// the old arrangement unanswerable was `localStorage['dji.serviceUrl']`: a
+// value invisible in the UI that could point any browser anywhere, and it is
+// still gone. What came out with it was this branch, and deleting it cost more
+// than it saved -- for a fortnight "develop against a local service" meant
+// editing a constant that the test suite also asserts, so the working tree
+// disagreed with the tests, and committing the edit would have pointed the
+// GitHub Pages build at a localhost that cannot exist for anyone.
+//
+// Which is not hypothetical: main is what Pages serves.
+const HOSTED = 'https://drone.topomatch.com';
+const LOCAL = 'http://localhost:8130';
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '']);
 
 // One key, one library. Generated on this device the first time anything needs
 // it and kept, so a fresh install is isolated from every other install by
@@ -99,4 +111,9 @@ export function setServiceKey(key) {
 // who reads the source.
 export const serviceHeaders = (extra = {}) => ({ 'X-Sync-Key': serviceKey(), ...extra });
 
-export const serviceUrl = () => SERVICE_URL;
+// No location at all -- node, a worker, a test -- is the hosted one, because
+// the only thing with no origin here is a test, and a test that silently
+// pointed at a developer's laptop would pass on that laptop alone.
+export const serviceUrl = () => (
+  LOCAL_HOSTS.has(globalThis.location?.hostname ?? '') && globalThis.location ? LOCAL : HOSTED
+);

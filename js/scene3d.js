@@ -1,0 +1,423 @@
+// The survey itself, with the mission inside it.
+//
+// js/view3d.js draws the flight over a flat plane with map imagery painted on
+// it. That is a photograph of the ground, not the ground: anything with height
+// leans away from nadir, so a roof is painted metres from the walls holding it
+// up, and the only real geometry in the picture is the boxes you drew. This is
+// the other thing -- the national LiDAR as a surface, at half-metre cells, with
+// the flight in the same space. What the aircraft would hit is what you can see
+// it nearly hitting.
+//
+// Two renderers in one app is a cost, taken deliberately. view3d.js is canvas
+// 2D with a painter's algorithm and no depth buffer, and a million-cell surface
+// is not something it can be taught: even decimated hard you would lose the
+// texture and gain a slideshow. This is WebGL through three.js, loaded from a
+// CDN the way Leaflet already is and only when the view is first opened, so an
+// ordinary session never fetches it.
+//
+// What this does NOT do yet: draw the obstacles you tapped, and let you move a
+// waypoint. The first is nearly redundant here -- the buildings and trees ARE
+// in the surface, which is the whole point -- and the second is the next step
+// and wants picking, which is most of why three.js is here rather than the
+// hand-written GL in server/public/scene.html.
+
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { toPuwg92, toWgs84 } from './puwg92.js';
+import { serviceUrl, serviceHeaders } from './service.js';
+
+// How much ground round the flight, and how fine. The tile is 500 m of
+// half-metre cells -- a million of them -- and a site is a couple of hundred
+// metres, so cropping to the flight and its margin is both smaller and sharper
+// than decimating the lot. The vertex cap is what keeps a big site from asking
+// for ten million triangles: past it the step coarsens instead.
+const MARGIN_M = 60;
+const MAX_VERTS = 420_000;
+
+// A cell's classification, for when there is no orthophoto to drape. Deliberately
+// flat colours: this is "what kind of thing is that", not a rendering.
+const KIND_COLOUR = [
+  [0.42, 0.44, 0.47],   // none, guessed by filling a hole
+  [0.36, 0.42, 0.32],   // ground
+  [0.62, 0.58, 0.54],   // building
+  [0.28, 0.44, 0.30],   // vegetation
+  [0.24, 0.36, 0.48],   // water
+];
+
+const POLL_MS = 4000;
+const GIVE_UP_MS = 240_000;   // a cold scene is minutes; see js/heights.js
+
+async function ask(path, { signal } = {}) {
+  const res = await fetch(`${serviceUrl()}${path}`, { headers: serviceHeaders(), signal });
+  return res;
+}
+
+// The service answers 202 while it builds, which for new ground means pulling
+// hundreds of megabytes of LiDAR from GUGiK. Never a held-open request -- the
+// tunnel in front of it cuts one at about 100 s -- so poll, and say so.
+async function poll(path, { onWait, signal } = {}) {
+  const until = Date.now() + GIVE_UP_MS;
+  let told = false;
+  for (;;) {
+    const res = await ask(path, { signal });
+    if (res.status === 200) return res;
+    if (res.status !== 202) {
+      const why = await res.json().catch(() => ({}));
+      throw new Error(why.error ?? `the service answered ${res.status}`);
+    }
+    if (Date.now() > until) throw new Error('the survey is still building — try again shortly');
+    if (!told) { told = true; onWait?.(); }
+    await new Promise((r) => setTimeout(r, POLL_MS));
+  }
+}
+
+// PUWG92 metres to the mission's own local metres, as an affine map.
+//
+// Doing it properly per vertex means an inverse projection each time, and there
+// are hundreds of thousands of vertices. Both frames are metric and the tile is
+// 500 m across, over which the difference between the true mapping and its
+// linearisation is far under a centimetre -- so the map is derived once from
+// three points and then it is two multiplies and an add per vertex.
+function puwgToLocal(frame, e0, n0) {
+  const at = (e, n) => {
+    const g = toWgs84(e, n);
+    return frame.toLocal(g.lat, g.lon);
+  };
+  const o = at(e0, n0);
+  const de = at(e0 + 100, n0);
+  const dn = at(e0, n0 + 100);
+  const ex = (de.x - o.x) / 100;
+  const ey = (de.y - o.y) / 100;
+  const nx = (dn.x - o.x) / 100;
+  const ny = (dn.y - o.y) / 100;
+  return (e, n) => ({
+    x: o.x + (e - e0) * ex + (n - n0) * nx,
+    y: o.y + (e - e0) * ey + (n - n0) * ny,
+  });
+}
+
+export function createScene3D(canvas) {
+  let renderer = null;
+  let scene = null;
+  let camera = null;
+  let controls = null;
+  let missionGroup = null;
+  let surfaceMesh = null;
+  let loaded = null;       // { tn, te, meta, height, kind, base }
+  let mission = null;
+  let hazard = null;
+  let onStatus = () => {};
+  let running = false;
+  let inFlight = null;
+
+  function boot() {
+    if (renderer) return;
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setClearColor(0x0b0e11);
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(55, 1, 1, 8000);
+    controls = new OrbitControls(camera, canvas);
+    controls.maxPolarAngle = Math.PI / 2 - 0.02;   // never under the ground
+    // Drawn on demand, from the controls' own change event -- no animation
+    // loop. Two reasons, and the second one bit: a loop spins the GPU while
+    // nobody is moving anything, and requestAnimationFrame does not fire in a
+    // window that is not being painted, which is exactly how this gets driven
+    // under test.
+    //
+    // Damping is off BECAUSE of that. It needs a frame after the last input to
+    // settle, so it only works inside a loop -- and wired to a change event it
+    // is an infinite recursion, because update() emits change. Which is the
+    // bug this comment is standing on: "Maximum call stack size exceeded", the
+    // first time the view was ever opened.
+    controls.enableDamping = false;
+    controls.addEventListener('change', () => render());
+    // Sun high and to the south, plus enough ambient that a north wall is not
+    // a silhouette. The surface is textured, so this is shaping and not colour.
+    const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+    sun.position.set(-0.4, 1, 0.6);
+    scene.add(sun, new THREE.AmbientLight(0xffffff, 0.85));
+  }
+
+  function size() {
+    const w = canvas.clientWidth || 1;
+    const h = canvas.clientHeight || 1;
+    const dpr = Math.min(globalThis.devicePixelRatio || 1, 2);
+    renderer.setPixelRatio(dpr);
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+
+  function render() {
+    if (!renderer || !running) return;
+    size();
+    renderer.render(scene, camera);
+  }
+
+  // Y is metres above the mission's home point, which is what every altitude in
+  // this app already means. So the surface is shifted down by its own height at
+  // the home point and nothing else has to be converted at all.
+  function buildSurface() {
+    if (!loaded || !mission) return;
+    const { meta, height, kind } = loaded;
+    const N = meta.grid;
+    const cell = meta.cellMetres;
+    const { east: e0, north: n0 } = meta.origin;
+    const frame = mission.frame;
+    const toLocal = puwgToLocal(frame, e0, n0);
+
+    // Where the flight is, in this tile's own grid.
+    const path = mission.exported ?? mission.waypoints ?? [];
+    let eMin = Infinity; let eMax = -Infinity; let nMin = Infinity; let nMax = -Infinity;
+    for (const w of path) {
+      const p = toPuwg92(w.lat, w.lon);
+      if (p.east < eMin) eMin = p.east;
+      if (p.east > eMax) eMax = p.east;
+      if (p.north < nMin) nMin = p.north;
+      if (p.north > nMax) nMax = p.north;
+    }
+    if (!Number.isFinite(eMin)) return;
+
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const c0 = clamp(Math.floor((eMin - MARGIN_M - e0) / cell), 0, N - 2);
+    const c1 = clamp(Math.ceil((eMax + MARGIN_M - e0) / cell), c0 + 1, N - 1);
+    // Row 0 is the NORTH edge of the tile, so north and row run opposite ways.
+    const r0 = clamp(Math.floor((n0 + meta.tileMetres - (nMax + MARGIN_M)) / cell), 0, N - 2);
+    const r1 = clamp(Math.ceil((n0 + meta.tileMetres - (nMin - MARGIN_M)) / cell), r0 + 1, N - 1);
+
+    let step = 1;
+    while (((c1 - c0) / step + 1) * ((r1 - r0) / step + 1) > MAX_VERTS) step *= 2;
+    const cols = Math.floor((c1 - c0) / step) + 1;
+    const rows = Math.floor((r1 - r0) / step) + 1;
+
+    const heightAt = (row, col) => meta.base + height[row * N + col] / 100;
+    const home = path[0] ? toPuwg92(path[0].lat, path[0].lon) : null;
+    const homeRow = home
+      ? clamp(Math.round((n0 + meta.tileMetres - home.north) / cell), 0, N - 1) : r0;
+    const homeCol = home ? clamp(Math.round((home.east - e0) / cell), 0, N - 1) : c0;
+    const datum = heightAt(homeRow, homeCol);
+
+    const verts = new Float32Array(cols * rows * 3);
+    const uvs = new Float32Array(cols * rows * 2);
+    const colours = new Float32Array(cols * rows * 3);
+    let i = 0;
+    for (let r = 0; r < rows; r++) {
+      const row = r0 + r * step;
+      for (let c = 0; c < cols; c++) {
+        const col = c0 + c * step;
+        const east = e0 + (col + 0.5) * cell;
+        const north = n0 + meta.tileMetres - (row + 0.5) * cell;
+        const l = toLocal(east, north);
+        // three.js is Y-up, and the local frame is x east / y north.
+        verts[i * 3] = l.x;
+        verts[i * 3 + 1] = heightAt(row, col) - datum;
+        verts[i * 3 + 2] = -l.y;
+        uvs[i * 2] = (col + 0.5) / N;
+        uvs[i * 2 + 1] = 1 - (row + 0.5) / N;
+        const k = KIND_COLOUR[kind[row * N + col]] ?? KIND_COLOUR[0];
+        colours[i * 3] = k[0]; colours[i * 3 + 1] = k[1]; colours[i * 3 + 2] = k[2];
+        i++;
+      }
+    }
+
+    const index = [];
+    for (let r = 0; r < rows - 1; r++) {
+      for (let c = 0; c < cols - 1; c++) {
+        const a = r * cols + c;
+        index.push(a, a + cols, a + 1, a + 1, a + cols, a + cols + 1);
+      }
+    }
+
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+    geom.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geom.setAttribute('color', new THREE.BufferAttribute(colours, 3));
+    geom.setIndex(index);
+    geom.computeVertexNormals();
+
+    if (surfaceMesh) { scene.remove(surfaceMesh); surfaceMesh.geometry.dispose(); }
+    const material = new THREE.MeshStandardMaterial({
+      map: loaded.ortho ?? null,
+      vertexColors: !loaded.ortho,
+      roughness: 0.95,
+      metalness: 0,
+    });
+    surfaceMesh = new THREE.Mesh(geom, material);
+    scene.add(surfaceMesh);
+
+    // Did the crop hit the edge of the tile rather than the margin it asked
+    // for? A tile is 500 m and a site can sit anywhere in it, so this is the
+    // common case rather than the exotic one -- and a surface that stops in a
+    // straight line under half your flight has to say why. Stitching the
+    // neighbouring tiles is the fix; saying so is the honest stopgap.
+    const wantC0 = Math.floor((eMin - MARGIN_M - e0) / cell);
+    const wantC1 = Math.ceil((eMax + MARGIN_M - e0) / cell);
+    const wantR0 = Math.floor((n0 + meta.tileMetres - (nMax + MARGIN_M)) / cell);
+    const wantR1 = Math.ceil((n0 + meta.tileMetres - (nMin - MARGIN_M)) / cell);
+    loaded.clipped = wantC0 < 0 || wantR0 < 0 || wantC1 > N - 1 || wantR1 > N - 1;
+
+    loaded.datum = datum;
+    loaded.cells = cols * rows;
+    loaded.step = step;
+    buildMission();
+    frameCamera();
+  }
+
+  function buildMission() {
+    if (!scene || !mission) return;
+    if (missionGroup) scene.remove(missionGroup);
+    missionGroup = new THREE.Group();
+    const frame = mission.frame;
+    const path = mission.exported ?? mission.waypoints ?? [];
+    const at = (w) => {
+      const l = frame.toLocal(w.lat, w.lon);
+      return new THREE.Vector3(l.x, w.alt, -l.y);
+    };
+
+    const line = new THREE.BufferGeometry().setFromPoints(path.map(at));
+    missionGroup.add(new THREE.Line(line, new THREE.LineBasicMaterial({ color: 0x4da3ff })));
+
+    // The waypoints themselves, so the passes read as stations rather than as
+    // one continuous scribble.
+    const dots = new THREE.BufferGeometry().setFromPoints(path.map(at));
+    missionGroup.add(new THREE.Points(dots, new THREE.PointsMaterial({
+      color: 0x9ecbff, size: 2.2, sizeAttenuation: true,
+    })));
+
+    // The legs the collision check flagged, drawn over the top in its colours.
+    // A strike and a near miss are not the same news, so they are not the same
+    // colour here either.
+    for (const leg of hazard?.legs ?? []) {
+      const g = new THREE.BufferGeometry().setFromPoints([at(leg.a), at(leg.b)]);
+      missionGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({
+        color: leg.grade === 'strike' ? 0xff5470 : 0xffb84d,
+      })));
+    }
+    scene.add(missionGroup);
+  }
+
+  // The flight is the subject and the ground is what it is in, so the frame is
+  // the flight's own extent with room around it -- not the surface's, which can
+  // be bigger than the flight and off to one side of it when the crop runs into
+  // the edge of a tile.
+  //
+  // Aimed at ground level under the middle of the flight rather than at the
+  // flight's own middle, and set low: looking ACROSS a place is what shows a
+  // tower standing beside your orbit. Looking down on it is a map.
+  function frameCamera() {
+    const path = mission?.exported ?? mission?.waypoints ?? [];
+    if (!path.length || !surfaceMesh) return;
+    const frame = mission.frame;
+    const box = new THREE.Box3();
+    for (const w of path) {
+      const l = frame.toLocal(w.lat, w.lon);
+      box.expandByPoint(new THREE.Vector3(l.x, w.alt, -l.y));
+    }
+    const centre = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const span = Math.max(size.x, size.z, 60) * 1.35;
+    const dist = (span / 2) / Math.tan((camera.fov * Math.PI) / 360);
+    controls.target.set(centre.x, 0, centre.z);
+    camera.position.set(centre.x, dist * 0.45, centre.z + dist * 0.9);
+    // The one place update() belongs: the camera was moved from code, so the
+    // controls have to be told before the next draw.
+    controls.update();
+  }
+
+  async function loadFor(lat, lon, { signal } = {}) {
+    boot();
+    const here = await ask(`/v1/locate?lat=${lat}&lon=${lon}`, { signal });
+    if (!here.ok) throw new Error('outside the survey');
+    const { tile } = await here.json();
+    if (loaded && loaded.tn === tile.tn && loaded.te === tile.te) return loaded;
+
+    onStatus('Asking for the survey…');
+    const metaRes = await poll(`/v1/scene/${tile.tn}/${tile.te}.json`, {
+      signal,
+      onWait: () => onStatus('First look at this ground — building it from the LiDAR. A few minutes.'),
+    });
+    const meta = await metaRes.json();
+    if (meta.empty) throw new Error(meta.reason ?? 'no LiDAR here');
+
+    onStatus('Downloading the surface…');
+    const raw = await poll(`/v1/scene/${tile.tn}/${tile.te}`, { signal }).then((r) => r.arrayBuffer());
+    const N = meta.grid;
+    const next = {
+      tn: tile.tn,
+      te: tile.te,
+      meta,
+      base: meta.base,
+      height: new Uint16Array(raw, 0, N * N),
+      kind: new Uint8Array(raw, N * N * 2, N * N),
+      ortho: null,
+    };
+
+    // The photograph, when the country has one here. It is the same orthophoto
+    // the geometry was measured with and in the same projection, so it is a
+    // straight drape -- no warping, unlike the third-party basemap the flat
+    // view uses. Without it the surface is coloured by classification, which is
+    // less pretty and no less true.
+    if (!meta.ortho?.empty) {
+      onStatus('Downloading the orthophoto…');
+      try {
+        const jpg = await ask(`/v1/scene/${tile.tn}/${tile.te}.jpg`, { signal });
+        if (jpg.ok) {
+          const bitmap = await createImageBitmap(await jpg.blob());
+          const tex = new THREE.Texture(bitmap);
+          tex.colorSpace = THREE.SRGBColorSpace;
+          tex.needsUpdate = true;
+          next.ortho = tex;
+        }
+      } catch { /* colour by classification instead */ }
+    }
+
+    loaded = next;
+    return loaded;
+  }
+
+  return {
+    // The mission is pushed on every replan, like view3d's. Rebuilding the
+    // flight is cheap; the surface is not, so it is only rebuilt when the frame
+    // it is expressed in has actually moved.
+    setMission(m, h) {
+      const moved = !mission || !m
+        || mission.frame.lat0 !== m.frame.lat0 || mission.frame.lon0 !== m.frame.lon0;
+      mission = m;
+      hazard = h;
+      if (!renderer || !loaded || !mission) return;
+      if (moved) buildSurface(); else { buildMission(); render(); }
+    },
+
+    onStatus(fn) { onStatus = fn ?? (() => {}); },
+
+    // Opening the view is what fetches three.js, the surface and the photo. The
+    // first time over new ground that is minutes, and the status says so.
+    async open() {
+      boot();
+      running = true;
+      if (!mission) { onStatus('Tap out a site first — this draws the ground under a flight.'); return; }
+      const c = mission.frame;
+      inFlight?.abort?.();
+      const ctl = new AbortController();
+      inFlight = ctl;
+      try {
+        await loadFor(c.lat0, c.lon0, { signal: ctl.signal });
+        buildSurface();
+        onStatus(`${loaded.meta.sources?.[0]?.year ?? 'LiDAR'} survey, `
+          + `${loaded.meta.cellMetres * loaded.step} m cells, `
+          + `${(loaded.cells / 1000).toFixed(0)}k points, `
+          + 'heights above your takeoff point.'
+          + (loaded.clipped
+            ? ' The site runs off the edge of this survey tile — what you see stops there.'
+            : ''));
+        render();
+      } catch (e) {
+        if (e.name !== 'AbortError') onStatus(`No surface — ${e.message}`);
+      }
+    },
+
+    close() { running = false; inFlight?.abort?.(); inFlight = null; },
+    resize() { render(); },
+    ready: () => Boolean(loaded),
+  };
+}

@@ -107,6 +107,47 @@ let activeView = 'map';
 // bare grid is the less useful picture of the two.
 let groundOn = true;
 
+// The other 3D view: the LiDAR surface with the flight in it. Off until asked
+// for, and the module is not even fetched until then -- it brings three.js with
+// it, which is most of a megabyte nobody planning over imagery needs. See
+// js/scene3d.js for why this is a second renderer rather than a mode of the
+// first.
+let lidarOn = false;
+let lidar = null;
+
+async function lidarView() {
+  if (!lidar) {
+    const { createScene3D } = await import('./scene3d.js');
+    lidar = createScene3D($('lidar'));
+    lidar.onStatus((text) => toast(text, { sticky: /minutes|Asking|Downloading/.test(text) }));
+  }
+  return lidar;
+}
+
+async function setLidar(on) {
+  lidarOn = on;
+  $('lidarBtn').classList.toggle('on', on);
+  // Only one surface at a time, and the flat one keeps its own toggle -- so the
+  // imagery button is about the flat view and hides while the survey is up.
+  $('ground').hidden = on || activeView === 'map';
+  applyViewCanvases();
+  writeUrl();
+  if (!on) { lidar?.close(); return; }
+  const view = await lidarView();
+  view.setMission(state.mission, state.hazard);
+  await view.open();
+}
+
+// Which of the two canvases is on screen. `hidden` on the wrong one is not
+// enough on its own: a hidden canvas has no client size, so the renderer that
+// owns it has to be told once it is visible again.
+function applyViewCanvases() {
+  const show3d = activeView !== 'map';
+  $('scene').hidden = !show3d || lidarOn;
+  $('lidar').hidden = !show3d || !lidarOn;
+  if (show3d && lidarOn) lidar?.resize();
+}
+
 function setView(name) {
   activeView = name;
   const showMap = name !== '3d';
@@ -115,19 +156,22 @@ function setView(name) {
   $('stage').classList.toggle('split', name === 'split');
   $('map').hidden = !showMap;
   $('scene').hidden = !show3d;
+  $('lidar').hidden = true;
   $('splitter').hidden = name !== 'split';
   $('basetabs').hidden = !showMap;
   $('findme').hidden = !showMap;
   // Each belongs to the view it acts on: the route toggle hides clutter on the
   // map, the imagery button paints the ground under the 3D.
   $('routeToggle').hidden = !showMap;
-  $('ground').hidden = !show3d;
+  $('ground').hidden = !show3d || lidarOn;
+  $('lidarBtn').hidden = !show3d;
   $('findplace').hidden = !showMap;
   if (!showMap) openPlace(false);
   showRecentre();
   if (name === 'split') setSplit(splitPct, { store: false });
   if (showMap) map.invalidateSize();
-  if (show3d) view3d.draw();
+  applyViewCanvases();
+  if (show3d && !lidarOn) view3d.draw();
   writeUrl();
 }
 
@@ -200,6 +244,7 @@ function writeUrl() {
   q.set('c', `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`);
   q.set('z', String(map.getZoom()));
   if (!groundOn) q.set('g', '0');
+  if (lidarOn) q.set('l', '1');
   for (const k of MOCK_KEYS) if (opened.has(k)) q.set(k, opened.get(k));
   const code = planCode();
   window.history.replaceState(null, '', `?${q}${code ? `#plan=${code}` : ''}`);
@@ -210,6 +255,7 @@ function readUrl() {
   basemaps.set(q.get('b') ?? basemaps.name());
   if (['map', 'split', '3d'].includes(q.get('v'))) setView(q.get('v'));
   if (q.get('g') === '0') { groundOn = false; pushGround(); }
+  if (q.get('l') === '1') setLidar(true);
   const [lat, lon] = (q.get('c') ?? '').split(',').map(Number);
   const zoom = Number(q.get('z'));
   if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
@@ -1110,6 +1156,9 @@ function computePlan() {
   if (state.onDevice) showDeviceRoute(null);
   view3d.setMission(state.mission, state.coverage);
   view3d.setObstacles(graded(solids), state.hazard.legs);
+  // Whichever surface is up gets the same flight. The survey view rebuilds the
+  // path on every replan and the ground only when the frame moves.
+  lidar?.setMission(state.mission, state.hazard);
   writeUrl();
   settleSoon();
 }
@@ -1558,6 +1607,12 @@ async function findMe({ quiet = false } = {}) {
   }
 }
 $('findme').addEventListener('click', () => findMe());
+
+// The survey, or the photograph. Two pictures of the same ground: one is the
+// map's own imagery on a flat plane, the other is the LiDAR as a surface with
+// the flight in it. They answer different questions, so this is a swap and not
+// a setting -- see js/scene3d.js.
+$('lidarBtn').addEventListener('click', () => { setLidar(!lidarOn); });
 
 // The button over the map is obstacle mode's, and it asks OpenStreetMap about
 // the view rather than the receiver. Capture mode had one beside it that placed

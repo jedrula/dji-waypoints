@@ -1083,7 +1083,14 @@ export function proposePlan(site, base, cam, budget = {}) {
   // How low the search may go. Over flat ground 20 m is a sensible floor. With
   // a subject that has height, the useful altitudes are just above it -- an
   // under-canopy playground wants 5-8 m, and a 20 m floor could never find it.
-  const floorAlt = hasHeight ? Math.max(3, Math.round(subjectHeight * 1.5)) : 20;
+  //
+  // Never below the clearance, though. The clearance is how close you are
+  // willing to come to anything, and the ground is a thing: auto-fit was
+  // proposing 5 m to a pilot who had asked for 16 m of it, and the readout then
+  // told them 5 m was too low. Two of this app's own answers disagreeing in one
+  // box is worse than either of them being wrong.
+  const floorAlt = Math.max(clearance,
+    hasHeight ? Math.max(3, Math.round(subjectHeight * 1.5)) : 20);
   const step = hasHeight ? 1 : 5;
 
   // Lowest altitude (best GSD) that fits, for one shutter mode and ring count.

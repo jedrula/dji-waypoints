@@ -1305,19 +1305,49 @@ function renderReadout() {
   renderAlert(over);
 }
 
+// What is wrong with this plan, worst first, and the one thing to do about it.
+//
+// This was seven producers appending fragments into one <div>: no separators,
+// so a button ran into the next sentence; no order, so "the flight hits 2
+// obstacles" could sit below a note about waypoint counts; and up to THREE
+// buttons all saying "Raise to N m" with different Ns. What it printed for a
+// low flight over flat ground was
+//
+//   ...less than your 16 m clearance. Raise to 16 mAuto-fitted: 5 m, 3 rings
+//
+// which is two answers of ours contradicting each other with no space between
+// them. So: findings are collected with a rank, sorted, and given a line each;
+// every "raise to" is collected too and becomes ONE button at the highest of
+// them, because clearing the tallest requirement clears the rest.
+const RANK = {
+  strike: 0,        // it hits something
+  ground: 1,        // it is under the hill it crosses
+  unseen: 2,        // the survey sees something above it, mapped or not
+  clearance: 3,     // above things, closer than you asked
+  near: 4,
+  assumed: 5,       // it is measured against guesses
+  incomplete: 6,    // we do not know yet
+  export: 7,        // it will not fit DJI Fly in one piece
+  fit: 8,           // what auto-fit chose, which is not a problem
+};
+
 function renderAlert(over) {
   const el = $('alert');
+  const found = [];
+  const raises = [];
+  const say = (rank, text) => found.push({ rank: RANK[rank], rank_: rank, text });
+  const raiseTo = (m) => { if (Number.isFinite(m) && m > +$('altitude').value) raises.push(Math.ceil(m)); };
+
   const h = state.hazard;
-  const bits = [];
-  let kind = 'warn';
-  if (h?.strikes) { bits.push(`The flight hits ${h.strikes} obstacle${h.strikes === 1 ? '' : 's'}.`); kind = ''; }
-  else if (h?.near) bits.push(`${h.near} leg${h.near === 1 ? '' : 's'} pass closer than the clearance.`);
-  if (over) bits.push(`${state.mission.stats.waypoints} waypoints exports as ${Math.ceil(state.mission.stats.waypoints / DJI_FLY_MAX_WAYPOINTS)} parts.`);
-  el.hidden = !bits.length;
-  el.className = `alert ${kind}`;
-  el.textContent = bits.join(' ');
-  // The ground first, because it is the one that puts the aircraft into a hill
-  // rather than into something standing on it.
+  if (h?.strikes) say('strike', `The flight hits ${h.strikes} obstacle${h.strikes === 1 ? '' : 's'}.`);
+  else if (h?.near) {
+    say('near', h.near === 1 ? 'One leg passes closer than your clearance.'
+      : `${h.near} legs pass closer than your clearance.`);
+  }
+  if (state.clearAlt) raiseTo(state.clearAlt);
+
+  // The ground first among the real hazards, because it is the one that puts
+  // the aircraft into a hill rather than into something standing on it.
   const t = state.terrain && state.mission
     ? terrainVerdict(state.terrain, {
       takeoffAt: state.terrain.samples[0]?.h,
@@ -1325,104 +1355,93 @@ function renderAlert(over) {
       clearance: clearance(),
     })
     : null;
+  const alt = state.mission?.params.altitude;
   if (t && t.shortfall > 0) {
-    el.hidden = false;
-    el.className = 'alert';
-    // Two different problems produce a shortfall, and telling someone the
-    // wrong one is worse than telling them nothing. Below the highest ground
-    // means you will fly into a hill. Above it but inside the clearance means
-    // you will pass closer than you asked to. This printed
-    // `Math.abs(aboveHighestGround) + " BELOW"` for both, so a flight sitting
-    // 5 m ABOVE flat ground was told it was 5 m BELOW the ground -- alarming,
-    // and false. The Math.abs was the tell: it was written for the hillside.
-    //
-    // The relief sentence is dropped when the ground is flat, because "the
-    // ground rises 0 m across this site" opened a warning that had nothing to
-    // do with the ground.
     const above = t.aboveHighestGround;
-    const lead = t.relief >= 1 ? `The ground rises ${t.relief.toFixed(0)} m across this site. ` : '';
-    el.textContent = above < 0
-      ? `${lead}At ${state.mission.params.altitude} m above your takeoff point the flight is `
-        + `${(-above).toFixed(0)} m BELOW the highest ground. `
-      : `${lead}At ${state.mission.params.altitude} m above your takeoff point the flight clears `
-        + `the highest ground by ${above.toFixed(0)} m, which is less than your `
-        + `${clearance()} m clearance. `;
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = `Raise to ${t.needed} m`;
-    b.addEventListener('click', () => {
-      tuned = true;
-      $('altitude').value = Math.min(120, t.needed);
-      computePlan();
-      history.commit();
-    });
-    el.append(b);
+    const relief = t.relief >= 1 ? `The ground rises ${t.relief.toFixed(0)} m across this site, and ` : '';
+    // Two different problems produce a shortfall and telling someone the wrong
+    // one is worse than saying nothing. Below the highest ground means flying
+    // into a hill; above it but inside the clearance means passing closer than
+    // you asked to.
+    if (above < 0) {
+      say('ground', `${relief}at ${alt} m the flight is ${(-above).toFixed(0)} m BELOW the highest ground.`);
+    } else {
+      say('clearance', `${relief}at ${alt} m the flight clears the highest ground by `
+        + `${above.toFixed(0)} m — less than the ${clearance()} m you asked for.`);
+    }
+    raiseTo(t.needed);
   } else if (t && t.relief > 5) {
-    if (el.hidden) { el.hidden = false; el.className = 'alert warn'; el.textContent = ''; }
-    const g = document.createElement('span');
-    g.textContent = ` Ground rises ${t.relief.toFixed(0)} m across the site; `
-      + `${t.aboveHighestGround.toFixed(0)} m clear of the highest of it.`;
-    el.append(g);
+    say('incomplete', `The ground rises ${t.relief.toFixed(0)} m across the site; `
+      + `${t.aboveHighestGround.toFixed(0)} m clear of the highest of it.`);
+  }
+
+  // What the survey saw, which is everything standing and not only what was
+  // mapped. Never lowers an altitude and never claims completeness: an unbuilt
+  // tile and a cell the laser missed are both unknowns, and an unknown ceiling
+  // is not a zero one.
+  const sv = state.survey;
+  if (sv && sv.height !== null) {
+    const need = sv.height + clearance();
+    const caveat = sv.missing
+      ? ` ${sv.missing} of ${sv.tiles} tiles are not built, so this is not the whole picture.`
+      : '';
+    if (need > alt) {
+      say('unseen', `The survey sees something ${sv.height} m tall under this flight — `
+        + `${(need - alt).toFixed(0)} m above your altitude, mapped or not.${caveat}`);
+      raiseTo(need);
+    } else {
+      say('incomplete', `The survey's tallest thing under this flight is ${sv.height} m; `
+        + `you clear it by ${(alt - sv.height).toFixed(0)} m.${caveat}`);
+    }
+  } else if (sv && sv.missing) {
+    say('incomplete', `The survey has not answered for ${sv.missing} of ${sv.tiles} tiles under `
+      + 'this flight, so nothing here is measured yet.');
   }
 
   const guessed = nearbyObstacles().filter(isEstimated).length;
   if (guessed) {
-    if (el.hidden) { el.hidden = false; el.className = 'alert warn'; el.textContent = ''; }
-    const g = document.createElement('span');
-    g.textContent = ` ${guessed} obstacle${guessed === 1 ? ' has an' : 's have'} assumed `
-      + `height${guessed === 1 ? '' : 's'} — check anything the flight passes close to.`;
-    el.append(g);
-  }
-  if (!tuned && state.mission) {
-    const b = document.createElement('span');
-    b.className = 'fitnote';
-    b.textContent = `Auto-fitted: ${state.mission.params.altitude} m, `
-      + `${state.mission.params.orbitRings} ring${state.mission.params.orbitRings === 1 ? '' : 's'} per thing.`;
-    if (el.hidden) { el.hidden = false; el.className = 'alert note'; el.textContent = ''; }
-    el.append(b);
-  }
-  // What the survey saw, which is everything standing and not only what was
-  // mapped. Never lowers an altitude and never claims completeness: a tile that
-  // has not been built and a cell the laser missed are both unknowns, and an
-  // unknown ceiling is not a zero one.
-  const sv = state.survey;
-  if (sv && sv.height !== null) {
-    const need = sv.height + clearance();
-    const alt = +$('altitude').value;
-    const caveat = sv.missing
-      ? ` ${sv.missing} of ${sv.tiles} tiles have not been built, so this is not the whole picture.`
-      : '';
-    if (el.hidden) { el.hidden = false; el.className = 'alert warn'; el.textContent = ''; }
-    const g = document.createElement('span');
-    g.textContent = need > alt
-      ? ` The survey sees something ${sv.height} m tall under this flight — ${(need - alt).toFixed(0)} m above your altitude, mapped or not.${caveat}`
-      : ` The survey's tallest thing under this flight is ${sv.height} m; you clear it by ${(alt - sv.height).toFixed(0)} m.${caveat}`;
-    el.append(g);
-    if (need > alt) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = `Raise to ${Math.ceil(need)} m`;
-      b.addEventListener('click', () => {
-        tuned = true;
-        $('altitude').value = Math.min(120, Math.ceil(need));
-        computePlan();
-        history.commit();
-      });
-      el.append(b);
-    }
-  } else if (sv && sv.missing) {
-    if (el.hidden) { el.hidden = false; el.className = 'alert warn'; el.textContent = ''; }
-    const g = document.createElement('span');
-    g.textContent = ` The survey has not answered for ${sv.missing} of ${sv.tiles} tiles under this flight, so nothing here is measured yet.`;
-    el.append(g);
+    say('assumed', `${guessed} obstacle${guessed === 1 ? ' has an' : 's have'} assumed `
+      + `height${guessed === 1 ? '' : 's'} — check anything the flight passes close to.`);
   }
 
-  if (state.clearAlt && state.clearAlt > +$('altitude').value) {
+  if (over) {
+    say('export', `${state.mission.stats.waypoints} waypoints exports as `
+      + `${Math.ceil(state.mission.stats.waypoints / DJI_FLY_MAX_WAYPOINTS)} parts.`);
+  }
+
+  if (!tuned && state.mission) {
+    say('fit', `Auto-fitted: ${alt} m, ${state.mission.params.orbitRings} `
+      + `ring${state.mission.params.orbitRings === 1 ? '' : 's'} per thing.`);
+  }
+
+  el.hidden = !found.length;
+  el.textContent = '';
+  if (!found.length) return;
+
+  found.sort((a, b) => a.rank - b.rank);
+  // The worst finding sets the colour of the box: a strike is not a warning and
+  // a note about what auto-fit chose is not either.
+  const worst = found[0].rank_;
+  el.className = `alert ${worst === 'strike' || worst === 'ground' ? ''
+    : worst === 'fit' || worst === 'incomplete' || worst === 'export' ? 'note' : 'warn'}`;
+
+  for (const f of found) {
+    const line = document.createElement('div');
+    line.className = f.rank_ === 'fit' ? 'fitnote' : '';
+    line.textContent = f.text;
+    el.append(line);
+  }
+
+  // One action. Raising to the tallest requirement satisfies the shorter ones,
+  // and three buttons with three numbers is a puzzle rather than a fix.
+  if (raises.length) {
+    const to = Math.min(120, Math.max(...raises));
     const b = document.createElement('button');
     b.type = 'button';
-    b.textContent = `Raise to ${state.clearAlt.toFixed(0)} m`;
+    b.textContent = `Raise to ${to} m`;
     b.addEventListener('click', () => {
-      $('altitude').value = state.clearAlt;
+      tuned = true;
+      $('altitude').value = to;
       computePlan();
       history.commit();
     });

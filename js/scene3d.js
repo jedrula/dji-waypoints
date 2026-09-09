@@ -115,6 +115,7 @@ export function createScene3D(canvas) {
   let controls = null;
   let missionGroup = null;
   let wireGroup = null;
+  let meshGroup = null;
   let wirePaths = [];
   let groundSpec = null;
   let looksOn = true;
@@ -796,6 +797,105 @@ export function createScene3D(canvas) {
     return mask;
   }
 
+  // The photogrammetric mesh: real walls, with the pixels the oblique cameras
+  // actually saw on them. A PROTOTYPE, behind `?mesh=1`, because one 100 m tile
+  // is 7.3 MB on the wire and ~638 MB per square kilometre at source -- the
+  // heaviest thing this app can ask for -- and because how it should sit beside
+  // the LiDAR surface is not yet decided.
+  //
+  // See server/src/mesh.js. It arrives packed and already in PUWG92 metres from
+  // an origin the request chose, which is the mission's own frame origin, so
+  // the only conversion left here is the same affine the surface uses: PUWG92
+  // grid north is not true north, and over 100 m the convergence is about 1.7 m
+  // of sideways error if you ignore it.
+  async function buildMesh({ signal } = {}) {
+    if (meshGroup) { scene.remove(meshGroup); meshGroup = null; }
+    if (!new URLSearchParams(location.search).has('mesh')) return;
+    if (!mission || !scene || loaded?.datum === undefined) return;
+
+    const { lat0, lon0 } = mission.frame;
+    onStatus('Downloading the photogrammetric mesh…');
+    const res = await ask(`/v1/mesh?lat=${lat0}&lon=${lon0}`, { signal });
+    if (!res.ok) { onStatus('No mesh model covers this ground.'); return; }
+    const raw = await res.arrayBuffer();
+
+    const head = new Uint32Array(raw, 0, 2);
+    const nv = head[0];
+    const nt = head[1];
+    let at = 8;
+    const position = new Float32Array(raw.slice(at, at + nv * 12));
+    at += nv * 12;
+    const uv = new Float32Array(raw.slice(at, at + nv * 8));
+    at += nv * 8;
+    const index = new Uint32Array(raw.slice(at, at + nt * 3 * 4));
+
+    // Metres east/north of the frame origin, into the frame's own x/y. The
+    // origin was asked for AS the frame origin, so this is a rotation of about
+    // a degree and nothing else -- but a degree over 100 m is 1.7 m.
+    const home = toPuwg92(lat0, lon0);
+    const toLocal = puwgToLocal(mission.frame, home.east, home.north);
+    const datum = loaded.datum;
+    for (let i = 0; i < nv; i++) {
+      const e = home.east + position[i * 3];
+      const n = home.north - position[i * 3 + 2];      // z is south
+      const l = toLocal(e, n);
+      position[i * 3] = l.x;
+      position[i * 3 + 1] -= datum;                    // metres above takeoff
+      position[i * 3 + 2] = -l.y;
+    }
+
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(position, 3));
+    geom.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    geom.setIndex(new THREE.BufferAttribute(index, 1));
+    geom.computeVertexNormals();
+
+    const tex = await new Promise((done) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => done(img);
+      img.onerror = () => done(null);
+      img.src = `${serviceUrl()}/v1/mesh.jpg?lat=${lat0}&lon=${lon0}`;
+    });
+    let map = null;
+    if (tex) {
+      map = new THREE.Texture(tex);
+      // Raw, like every other picture here: our shaders write straight out.
+      map.colorSpace = THREE.NoColorSpace;
+      // OBJ texture coordinates count up from the BOTTOM; three.js flips by
+      // default, which would put the roofs on the pavement.
+      map.flipY = false;
+      map.needsUpdate = true;
+    }
+
+    meshGroup = new THREE.Mesh(geom, new THREE.ShaderMaterial({
+      uniforms: { uMap: { value: map }, uHas: { value: map ? 1 : 0 } },
+      side: THREE.DoubleSide,
+      vertexShader: `
+        varying vec2 vUv;
+        varying vec3 vN;
+        void main() {
+          vUv = uv;
+          vN = normalMatrix * normal;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: `
+        uniform sampler2D uMap;
+        uniform int uHas;
+        varying vec2 vUv;
+        varying vec3 vN;
+        ${LAMBERT_GLSL}
+        void main() {
+          vec3 base = uHas == 1 ? texture2D(uMap, vUv).rgb : vec3(0.72, 0.70, 0.66);
+          gl_FragColor = vec4(base * lambert(vN), 1.0);
+        }`,
+    }));
+    scene.add(meshGroup);
+    onStatus(`Photogrammetric mesh: ${nt.toLocaleString()} triangles, `
+      + '0.09 m in position, flown 2025-03-20.');
+    render();
+  }
+
   function buildWires() {
     if (!scene) return;
     if (wireGroup) { scene.remove(wireGroup); wireGroup = null; }
@@ -1290,6 +1390,8 @@ export function createScene3D(canvas) {
       try {
         await loadFor(c.lat0, c.lon0, { signal: ctl.signal });
         buildSurface();
+        // After the surface, so a mesh that fails leaves a working view.
+        await buildMesh({ signal: ctl.signal }).catch((e) => console.warn('mesh:', e));
         const n = loaded.meta.tiles?.length ?? 1;
         onStatus(`${loaded.meta.sources?.[0]?.year ?? 'LiDAR'} survey, `
           + `${loaded.meta.cellMetres * loaded.step} m cells, `

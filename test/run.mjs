@@ -1557,6 +1557,41 @@ console.log('\nreading a survey tile');
   ok('a vertex with no ground under it is dropped rather than guessed', off.length === 1);
 }
 
+console.log('\nPL-2000, the grid the mesh models arrive in');
+{
+  const { toPuwg92, pl2000ToWgs84 } = await import('../js/puwg92.js');
+  const close = (a, b, tol) => Math.abs(a - b) <= tol;
+
+  // The zone lives in the false easting and nowhere else, so a point sitting
+  // exactly ON a zone's false easting must come back on that zone's central
+  // meridian -- 15, 18, 21 and 24 east for zones 5 to 8.
+  for (const [zone, cm] of [[5, 15], [6, 18], [7, 21], [8, 24]]) {
+    const g = pl2000ToWgs84(zone * 1e6 + 500000, 5665000);
+    ok(`zone ${zone} puts its false easting on the ${cm}th meridian`,
+       close(g.lon, cm, 1e-9), g.lon.toFixed(9));
+  }
+
+  // A PUWG92 easting has no zone prefix, and reading one as PL-2000 would put
+  // the answer hundreds of kilometres away without saying so -- which is
+  // exactly the failure src/gugik.js avoids by skipping PL-2000 surveys.
+  let threw = false;
+  try { pl2000ToWgs84(362196, 5665000); } catch { threw = true; }
+  ok('an easting carrying no zone is refused rather than guessed', threw);
+
+  // The south-west corner of the mesh tile covering Cybulskiego 22, read out of
+  // the OBJ GUGiK ships. It has to land in the same 500 m survey tile the rest
+  // of the app puts that address in, and just south-west of it.
+  const g = pl2000ToWgs84(6432022.5, 5664997.2);
+  const p = toPuwg92(g.lat, g.lon);
+  const home = toPuwg92(51.116452, 17.030533);
+  ok('the mesh tile corner lands in survey tile 725/724',
+     Math.floor(p.north / 500) === 725 && Math.floor(p.east / 500) === 724,
+     `${Math.floor(p.north / 500)}/${Math.floor(p.east / 500)}`);
+  ok('and south-west of Cybulskiego 22, inside the 100 m it covers',
+     close(home.east - p.east, 100, 4) && close(home.north - p.north, 53, 4),
+     `${(home.east - p.east).toFixed(0)} m east, ${(home.north - p.north).toFixed(0)} m north`);
+}
+
 console.log('\nthe height you type');
 {
   const { parseHeight } = await import('../js/site.js');

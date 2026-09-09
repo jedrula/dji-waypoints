@@ -33,6 +33,7 @@ import { createScene, GRID, CELL_M, KIND } from './scene.js';
 import { createOrthoStore, ORTHO_PX } from './ortho.js';
 import { createBdotStore } from './bdot.js';
 import { createBuildingStore } from './buildings.js';
+import { createMeshStore } from './mesh.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = process.env.DATA_DIR ?? path.join(HERE, '..', 'var');
@@ -50,6 +51,10 @@ const SCENE_DIR = path.join(ROOT, 'scene');
 const orthoStore = createOrthoStore({ dir: path.join(ROOT, 'ortho') });
 const bdotStore = createBdotStore({ dir: path.join(ROOT, 'bdot') });
 const buildingStore = createBuildingStore({ dir: path.join(ROOT, 'budynki3d') });
+const meshStore = createMeshStore({ dir: path.join(ROOT, 'mesh') });
+// One parsed mesh, kept. Parsing is a second and 14 MB, and a session looks at
+// one place; a second entry would double the memory to save nothing.
+let meshHot = null;
 const LINES_DIR = path.join(ROOT, 'lines');
 const BUILDINGS_DIR = path.join(ROOT, 'buildings');
 
@@ -510,6 +515,59 @@ const server = http.createServer(async (req, res) => {
         await mkdir(BUILDINGS_DIR, { recursive: true });
         await writeFile(cache, JSON.stringify(out));
         return send(res, 200, out, origin, { 'Cache-Control': 'public, max-age=604800' });
+      } catch (err) {
+        return send(res, 502, { error: String(err.message ?? err) }, origin);
+      }
+    }
+
+    // The photogrammetric mesh -- real walls with real pixels on them. See
+    // src/mesh.js for what it is and what it weighs.
+    //
+    // Served as one packed binary rather than the 68 MB of OBJ text it arrives
+    // as, already reprojected into PUWG92 metres from an origin in the header,
+    // because float32 cannot hold a seven-digit PL-2000 easting to the nine
+    // centimetres this data is worth.
+    if (url.pathname === '/v1/mesh' || url.pathname === '/v1/mesh.jpg') {
+      const lat = Number(q.get('lat'));
+      const lon = Number(q.get('lon'));
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return send(res, 400, { error: 'lat and lon required' }, origin);
+      if (!inPoland(lat, lon)) return send(res, 404, { error: 'outside Poland' }, origin);
+      try {
+        const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+        if (meshHot?.key !== key) {
+          const got = await throttle(() => meshStore.meshAt(lat, lon));
+          if (!got) return send(res, 404, { error: 'no mesh model covers this' }, origin);
+          meshHot = { key, ...got };
+        }
+        const { geom, texture, info } = meshHot;
+        if (url.pathname === '/v1/mesh.jpg') {
+          if (!texture) return send(res, 404, { error: 'the package holds no texture' }, origin);
+          res.writeHead(200, headers(origin, {
+            'Content-Type': 'image/jpeg',
+            'Cache-Control': 'public, max-age=31536000, immutable',
+          }));
+          return res.end(Buffer.from(texture));
+        }
+        // Two counts, then position, then uv, then index. The counts are IN THE
+        // BODY rather than only in the header because a custom response header
+        // needs Access-Control-Expose-Headers to be readable cross-origin, and
+        // a buffer that describes itself cannot be half-configured.
+        const head = new Uint32Array([geom.vertices, geom.triangles]);
+        const body = gzipSync(Buffer.concat([
+          Buffer.from(head.buffer),
+          Buffer.from(geom.position.buffer, geom.position.byteOffset, geom.position.byteLength),
+          Buffer.from(geom.uv.buffer, geom.uv.byteOffset, geom.uv.byteLength),
+          Buffer.from(geom.index.buffer, geom.index.byteOffset, geom.index.byteLength),
+        ]), { level: 6 });
+        res.writeHead(200, headers(origin, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Encoding': 'gzip',
+          'Cache-Control': 'public, max-age=31536000, immutable',
+          'X-Mesh-Meta': JSON.stringify({
+            vertices: geom.vertices, triangles: geom.triangles, ...info,
+          }).slice(0, 3900),
+        }));
+        return res.end(body);
       } catch (err) {
         return send(res, 502, { error: String(err.message ?? err) }, origin);
       }

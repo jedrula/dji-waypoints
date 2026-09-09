@@ -40,9 +40,17 @@ export function toPuwg92(lat, lon) {
 
 // Only the inverse the API needs: a tile's corner back to lat/lon, so a
 // response can say where it actually is without the client redoing the maths.
-export function toWgs84(east, north) {
+export const toWgs84 = (east, north) =>
+  tmToWgs84(east, north, { lon0: LON0, k0: K0, fe: 500000, fn: -5300000 });
+
+// Poland uses TWO grids and this app now meets both. EPSG:2180 is one zone over
+// the whole country, which is why every GUGiK service speaks it; PL-2000 is
+// four narrow zones and is what the photogrammetric mesh models arrive in. Same
+// projection on the same ellipsoid, different constants -- so the maths is
+// written once and parameterised, rather than pasted with three numbers changed.
+function tmToWgs84(east, north, { lon0, k0, fe, fn }) {
   const ep2 = E2 / (1 - E2);
-  const m = (north + 5300000) / K0;
+  const m = (north - fn) / k0;
   const mu = m / (A * (1 - E2 / 4 - (3 * E2 ** 2) / 64 - (5 * E2 ** 3) / 256));
   const e1 = (1 - Math.sqrt(1 - E2)) / (1 + Math.sqrt(1 - E2));
   const p1 = mu
@@ -53,17 +61,37 @@ export function toWgs84(east, north) {
   const T1 = Math.tan(p1) ** 2;
   const N1 = A / Math.sqrt(1 - E2 * Math.sin(p1) ** 2);
   const R1 = (A * (1 - E2)) / (1 - E2 * Math.sin(p1) ** 2) ** 1.5;
-  const d = (east - 500000) / (N1 * K0);
+  const d = (east - fe) / (N1 * k0);
   const lat = p1 - ((N1 * Math.tan(p1)) / R1) * (
     (d * d) / 2
     - ((5 + 3 * T1 + 10 * C1 - 4 * C1 * C1 - 9 * ep2) * d ** 4) / 24
     + ((61 + 90 * T1 + 298 * C1 + 45 * T1 * T1 - 252 * ep2 - 3 * C1 * C1) * d ** 6) / 720
   );
-  const lon = LON0 + (
+  const lon = lon0 + (
     d - ((1 + 2 * T1 + C1) * d ** 3) / 6
     + ((5 - 2 * C1 + 28 * T1 - 3 * C1 * C1 + 8 * ep2 + 24 * T1 * T1) * d ** 5) / 120
   ) / Math.cos(p1);
   return { lat: (lat * 180) / Math.PI, lon: (lon * 180) / Math.PI };
+}
+
+// PL-2000, the grid the 3D mesh models come in -- EPSG:2176 to 2179 for zones
+// 5 to 8. Four belts three degrees wide, each with its own central meridian at
+// 15, 18, 21 and 24 east, a scale factor of 0.999923, and a false easting that
+// CARRIES THE ZONE NUMBER: 5500000, 6500000, 7500000, 8500000. That prefix is
+// the only thing saying which belt a coordinate belongs to, so it is read back
+// out of the easting rather than passed in.
+//
+// Wroclaw is zone 6. A mesh vertex at x 6432022 is 6432022 - 6500000 = 68 km
+// west of the 18th meridian, which lands on 17.03 east -- Cybulskiego.
+export function pl2000ToWgs84(x, y) {
+  const zone = Math.floor(x / 1000000);
+  if (zone < 5 || zone > 8) throw new Error(`not a PL-2000 easting: ${x}`);
+  return tmToWgs84(x, y, {
+    lon0: (zone * 3 * Math.PI) / 180,
+    k0: 0.999923,
+    fe: zone * 1000000 + 500000,
+    fn: 0,
+  });
 }
 
 // Poland's PUWG92 envelope, give or take. Cheap way to answer "we have nothing

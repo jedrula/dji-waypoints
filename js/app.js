@@ -57,7 +57,10 @@ let urlFrozen = true;
 // that happens -- and the pretend receiver has to be carried back through, or
 // the first pan of the map would switch it off.
 const opened = new URLSearchParams(location.search);
-const MOCK_KEYS = ['mockgps', 'acc', 'age'];
+// Prototype switches the address bar carries. writeUrl rebuilds the query from
+// the keys it knows, so anything not listed here is dropped on the first write
+// -- which is how `?mesh=1` came to be gone before the survey view read it.
+const MOCK_KEYS = ['mockgps', 'acc', 'age', 'mesh'];
 
 const state = {
   mode: 'capture',            // what a tap on the map means

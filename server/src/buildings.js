@@ -26,9 +26,14 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { unzip } from '../../js/kmzread.js';
 import { createDownloadCache } from './download.js';
+import { insideRing } from '../../js/prism.js';
 import { TILE_M } from './ndsm.js';
 
 const INDEX = 'https://integracja.gugik.gov.pl/cgi-bin/ModeleBudynkow3D';
+
+// scene.js's KIND.none: a cell with no return at all, whose height is the
+// hole-filling diffusing in from the rim. A guess, and never a clearance.
+const KIND_NONE = 0;
 
 // Which powiat package covers a point, and how to get it. Same shape of answer
 // as bdot.js's findPackage and for the same reason: the only published way to
@@ -169,6 +174,73 @@ async function sheetIndex(zipBytes) {
   return index;
 }
 
+// The tallest thing the laser MEASURED over a footprint.
+//
+// Not "the roof", and the difference is the whole point. LoD1 gives every
+// building a flat lid at the EAVES -- roofType is 1000 for all 63,090 in
+// Wroclaw, because that is what LoD1 IS -- and an aircraft crosses the ridge,
+// the lift overrun and the aerial. So this is the maximum, which errs upward,
+// which is the right way to be wrong about a clearance.
+//
+// It is also fresher, though by less than it first looked. Every one of those
+// buildings carries `aktZrodla 2011` and `zrodloDach ALS_II`, so the model's
+// height is from the 2011-15 national scanning while the cloud this service
+// holds for the same ground is 2024. Both effects push the same way and this
+// does NOT try to separate them: roofType cannot, since LoD1 flattens
+// everything, so nothing here should be attributed to staleness alone.
+//
+// FILLED CELLS ARE EXCLUDED, and that is not a detail. Measured over tile
+// 725/724, the tallest cell over a footprint was classified `building` 71% of
+// the time, `vegetation` 6%, and hole-filled 23% -- and a filled cell is the
+// diffusion in scene.js guessing from a hole's rim, not a return. Letting one
+// set a clearance would be the app claiming to know a height it does not,
+// which is the one thing it must never do. A footprint with nothing measured
+// inside it returns null, and the caller keeps the model's own number.
+//
+// Vegetation is kept. A tree over a roof is something an aircraft hits and it
+// was really measured. `kind` reports which class won, so the answer can be
+// read rather than assumed.
+//
+// Cells outside the ring are skipped, so a building beside a tower does not
+// inherit the tower. Scanning is affordable because a footprint is small: 150
+// buildings on a tile, and a 20 m one is 1,600 cells at half a metre.
+export function measuredTop(ring, surface) {
+  if (!surface) return null;
+  const { height, kind, base, grid, cellMetres, tileMetres } = surface;
+  let e0 = Infinity; let n0 = Infinity; let e1 = -Infinity; let n1 = -Infinity;
+  for (const [e, n] of ring) {
+    if (e < e0) e0 = e;
+    if (e > e1) e1 = e;
+    if (n < n0) n0 = n;
+    if (n > n1) n1 = n;
+  }
+  const cA = Math.max(Math.floor(e0 / cellMetres), 0);
+  const cB = Math.min(Math.ceil(e1 / cellMetres), grid - 1);
+  const rA = Math.max(Math.floor((tileMetres - n1) / cellMetres), 0);
+  const rB = Math.min(Math.ceil((tileMetres - n0) / cellMetres), grid - 1);
+  const poly = ring.map(([e, n]) => ({ x: e, y: n }));
+  let top = -Infinity;
+  let cells = 0;
+  let guessed = 0;
+  let won = 0;
+  for (let r = rA; r <= rB; r++) {
+    for (let c = cA; c <= cB; c++) {
+      const x = (c + 0.5) * cellMetres;
+      const y = tileMetres - (r + 0.5) * cellMetres;
+      if (!insideRing({ x, y }, poly)) continue;
+      const i = r * grid + c;
+      if (kind && kind[i] === KIND_NONE) { guessed++; continue; }
+      cells++;
+      const h = base + height[i] / 100;
+      if (h > top) { top = h; won = kind ? kind[i] : 0; }
+    }
+  }
+  // A footprint smaller than a cell, off the tile, or nothing but filled cells
+  // measured nothing -- and an unmeasured roof is not a zero one.
+  if (!cells || !Number.isFinite(top)) return null;
+  return { top: +top.toFixed(2), cells, guessed, kind: won };
+}
+
 export function createBuildingStore({ dir, fetchImpl = fetch }) {
   const cache = createDownloadCache({ dir, ext: '.zip', fetchImpl, what: 'Budynki3D' });
   // One powiat is one zip and one envelope index, and a session works in one
@@ -189,7 +261,7 @@ export function createBuildingStore({ dir, fetchImpl = fetch }) {
 
   // Every building standing over one scene tile, in tile-local metres, with
   // heights left in the datum they arrived in -- see the note on parseBuildings.
-  async function buildingsFor(tn, te, { signal } = {}) {
+  async function buildingsFor(tn, te, { surface = null, signal } = {}) {
     const e0 = te * TILE_M;
     const n0 = tn * TILE_M;
     const pkg = await findPackage(e0 + TILE_M / 2, n0 + TILE_M / 2, { fetchImpl, signal });
@@ -213,16 +285,32 @@ export function createBuildingStore({ dir, fetchImpl = fetch }) {
     const sheets = await unzip(zipBytes, { only: (n) => want.includes(n) });
     const dec = new TextDecoder();
     const buildings = [];
+    const lifts = [];
     for (const [, buf] of sheets) {
       for (const b of parseBuildings(dec.decode(buf), box)) {
-        buildings.push({
-          ...b,
-          ring: b.ring.map(([e, n]) => [+(e - e0).toFixed(2), +(n - n0).toFixed(2)]),
-        });
+        const ring = b.ring.map(([e, n]) => [+(e - e0).toFixed(2), +(n - n0).toFixed(2)]);
+        // `eaves` is what the model said and stays visible, because a number
+        // being replaced should be readable next to the one replacing it.
+        const eaves = b.top;
+        const m = measuredTop(ring, surface);
+        // Degrade to the model, never to nothing: an unbuilt scene or a
+        // footprint the laser missed keeps the 2011 height and says so.
+        const top = m ? Math.max(m.top, eaves) : eaves;
+        if (m) lifts.push(+(top - eaves).toFixed(2));
+        // `topKind` is what won: a roof, or a tree standing over it. Worth
+        // carrying, because "the tallest thing here is vegetation" is a
+        // different sentence from "the building is that tall".
+        buildings.push({ ...b, ring, top, eaves, measured: Boolean(m), topKind: m?.kind ?? null });
       }
     }
+    lifts.sort((a, b) => a - b);
+    const at = (q) => (lifts.length ? lifts[Math.min(lifts.length - 1, Math.floor(q * lifts.length))] : null);
     return { buildings, powiat: pkg.teryt, unit: pkg.unit, lod: pkg.lod,
-             sheets: want.length, bytes };
+             sheets: want.length, bytes,
+             heights: surface ? 'measured, from this tile' : 'the model\'s own, 2011',
+             // How far the 2011 roofs were under the 2024 laser, so the swap is
+             // auditable rather than asserted.
+             lift: lifts.length ? { n: lifts.length, median: at(0.5), p90: at(0.9), max: lifts[lifts.length - 1] } : null };
   }
 
   return { buildingsFor };

@@ -12,7 +12,7 @@ import { createStore, LISTS } from '../src/store.js';
 import { createScene, GRID, CELL_M, KIND } from '../src/scene.js';
 import { createOrthoStore, ORTHO_PX } from '../src/ortho.js';
 import { createBdotStore, findPackage, LINE_KIND } from '../src/bdot.js';
-import { parseBuildings, findPackage as findBuildings } from '../src/buildings.js';
+import { parseBuildings, measuredTop, findPackage as findBuildings } from '../src/buildings.js';
 
 let fails = 0;
 const ok = (name, cond, extra = '') => {
@@ -503,6 +503,59 @@ console.log('\nbuildings with walls (LoD1 CityGML)');
   ok('the index yields a package URL', pkg.url.endsWith('0264_gml.zip'), pkg.url);
   ok('and the unit it covers', pkg.teryt === '0264' && /Wroc/.test(pkg.unit), `${pkg.teryt} ${pkg.unit}`);
   ok('LoD1 by default, because LoD2 does not cover Wroclaw', pkg.lod === 'lod1');
+
+  // The height swap: a LoD1 roof is the EAVES and an aircraft crosses the
+  // ridge, so the roof is re-measured from this tile's own raster.
+  {
+    const G = 20, CELL = 0.5, TILE = G * CELL;   // a 10 m toy tile
+    const height = new Uint16Array(G * G);
+    const kind = new Uint8Array(G * G);
+    const surface = { height, kind, base: 100, grid: G, cellMetres: CELL, tileMetres: TILE };
+    // A 4 m square footprint in the middle, standing on nothing in particular.
+    const ring = [[3, 3], [7, 3], [7, 7], [3, 7]];
+    const cellAt = (e, n) => Math.floor((TILE - n) / CELL) * G + Math.floor(e / CELL);
+    // Whole footprint measured at 12 m, with one cell of it at 20 m.
+    for (let e = 3.25; e < 7; e += CELL) {
+      for (let n = 3.25; n < 7; n += CELL) {
+        height[cellAt(e, n)] = 1200;
+        kind[cellAt(e, n)] = 2;
+      }
+    }
+    height[cellAt(5.25, 5.25)] = 2000;
+    kind[cellAt(5.25, 5.25)] = 2;
+    const m = measuredTop(ring, surface);
+    ok('the roof is the tallest measured cell over the footprint', m.top === 120, String(m?.top));
+    ok('and says what won it', m.kind === 2, String(m?.kind));
+
+    // A tree over the roof beats the roof, because an aircraft hits the tree.
+    height[cellAt(4.25, 4.25)] = 2600;
+    kind[cellAt(4.25, 4.25)] = 3;
+    const tree = measuredTop(ring, surface);
+    ok('a tree standing over the roof raises it', tree.top === 126 && tree.kind === 3,
+       `${tree.top} kind ${tree.kind}`);
+
+    // The safety rule. A hole-filled cell is scene.js diffusing a height in
+    // from the rim -- a guess -- and a guess must never set a clearance.
+    height[cellAt(6.25, 6.25)] = 5000;
+    kind[cellAt(6.25, 6.25)] = 0;
+    const withHole = measuredTop(ring, surface);
+    ok('a hole-filled cell cannot raise a roof, however tall it is',
+       withHole.top === 126, String(withHole.top));
+    ok('and the guessed cells are counted rather than hidden',
+       withHole.guessed === 1, String(withHole.guessed));
+
+    // Nothing measured at all is null, not zero: the caller keeps the model's
+    // own height and says it did.
+    kind.fill(0);
+    ok('a footprint with nothing measured in it returns null',
+       measuredTop(ring, surface) === null);
+    ok('and no surface at all returns null too', measuredTop(ring, null) === null);
+
+    // A footprint off the tile measures nothing rather than reading edge cells.
+    kind.fill(2);
+    ok('a footprint off the tile measures nothing',
+       measuredTop([[60, 60], [64, 60], [64, 64], [60, 64]], surface) === null);
+  }
 
   // No link in the fragment means no coverage, and that is not an error.
   const none = await findBuildings(362219, 362939, {

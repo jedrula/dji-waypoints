@@ -114,7 +114,6 @@ export function createScene3D(canvas) {
   let controls = null;
   let missionGroup = null;
   let wireGroup = null;
-  let buildingGroup = null;
   let wirePaths = [];
   let looksOn = true;
   let surfaceMesh = null;
@@ -171,25 +170,6 @@ export function createScene3D(canvas) {
     float lambert(vec3 n) {
       return 0.42 + 0.58 * max(dot(normalize(n), SUN), 0.0);
     }`;
-
-  // A solid of known position and unknown appearance -- see buildBuildings.
-  function solidMaterial(colour) {
-    return new THREE.ShaderMaterial({
-      uniforms: { uColour: { value: new THREE.Color(colour) } },
-      side: THREE.DoubleSide,
-      vertexShader: `
-        varying vec3 vNormal2;
-        void main() {
-          vNormal2 = normalMatrix * normal;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }`,
-      fragmentShader: `
-        uniform vec3 uColour;
-        varying vec3 vNormal2;
-        ${LAMBERT_GLSL}
-        void main() { gl_FragColor = vec4(uColour * lambert(vNormal2), 1.0); }`,
-    });
-  }
 
   // The surface's own shader, which is the service viewer's fragment shader
   // ported: see server/public/scene.html. The two draw the same tile from the
@@ -391,7 +371,13 @@ export function createScene3D(canvas) {
     // under 0.25 m, which is flat. A per-quad material split cannot do better
     // than that, because "how much of this face is vertical" is a question
     // about a fragment and not about a quad.
+    // Known walls when the footprints arrived, the step heuristic only when
+    // they did not -- the same degrade-to-yesterday rule as everywhere else,
+    // so a tile outside the building coverage, or a service that has not been
+    // redeployed, still gets the marking it always had.
+    const known = wallMask();
     const wallAt = (row, col) => {
+      if (known) return known[row * N + col] ? 1 : 0;
       if (kind[row * N + col] !== KIND_BUILDING) return 0;
       const l = heightAt(row, Math.max(col - 1, 0));
       const r = heightAt(row, Math.min(col + 1, N - 1));
@@ -455,7 +441,6 @@ export function createScene3D(canvas) {
     loaded.cells = cols * rows;
     loaded.step = step;
     buildMission();
-    buildBuildings();
     buildWires();
     frameCamera();
   }
@@ -471,108 +456,52 @@ export function createScene3D(canvas) {
   // The register knows where they run and not how high they hang -- see
   // js/lines.js -- so this is an assumption drawn as confidently as the
   // geometry it hangs on, which is worth remembering when it looks precise.
-  // The buildings as the prisms they are: a real footprint, real vertical
-  // faces, and a flat roof at the eaves.
+  // The footprints, rasterised to the cells their walls pass through.
   //
-  // Drawn OVER the surface rather than instead of it, and that is the honest
-  // arrangement rather than a shortcut. The two sources are good at opposite
-  // halves of a building: LoD1 has the wall, which a heightfield cannot hold at
-  // all, and the raster has the roof, which LoD1 flattens to the eaves and the
-  // laser actually measured. So the roof you see is still the measured one with
-  // the photograph on it -- these prisms only reach the eaves -- and the walls
-  // stop being a smear.
+  // This is what the buildings are FOR in this view, and drawing them as
+  // solids was the wrong idea. They were drawn, briefly: a prism per building,
+  // walls to the eaves. Almost every one was invisible, because a BDOT10k
+  // footprint sits INSIDE the roof outline the raster measured -- a roof
+  // overhangs and a half-metre grid smears it further out -- so the prism hid
+  // inside the plateau. The ones that did show were the ones past the crop,
+  // hanging in the sky. Raising them to the measured maximum only fenced each
+  // roof off and hid the photograph. A second brown building on top of a good
+  // photographic one is clutter whichever way it is drawn.
   //
-  // No texture on them, on purpose. There are no pixels of a wall anywhere in
-  // this dataset; the whole reason to draw the wall is that its POSITION is
-  // known, and painting a guessed facade on it would give back exactly the
-  // false confidence the brown marking exists to avoid.
-  function buildBuildings() {
-    if (!scene) return;
-    if (buildingGroup) { scene.remove(buildingGroup); buildingGroup = null; }
+  // What a footprint is good for is telling the surface the truth about its
+  // own cliffs. The step heuristic guesses which cells are vertical faces and
+  // is measurably bad at it: of the 19,333 quads it marked over tile 725/724,
+  // 40% had less than the 1.75 m that defines a wall and 16.7% were flat,
+  // because a parapet, a chimney and a tree beside a building all fire it. A
+  // footprint edge does not guess. So this adds no geometry at all -- the same
+  // one surface, told where the walls actually are.
+  function wallMask() {
     const list = loaded?.buildings;
-    if (!list?.length || !mission || loaded.datum === undefined) return;
-
-    const { meta, crop } = loaded;
-    const frame = mission.frame;
-    // Rings arrive tile-local, in the tile's own metres -- see the service's
-    // buildingsFor -- so the tile origin goes back on before projecting.
-    const e0 = meta.origin.east;
-    const n0 = meta.origin.north;
+    if (!list?.length || !loaded?.meta) return null;
+    const { meta } = loaded;
+    const N = meta.grid;
     const cell = meta.cellMetres;
-    const toLocal = puwgToLocal(frame, e0, n0);
-    const datum = loaded.datum;
-
-    // The measured maximum over a footprint is NOT used, and the attempt is
-    // worth recording: it was reached for because almost every prism drawn to
-    // the eaves is buried inside the raster's own plateau and invisible. The
-    // cause of the burial is not the eaves though -- it is that a BDOT10k
-    // footprint sits INSIDE the roof outline the raster measured, because a
-    // roof overhangs and a half-metre grid smears it further out. Raising the
-    // walls to the ridge only fenced the roof off and hid it.
-
-    const verts = [];
-    const norms = [];
-    const push = (x, y, z, nx, ny, nz) => {
-      verts.push(x, y, z);
-      norms.push(nx, ny, nz);
+    const mask = new Uint8Array(N * N);
+    const mark = (e, n) => {
+      const col = Math.floor(e / cell);
+      const row = Math.floor((meta.tileMetres - n) / cell);
+      if (col < 0 || col >= N || row < 0 || row >= N) return;
+      mask[row * N + col] = 1;
     };
-
+    // Walked at half a cell, so no cell along a diagonal edge is stepped over.
+    const STRIDE = cell / 2;
     for (const b of list) {
-      // Clipped to the drawn crop, in the tile's own grid.
-      if (crop) {
-        const cs = b.ring.map(([e]) => e / cell);
-        const rs = b.ring.map(([, n]) => (meta.tileMetres - n) / cell);
-        if (Math.max(...cs) < crop.c0 || Math.min(...cs) > crop.c1
-            || Math.max(...rs) < crop.r0 || Math.min(...rs) > crop.r1) continue;
-      }
-      const ring = b.ring.map(([e, n]) => {
-        const l = toLocal(e0 + e, n0 + n);
-        return { x: l.x, z: -l.y };
-      });
-      if (ring.length < 3) continue;
-      const lo = b.base - datum;
-      // The eaves, which is what LoD1 actually says, and NOT the measured
-      // maximum over the footprint. Raising the walls to that maximum was
-      // tried: on a pitched roof it puts the wall up at the ridge, so every
-      // building becomes a box with a fence round the top and the measured,
-      // photographed roof is hidden inside it. The roof is the half the raster
-      // is better at; the wall stops where the model says the wall stops.
-      const hi = b.top - datum;
-
+      const ring = b.ring;
       for (let i = 0; i < ring.length; i++) {
-        const a = ring[i];
-        const c = ring[(i + 1) % ring.length];
-        // The outward normal of a wall, which is the segment turned a quarter
-        // turn. Whether it points out or in depends on the ring's winding, and
-        // the source does not promise one -- so the material is double-sided
-        // and this only has to be consistent along a building.
-        const dx = c.x - a.x;
-        const dz = c.z - a.z;
-        const len = Math.hypot(dx, dz) || 1;
-        const nx = dz / len;
-        const nz = -dx / len;
-        push(a.x, lo, a.z, nx, 0, nz);
-        push(c.x, lo, c.z, nx, 0, nz);
-        push(c.x, hi, c.z, nx, 0, nz);
-        push(a.x, lo, a.z, nx, 0, nz);
-        push(c.x, hi, c.z, nx, 0, nz);
-        push(a.x, hi, a.z, nx, 0, nz);
+        const [ea, na] = ring[i];
+        const [eb, nb] = ring[(i + 1) % ring.length];
+        const steps = Math.max(1, Math.ceil(Math.hypot(eb - ea, nb - na) / STRIDE));
+        for (let k = 0; k <= steps; k++) {
+          mark(ea + ((eb - ea) * k) / steps, na + ((nb - na) * k) / steps);
+        }
       }
-
-      // No cap. The roof is already in the picture, measured at half a metre
-      // with the orthophoto on it, and a flat lid over the top of that would
-      // replace the one part of a building this dataset is WORSE at.
     }
-    if (!verts.length) return;
-
-    const geom = new THREE.BufferGeometry();
-    geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
-    geom.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(norms), 3));
-    // The colour of a thing that is known to be there and not known to look
-    // like anything: the viewer's "not seen" brown, lightened, because here it
-    // is not standing in for a missing measurement.
-    buildingGroup = new THREE.Mesh(geom, solidMaterial(0xb9a58c));
-    scene.add(buildingGroup);
+    return mask;
   }
 
   function buildWires() {

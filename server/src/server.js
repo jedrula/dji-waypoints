@@ -19,7 +19,7 @@
 // degrade to the behaviour that already shipped, not to a blank map.
 
 import http from 'node:http';
-import { gzipSync } from 'node:zlib';
+import { gzipSync, gunzipSync } from 'node:zlib';
 import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -484,7 +484,23 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, hit, origin, { 'Cache-Control': 'public, max-age=604800' });
       } catch { /* build it */ }
       try {
-        const out = await throttle(() => buildingStore.buildingsFor(tn, te));
+        // The scene raster, when this tile has one, so the roofs come from the
+        // 2024 laser rather than from the model's 2011 one -- see measuredTop.
+        // Never built here: a scene is minutes and hundreds of megabytes, and
+        // a caller asking for buildings has not asked for that.
+        // Stored gzipped, because the compression is the product -- see
+        // buildScene. So it has to be inflated to be read as numbers.
+        const scene = await cachedScene(tn, te);
+        const flat = scene ? gunzipSync(scene.body) : null;
+        const surface = flat ? {
+          height: new Uint16Array(flat.buffer, flat.byteOffset, GRID * GRID),
+          kind: new Uint8Array(flat.buffer, flat.byteOffset + GRID * GRID * 2, GRID * GRID),
+          base: scene.meta.base,
+          grid: GRID,
+          cellMetres: CELL_M,
+          tileMetres: TILE_M,
+        } : null;
+        const out = await throttle(() => buildingStore.buildingsFor(tn, te, { surface }));
         await mkdir(BUILDINGS_DIR, { recursive: true });
         await writeFile(cache, JSON.stringify(out));
         return send(res, 200, out, origin, { 'Cache-Control': 'public, max-age=604800' });

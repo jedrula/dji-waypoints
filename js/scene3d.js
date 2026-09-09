@@ -36,19 +36,28 @@ import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, asHex } from './palette.js';
 const MARGIN_M = 60;
 const MAX_VERTS = 420_000;
 
-// A cell's classification, for when there is no orthophoto to drape. Deliberately
-// flat colours: this is "what kind of thing is that", not a rendering.
 // The same four the map uses, so a red line is a red line in both pictures.
 const WIRE_COLOUR = {
   WN: 0xff5d5d, SN: 0xff9c3d, 'n/n': 0xffd85e, LTK: 0x6aa9ff,
 };
 
+// A cell's classification, for when there is no orthophoto to drape -- which is
+// most of the country, outside the towns.
+//
+// These were dark and desaturated on the reasoning that this is data and not a
+// rendering. Daylight values now. A view you do not want to look at is a view
+// you will not check your flight against, and being pretty costs nothing here:
+// the classification is a flat lookup either way.
+// Ground is stone and not grass, on purpose. Lawn green there was the first
+// thing tried and it painted the Rynek's paving as a meadow -- the LiDAR class
+// means "bare earth", which is a field, a car park or a market square alike,
+// and vegetation is a class of its own that this one is precisely not.
 const KIND_COLOUR = [
-  [0.42, 0.44, 0.47],   // none, guessed by filling a hole
-  [0.36, 0.42, 0.32],   // ground
-  [0.62, 0.58, 0.54],   // building
-  [0.28, 0.44, 0.30],   // vegetation
-  [0.24, 0.36, 0.48],   // water
+  [0.60, 0.58, 0.55],   // none, guessed by filling a hole
+  [0.70, 0.66, 0.58],   // ground
+  [0.82, 0.78, 0.72],   // building
+  [0.37, 0.55, 0.33],   // vegetation
+  [0.38, 0.56, 0.72],   // water
 ];
 
 const POLL_MS = 4000;
@@ -98,8 +107,11 @@ export function createScene3D(canvas) {
   function boot() {
     if (renderer) return;
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    renderer.setClearColor(0x0b0e11);
     scene = new THREE.Scene();
+    // A sky, not a void. The clear colour was the app's own near-black panel
+    // colour, which hung the model in an empty room and left nothing to tell
+    // you which way was up in a view you orbit by hand. The horizon does that.
+    scene.background = sky();
     camera = new THREE.PerspectiveCamera(55, 1, 1, 8000);
     controls = new OrbitControls(camera, canvas);
     controls.maxPolarAngle = Math.PI / 2 - 0.02;   // never under the ground
@@ -116,11 +128,41 @@ export function createScene3D(canvas) {
     // first time the view was ever opened.
     controls.enableDamping = false;
     controls.addEventListener('change', () => render());
-    // Sun high and to the south, plus enough ambient that a north wall is not
-    // a silhouette. The surface is textured, so this is shaping and not colour.
-    const sun = new THREE.DirectionalLight(0xffffff, 1.6);
-    sun.position.set(-0.4, 1, 0.6);
-    scene.add(sun, new THREE.AmbientLight(0xffffff, 0.85));
+    // Sun high and to the south for the shaping, and a hemisphere for the
+    // fill: sky above, ground bounce below.
+    //
+    // The numbers are not taste. three.js lights a MeshStandardMaterial
+    // physically, so a lit-up surface leaves as albedo * irradiance / PI --
+    // meaning the old sun 1.6 plus flat ambient 0.85 showed flat ground at
+    // (1.6 * 0.9 + 0.85) / PI = 0.7 of the orthophoto's real brightness, and
+    // every steep face darker still. That is why it looked like dusk: an
+    // orthophoto is a photograph taken in sunlight, so shading it again dims a
+    // picture that already has the sun in it. These add to PI over flat
+    // ground, so the photo is shown at the brightness it was taken at, and the
+    // relief still reads because slopes fall off from there.
+    const sun = new THREE.DirectionalLight(0xfff6e8, 1.5);
+    sun.position.set(-0.45, 1, 0.55);
+    // Sky and ground bounce rather than one flat number, so a north wall is
+    // lit by something with a direction to it instead of going grey.
+    scene.add(sun, new THREE.HemisphereLight(0xbcd8f2, 0x6f6455, 1.8));
+  }
+
+  // The sky, as a vertical two-stop gradient on a 2 px-wide canvas. Cheaper
+  // than a cube map and there is nothing here a cube map would add.
+  function sky() {
+    const c = document.createElement('canvas');
+    c.width = 2;
+    c.height = 256;
+    const ctx = c.getContext('2d');
+    const g = ctx.createLinearGradient(0, 0, 0, 256);
+    g.addColorStop(0, '#22405f');
+    g.addColorStop(0.62, '#7ba2c6');
+    g.addColorStop(1, '#cfdce6');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 2, 256);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
   }
 
   function size() {

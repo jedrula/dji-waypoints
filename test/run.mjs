@@ -16,7 +16,7 @@ import { createPlanStore, merge as clientMerge } from '../js/plans.js';
 import { serviceKey, setServiceKey, serviceHeaders, KEY_STORE } from '../js/service.js';
 import { KEY_OK } from '../sync/protocol.js';
 import { merge, clean, cleanObstacle } from '../sync/protocol.js';
-import { createObstacleStore, normalizeRect, overlaps } from '../js/obstacles.js';
+import { overlaps } from '../js/prism.js';
 import { checkObstacles, clearingAltitude, segmentBoxDist, pointBoxDist } from '../js/collide.js';
 import { localSolid } from '../js/prism.js';
 import { createHistory } from '../js/history.js';
@@ -1130,8 +1130,6 @@ console.log('\nobstacles');
   ok('the closest point can be mid-leg, not at either end',
      near(segmentBoxDist({ x: -200, y: 0, z: 12 }, { x: 200, y: 0, z: 12 }, box).dist, 2, 1e-3));
 
-  ok('a rectangle dragged to nothing still has area',
-     normalizeRect({ north: 50, south: 50, east: 19, west: 19 }).north > 50);
   ok('overlap is exclusive at the edges',
      overlaps({ north: 1, south: 0, east: 1, west: 0 }, { north: 0.5, south: -1, east: 0.5, west: -1 })
      && !overlaps({ north: 1, south: 0, east: 1, west: 0 }, { north: 3, south: 2, east: 1, west: 0 }));
@@ -1188,104 +1186,6 @@ console.log('\nobstacles');
      covered.samples.every((sm) => sm.kind !== 'wall' || Math.abs(sm.p.z) <= 20)
      && covered.boxes.length === open.boxes.length);
 
-  // Store and Worker, same shape as plans and for the same reason.
-  const mem = new Map();
-  const storage = {
-    getItem: (k) => (mem.has(k) ? mem.get(k) : null),
-    setItem: (k, v) => mem.set(k, v),
-    removeItem: (k) => mem.delete(k),
-  };
-  let sent = null;
-  const store = createObstacleStore({ storage, endpoint: 'https://sync.example',
-    fetchImpl: async (url, opt) => {
-      sent = { url, body: JSON.parse(opt.body) };
-      return { ok: true, json: async () => ({ obstacles: [] }) };
-    } });
-  const saved = store.put({ ...mast, id: undefined });
-  ok('an obstacle stores its height', store.list()[0].height === 60);
-  store.put({ ...saved, height: 12 });
-  ok('editing one replaces rather than duplicates',
-     store.list().length === 1 && store.list()[0].height === 12);
-  await store.sync();
-  ok('obstacles sync on their own route, not the plan one', sent.url.endsWith('/obstacles'));
-  ok('and under their own key on the wire', Array.isArray(sent.body.obstacles));
-
-  ok('the protocol rejects a box with no area',
-     cleanObstacle({ id: 'abcdef', updatedAt: 1, north: 50, south: 50, east: 19, west: 18, height: 5 }) === null);
-  ok('and a box the size of a country',
-     cleanObstacle({ id: 'abcdef', updatedAt: 1, north: 51, south: 50, east: 19, west: 18, height: 5 }) === null);
-  ok('it accepts a well-formed obstacle',
-     cleanObstacle({ id: 'abcdef', updatedAt: 1, north: 50.001, south: 50, east: 19.001, west: 19,
-                     height: 5, name: 'Oak' }).height === 5);
-  ok('and refuses a height it cannot use',
-     cleanObstacle({ id: 'abcdef', updatedAt: 1, north: 50.001, south: 50, east: 19.001, west: 19,
-                     height: 'tall' }) === null);
-  ok('a tombstone needs nothing but an id and a time',
-     cleanObstacle({ id: 'abcdef', updatedAt: 1, deleted: true }).deleted === true);
-
-  // A footprint is the shape the thing actually is. It rides along on the
-  // record, it is optional, and every way of getting it wrong has to land back
-  // on the box -- yesterday's behaviour -- rather than on a wrong answer.
-  const ring = [[50.0600, 19.9300], [50.0610, 19.9300], [50.0610, 19.9320], [50.0600, 19.9320]];
-  const bbox = { north: 50.0610, south: 50.0600, east: 19.9320, west: 19.9300, height: 12 };
-  const withPoly = store.put({ ...bbox, name: 'Block (osm)', poly: ring });
-  ok('a footprint survives being stored', withPoly.poly?.length === 4);
-  ok('and comes back off the disk with the record',
-     store.list().find((o) => o.id === withPoly.id).poly.length === 4);
-  // The rectangle is the broad phase for the footprint inside it, so a point
-  // outside it could hide from every check that starts with the rectangle.
-  ok('a ring reaching outside its own rectangle is refused',
-     store.put({ ...bbox, name: 'Liar (osm)', poly: [...ring.slice(1), [50.2, 19.9310]] }).poly
-     === undefined);
-  ok('a ring of two points is not a ring',
-     store.put({ ...bbox, name: 'Line (osm)', poly: ring.slice(0, 2) }).poly === undefined);
-  ok('a ring with a point that is not a number is refused',
-     store.put({ ...bbox, name: 'Junk (osm)', poly: [...ring.slice(1), ['x', 19.931]] }).poly
-     === undefined);
-  ok('an absurd number of points falls back to the box',
-     store.put({ ...bbox, name: 'Curve (osm)',
-       poly: Array.from({ length: 201 }, (_, i) => [50.0605 + i * 1e-7, 19.9310]) }).poly
-     === undefined);
-  ok('a ring closed by repeating its first point is not stored twice',
-     store.put({ ...bbox, name: 'Closed (osm)', poly: [...ring, ring[0]] }).poly.length === 4);
-  // A ring that crosses itself does not enclose one definite thing, so there is
-  // no reading of it a check could be sure had covered the building. OSM has
-  // them. Rejecting it here means js/prism.js can trust what it is handed.
-  ok('a ring that crosses itself is refused, and the box stands',
-     store.put({ ...bbox, name: 'Bowtie (osm)',
-       poly: [ring[0], ring[2], ring[1], ring[3]] }).poly === undefined);
-  ok('and one that comes back to graze itself is refused too',
-     store.put({ ...bbox, name: 'Graze (osm)',
-       poly: [ring[0], ring[1], [50.0605, 19.9310], ring[1], ring[2], ring[3]] }).poly
-     === undefined);
-
-  // The whole reason this is safe: a ring is never on the wire, so the record
-  // the Worker validates has not changed and an old build cannot round-trip a
-  // footprint away. See `local: isImported` in js/site.js.
-  let sentLocal = null;
-  const mem2 = new Map();
-  const localStore = createObstacleStore({
-    storage: {
-      getItem: (k) => (mem2.has(k) ? mem2.get(k) : null),
-      setItem: (k, v) => mem2.set(k, v),
-      removeItem: (k) => mem2.delete(k),
-    },
-    endpoint: 'https://sync.example',
-    local: (o) => /\((osm|bdot)\)$/.test(o.name ?? ''),
-    fetchImpl: async (url, opt) => {
-      sentLocal = JSON.parse(opt.body);
-      return { ok: true, json: async () => ({ obstacles: [] }) };
-    },
-  });
-  localStore.put({ ...bbox, name: 'Block (osm)', poly: ring });
-  localStore.put({ ...bbox, name: 'Oak', height: 8 });
-  await localStore.sync();
-  ok('an imported footprint is not sent anywhere',
-     sentLocal.obstacles.length === 1 && sentLocal.obstacles[0].name === 'Oak');
-  ok('and the hand-placed one that is sent carries no ring',
-     sentLocal.obstacles.every((o) => o.poly === undefined));
-  ok('a footprint that somehow reached the wire is stripped',
-     cleanObstacle({ id: 'abcdef', updatedAt: 1, ...bbox, poly: ring }).poly === undefined);
 }
 
 console.log('\nthe shape a thing actually is');
@@ -1583,27 +1483,10 @@ console.log('\nreading a survey tile');
   ok('a vertex with no ground under it is dropped rather than guessed', off.length === 1);
 }
 
-console.log('\nwhat a tap leaves behind');
+console.log('\nthe height you type');
 {
-  const { sampleRect, parseHeight } = await import('../js/site.js');
+  const { parseHeight } = await import('../js/site.js');
   const { ringFloor } = await import('../js/collide.js');
-  const { mPerDegLat: mLat, mPerDegLon: mLon } = await import('../js/geo.js');
-  const spanM = (r) => ({
-    x: mLon((r.north + r.south) / 2) * (r.east - r.west),
-    y: mLat((r.north + r.south) / 2) * (r.north - r.south),
-  });
-
-  // A tap is all the shape there is, so it leaves a square of the span asked
-  // for. It used to be grown by the accuracy of the fix that placed it, back
-  // when a point could be placed by standing next to the thing.
-  const sq = spanM(sampleRect({ lat: 50.06, lon: 19.93 }, 8));
-  ok(`a tap gives the size you asked for (${sq.x.toFixed(1)} x ${sq.y.toFixed(1)} m)`,
-     near(sq.x, 8, 0.05) && near(sq.y, 8, 0.05));
-  ok('a bigger span makes a bigger box',
-     spanM(sampleRect({ lat: 50.06, lon: 19.93 }, 20)).x
-     > spanM(sampleRect({ lat: 50.06, lon: 19.93 }, 3)).x);
-  ok('a box never collapses to nothing',
-     spanM(sampleRect({ lat: 50.06, lon: 19.93 }, 0)).x > 0.9);
 
   // A comma is what a Polish keyboard puts there, and `type=number` reads that
   // back as the empty string -- which coerced with + is 0, a silently wrong
@@ -1616,9 +1499,7 @@ console.log('\nwhat a tap leaves behind');
   ok('zero is a real answer', parseHeight('0') === 0);
 
   // ringFloor is still how "how low may anything fly here" is worked out; what
-  // changed is who asks. There is no single perimeter ring to lift any more, so
-  // each dome asks it of the things IT would pass near -- see "a dome clears
-  // the tall thing beside it" above.
+  // changed is who asks. Each dome asks it of the things IT would pass near.
   ok('the floor clears the tallest thing by the clearance', ringFloor([3, 11, 8], 5) === 16);
   ok('nothing on site sets no floor', ringFloor([], 5) === null);
 }
@@ -1651,144 +1532,6 @@ console.log('\nwhat a tap leaves behind');
      world.map((o) => o.id).sort().join() === 'a,b', world.map((o) => o.id).join());
   ok('and the box you drew is gone, which is what undo was for',
      !world.some((o) => o.id === 'c'));
-}
-
-console.log('\nwhat is already standing here');
-{
-  const { toObstacles, ASSUMED, heightOfLevels } = await import('../js/osm.js');
-  const at = (lat, lon) => ({ lat, lon });
-  const found = toObstacles([
-    // A building with a real height, one with storeys, one with neither.
-    { tags: { building: 'apartments', height: '17.12', 'addr:street': 'Rozbrat', 'addr:housenumber': '14' },
-      geometry: [at(51.1, 17.05), at(51.1004, 17.05), at(51.1004, 17.0506), at(51.1, 17.0506)] },
-    { tags: { building: 'yes', 'building:levels': '5' },
-      geometry: [at(51.101, 17.05), at(51.1014, 17.05), at(51.1014, 17.0506), at(51.101, 17.0506)] },
-    { tags: { building: 'garage' },
-      geometry: [at(51.102, 17.05), at(51.1021, 17.05), at(51.1021, 17.0502), at(51.102, 17.0502)] },
-    // Trees: one measured, one not.
-    { tags: { natural: 'tree', height: '30', species: 'Platanus acerifolia' }, lat: 51.103, lon: 17.051 },
-    { tags: { natural: 'tree' }, lat: 51.1031, lon: 17.0511 },
-    // A 110 kV span running diagonally for about 300 m.
-    { tags: { power: 'line', voltage: '110000' },
-      geometry: [at(51.104, 17.052), at(51.1058, 17.0548)] },
-  ]);
-
-  const byLabel = (t) => found.filter((f) => f.label.includes(t));
-  ok('a tagged building keeps its own height',
-     byLabel('Rozbrat')[0].height === 17.12 && byLabel('Rozbrat')[0].assumed === false);
-  // Five storeys was 16 m and that was wrong. Checked against LiDAR over 213
-  // buildings with BDOT10k storey counts, `levels * 3.2` came in short by more
-  // than a metre on 97% of them, because a storey count counts habitable
-  // floors and the roof is not one.
-  ok('storeys become metres rather than being thrown away',
-     byLabel('Building')[0].height === heightOfLevels(5));
-  ok('and a storey count includes the roof it does not mention',
-     heightOfLevels(5) > 5 * 3.2 + 5, String(heightOfLevels(5)));
-  ok('one storey is a house, not a ceiling height',
-     heightOfLevels(1) >= 9, String(heightOfLevels(1)));
-  ok('every extra storey adds about a storey',
-     Math.abs((heightOfLevels(6) - heightOfLevels(5)) - 3.2) < 0.05);
-  // A storey count is an estimate with a 3 m median error, so it stays marked
-  // and the heights service is allowed to measure over the top of it. Only a
-  // tagged metric height counts as known.
-  ok('a height from storeys is still an estimate',
-     byLabel('Building')[0].assumed === true);
-  ok('a building with neither is assumed and says so',
-     byLabel('garage')[0].height === ASSUMED.building && byLabel('garage')[0].assumed === true);
-  // The assumptions are measurements, not opinions: an untagged building in a
-  // Polish city came out at p90 24.3 m against the 9 m that used to be guessed.
-  ok('and the assumption is one a city building could plausibly reach',
-     ASSUMED.building >= 20 && ASSUMED.tree >= 18);
-  ok('a measured tree is not overwritten by the default',
-     byLabel('Platanus')[0].height === 30 && byLabel('Platanus')[0].assumed === false);
-  ok('an untagged tree gets the assumed height, marked',
-     byLabel('Tree')[0].height === ASSUMED.tree && byLabel('Tree')[0].assumed === true);
-
-  // A wire is a strip, so a diagonal run needs no chopping. This used to be
-  // twelve axis-aligned boxes for the one span, each of them nearly twice as
-  // wide as the wire, because a single box round the run would have walled off
-  // a 200 m square of sky. The strip IS the run.
-  const { LINE_SPAN } = await import('../js/osm.js');
-  const metresApart = (u, v, lat) => Math.hypot(
-    (v[1] - u[1]) * 111320 * Math.cos((lat * Math.PI) / 180), (v[0] - u[0]) * 111132);
-  const span = byLabel('110 kV');
-  ok(`a long diagonal run is one strip, not a row of boxes (${span.length})`, span.length === 1);
-  ok('every piece stands at the height its voltage implies',
-     span.every((b) => b.height === ASSUMED.powerHigh && b.assumed === true));
-  ok('the strip is four corners, not a rectangle', span[0].poly.length === 4);
-  const across = metresApart(span[0].poly[0], span[0].poly[3], 51.104);
-  const along = metresApart(span[0].poly[0], span[0].poly[1], 51.104);
-  ok(`and it is as wide as the wire, not as wide as the run (${across.toFixed(1)} m)`,
-     near(across, LINE_SPAN, 0.2), `${across}`);
-  ok(`while running the length of the span (${along.toFixed(0)} m)`, along > 200, `${along}`);
-  // The rectangle is still the broad phase, and it is still allowed to be the
-  // whole diagonal square -- nothing may hide outside it.
-  ok('the rectangle round the strip still contains it',
-     span[0].poly.every((v) => v[0] <= span[0].north + 1e-9 && v[0] >= span[0].south - 1e-9
-       && v[1] <= span[0].east + 1e-9 && v[1] >= span[0].west - 1e-9));
-
-  // A building keeps the outline the source holds. A 40 x 12 m block at 30 deg
-  // is the case from the screenshot that started this: the box round it is
-  // 2.6x its own area, all of it sky the planner reads as blocked.
-  const blockRing = (() => {
-    const [lat0, lon0, w, d, deg] = [51.11, 17.06, 40, 12, 30];
-    const th = (deg * Math.PI) / 180;
-    const mLon = 111320 * Math.cos((lat0 * Math.PI) / 180);
-    return [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2]]
-      .map(([x, y]) => ({ lat: lat0 + (x * Math.sin(th) + y * Math.cos(th)) / 111132,
-                          lon: lon0 + (x * Math.cos(th) - y * Math.sin(th)) / mLon }));
-  })();
-  const [diag] = toObstacles([{ tags: { building: 'yes', height: '10' }, geometry: blockRing }]);
-  ok('a building keeps its outline rather than a box round it', diag.poly?.length === 4);
-  const toXY = (v) => ({ x: (v[1] - 17.06) * 111320 * Math.cos((51.11 * Math.PI) / 180),
-                         y: (v[0] - 51.11) * 111132 });
-  const trueArea = polygonArea(diag.poly.map(toXY));
-  const boxArea = (diag.north - diag.south) * 111132
-                * (diag.east - diag.west) * 111320 * Math.cos((51.11 * Math.PI) / 180);
-  ok(`the outline is the real 480 m2 (${trueArea.toFixed(0)})`, near(trueArea, 480, 5),
-     `${trueArea}`);
-  ok(`where the box round it is 2.6x that (${(boxArea / trueArea).toFixed(1)}x)`,
-     boxArea / trueArea > 2.5, `${boxArea / trueArea}`);
-  // The importer hands on what OSM gave it, repeated closing point and all;
-  // dropping that is the store's job, and it is tested there.
-  ok('a closed way is passed on as it arrived',
-     toObstacles([{ tags: { building: 'yes' },
-       geometry: [...blockRing, blockRing[0]] }])[0].poly.length === 5);
-
-  // A crown has no outline anywhere in OSM -- 0 of 9908 trees carried even a
-  // diameter -- so a tree stays the square it always was, honestly.
-  ok('a tree is still a box, because a crown has no outline to keep',
-     byLabel('Tree')[0].poly === undefined && byLabel('Platanus')[0].poly === undefined);
-
-  // Nothing may be imported without a decision about its height.
-  ok('everything imported carries an explicit assumed flag',
-     found.every((f) => typeof f.assumed === 'boolean' && f.height > 0));
-  ok('the cap is honoured', toObstacles(Array.from({ length: 50 }, () => (
-    { tags: { natural: 'tree' }, lat: 51.1, lon: 17.05 })), { max: 10 }).length === 10);
-}
-
-console.log('\nground under the flight');
-{
-  const { verdict } = await import('../js/terrain.js');
-  // Flat ground, a low altitude, a generous clearance. This is the shape that
-  // produced a false warning: the flight is 5 m ABOVE the ground, and the app
-  // told the pilot it was 5 m BELOW it, because the readout took the absolute
-  // value and hardcoded the word BELOW.
-  const flat = { low: 220, high: 220, relief: 0, samples: [{ h: 220 }] };
-  const v = verdict(flat, { takeoffAt: 220, altitude: 5, clearance: 15 });
-  ok('on flat ground a 5 m flight is 5 m ABOVE the ground, not below',
-     v.aboveHighestGround === 5, String(v.aboveHighestGround));
-  ok('and it is still short of a 15 m clearance', v.shortfall === 10, String(v.shortfall));
-  ok('so the two facts are independent, and the readout must say which',
-     v.aboveHighestGround > 0 && v.shortfall > 0);
-
-  // The hillside case the wording was originally written for: takeoff at the
-  // bottom, and the flight really is under the top.
-  const hill = { low: 220, high: 300, relief: 80, samples: [{ h: 220 }] };
-  const h = verdict(hill, { takeoffAt: 220, altitude: 40, clearance: 15 });
-  ok('taking off below a hill really is below the highest ground',
-     h.aboveHighestGround === -40, String(h.aboveHighestGround));
-  ok('and the altitude that would clear it is offered', h.needed === 95, String(h.needed));
 }
 
 console.log('\nground imagery');
@@ -2231,7 +1974,6 @@ console.log('\ncontroller bridge');
   globalThis.localStorage = { getItem: () => 'http://heights.test', setItem() {} };
   const { fetchLines, lineToObstacles, tilesFor, _internals } = await import('../js/lines.js');
   const { toPuwg92 } = await import('../js/puwg92.js');
-  const { isImported, isEstimated, labelOf } = await import('../js/site.js');
 
   const TILE = 500;
   const { east, north } = toPuwg92(53.2076, 15.8355);
@@ -2242,8 +1984,7 @@ console.log('\ncontroller bridge');
   const line = { kind: 'SN', label: 'medium voltage line', height: 16,
                  points: [[100, 250], [400, 250]] };
   const boxes = lineToObstacles(line, { tn, te, tileMetres: TILE });
-  // One strip per straight run, whichever importer found the wire: the rule
-  // lives in osm.js and this is the other caller of it.
+  // One strip per straight run. The rule lives in js/lines.js beside this.
   ok('a span is one strip, not a row of boxes', boxes.length === 1, String(boxes.length));
   ok('every box stands at the height the voltage implies', boxes.every((b) => b.height === 16));
   ok('and every one is marked an estimate', boxes.every((b) => b.assumed === true));
@@ -2254,12 +1995,6 @@ console.log('\ncontroller bridge');
   ok(`the strip is as wide as the wire (${wireAcross.toFixed(1)} m)`, near(wireAcross, 8, 0.2));
   const spanEW = boxes[0].east - boxes[0].west;
   ok('and covers the whole span', spanEW * 111320 * Math.cos(53.2 * Math.PI / 180) > 280);
-
-  // What the site model makes of one.
-  const named = `${isEstimated({ name: '~x' }) ? '' : ''}~${boxes[0].label} (${boxes[0].source})`;
-  ok('the site model counts it as imported', isImported({ name: named }));
-  ok('and as an estimate', isEstimated({ name: named }));
-  ok('and the label says which survey it came from', labelOf({ name: named }).endsWith('(bdot)'));
 
   ok('a view spanning two tiles asks for both',
      tilesFor({ south: 53.2050, north: 53.2098, west: 15.8320, east: 15.8392 }, TILE).length >= 2);
@@ -2430,50 +2165,6 @@ console.log('\ncontroller bridge');
   const withMine = mergeRecords([live('mine', 5e6)], tombs, 10, now);
   ok('five hundred deletions do not push out the one live record',
      withMine.some((r) => r.id === 'mine' && !r.deleted));
-}
-
-// -- what never leaves the device --------------------------------------------
-{
-  console.log('\nlocal-only records');
-  const { createObstacleStore } = await import('../js/obstacles.js');
-  const { isImported } = await import('../js/site.js');
-  const mem = () => { const m = new Map(); return {
-    getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, v) }; };
-
-  let sent = null;
-  const storage = mem();
-  const store = createObstacleStore({
-    storage, endpoint: 'http://sync.test', local: isImported,
-    fetchImpl: async (u, o) => {
-      sent = JSON.parse(o.body).obstacles;
-      return { ok: true, status: 200, json: async () => ({ obstacles: sent }) };
-    },
-  });
-
-  const rect = { north: 51.001, south: 51, east: 17.001, west: 17 };
-  const mine = store.put({ ...rect, name: 'the gate post', height: 4 });
-  const osm = store.put({ ...rect, name: '~Building (osm)', height: 24 });
-  const wire = store.put({ ...rect, name: '~low voltage line (bdot)', height: 10 });
-  ok('all three are stored locally', store.list().length === 3);
-
-  await store.sync();
-  ok('only the hand-placed one is sent', sent.length === 1 && sent[0].id === mine.id,
-     JSON.stringify(sent.map((r) => r.name)));
-  ok('and the imported ones are still here afterwards', store.list().length === 3);
-
-  // Clearing an import must not write tombstones into a shared list.
-  store.remove(osm.id);
-  store.remove(wire.id);
-  await store.sync();
-  ok('clearing an import leaves no tombstone to travel', sent.every((r) => !r.deleted),
-     JSON.stringify(sent));
-  ok('and it really is gone locally', store.list().length === 1);
-
-  // A hand-placed delete still travels, because the other device has it.
-  store.remove(mine.id);
-  await store.sync();
-  ok('deleting your own obstacle still tells the other device',
-     sent.some((r) => r.id === mine.id && r.deleted));
 }
 
 console.log(`\n${fails === 0 ? 'ALL PASS' : fails + ' FAILURES'}`);

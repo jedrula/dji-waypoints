@@ -13,11 +13,83 @@
 // the assumption its voltage implies.
 
 import { toPuwg92, toWgs84, inPoland } from './puwg92.js';
-import { spanQuads, LINE_SPAN } from './osm.js';
+
 import { serviceUrl } from './heights.js';
 import { serviceHeaders } from './service.js';
 
+// How high a wire hangs, by voltage class. Not in the register -- BDOT10k says
+// where a run goes and what it carries, never how far off the ground -- so
+// every one of these is an assumption, and each is the top of the structure
+// rather than the wire, because the number feeds a clearance check and the safe
+// error is upward.
+//
+// They lived in js/osm.js with the building and tree guesses, which went when
+// the obstacles did. server/src/bdot.js imports these to label a run.
+export const ASSUMED = {
+  powerLow: 10,          // 400 V distribution on wooden poles
+  powerMedium: 16,       // 15-30 kV
+  powerHigh: 40,         // 110 kV lattice towers
+  powerVeryHigh: 60,     // 220-400 kV
+};
+
 export const SOURCE = 'bdot';
+
+// How wide a box a power span gets. Not in any register -- BDOT10k says where a
+// wire runs and what it carries, never how wide to treat it -- so it is a
+// convention, and a generous one.
+export const LINE_SPAN = 8;
+
+const M_PER_DEG_LAT = 111132;
+const mPerDegLon = (lat) => 111320 * Math.cos((lat * Math.PI) / 180);
+
+// The rectangle round a ring of [lat, lon] pairs.
+function bboxOfPairs(pairs) {
+  const lats = pairs.map((p) => p[0]);
+  const lons = pairs.map((p) => p[1]);
+  return {
+    north: Math.max(...lats), south: Math.min(...lats),
+    east: Math.max(...lons), west: Math.min(...lons),
+  };
+}
+
+// A wire is a strip: one obstacle per straight run, `span` wide, lying along
+// the run at whatever angle the run happens to be at.
+//
+// This used to chop each run into 25 m pieces and put an axis-aligned box round
+// every piece, because a single box round a 200 m diagonal would wall off a
+// 200 m square of sky. A strip needs no chopping -- it is already the shape of
+// the wire -- so a 200 m run is one obstacle instead of eight, and the eight
+// were each still nearly twice as wide as the wire.
+export function spanQuads(geometry, span) {
+  const out = [];
+  const half = span / 2;
+  for (let i = 1; i < geometry.length; i++) {
+    const a = geometry[i - 1];
+    const b = geometry[i];
+    const mLon = mPerDegLon(a.lat);
+    const dx = (b.lon - a.lon) * mLon;
+    const dy = (b.lat - a.lat) * M_PER_DEG_LAT;
+    const len = Math.hypot(dx, dy);
+    // Two mapped points in the same place are not a run of wire.
+    if (len < 0.01) continue;
+    // Out to the side of the run, half a span each way. A bend leaves a wedge
+    // uncovered on its outside, which is air: the wire itself is inside both
+    // strips, because both of them contain the vertex they meet at.
+    const px = (-dy / len) * half;
+    const py = (dx / len) * half;
+    const dLat = py / M_PER_DEG_LAT;
+    const dLon = px / mLon;
+    const poly = [
+      [a.lat + dLat, a.lon + dLon],
+      [b.lat + dLat, b.lon + dLon],
+      [b.lat - dLat, b.lon - dLon],
+      [a.lat - dLat, a.lon - dLon],
+    ];
+    out.push({ ...bboxOfPairs(poly), poly });
+  }
+  return out;
+}
+
 
 // Tile geometry is the service's to define; asking keeps the two in step.
 let grid = null;

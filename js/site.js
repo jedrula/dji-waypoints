@@ -1,47 +1,36 @@
-// What is on the ground, in one place.
+// What the mission has to see.
 //
 // The app used to keep this in three: a rectangle you dragged, an obstacle list
-// with its own view, and a walk that made obstacles from where you stood. They
-// were three ways of saying the same two things -- what to capture, and what to
-// stay away from -- so they are one thing now.
+// with its own view, and a walk that made obstacles from where you stood. Then
+// in two -- capture points and obstacles, in their own tabs. It is one now.
 //
-// A point is a tap. There was a second way to make one -- a button that placed
-// it where the phone said you were standing -- and it is gone; a tap is the
-// whole gesture. Both kinds carry a height, because both questions are about
-// height: how tall is the thing I want photographed, and how tall is the thing
-// I must not hit.
+// A point is a tap, and every tap is a capture point: something you want
+// photographed, carrying how tall it is. There is no second kind.
 //
-//   capture   what the mission has to see. Their footprint (js/shape.js) is
-//             what gets flown, and the tallest of them is the subject height.
-//             They live in the plan -- they ARE the plan, and they travel in
-//             its share code.
+// The obstacles went because they were a second, worse answer to a question
+// the survey already answers better. A hand-drawn box and an imported OSM
+// footprint were the app's model of what is standing there; the national LiDAR
+// IS what is standing there, at half-metre cells, and the app can now show a
+// flight inside it (js/scene3d.js). Avoiding it is the next step. The one
+// hazard the survey cannot supply is the overhead wire -- no wire class in any
+// tile sampled, and tools/wire-spike.mjs is the negative result -- so wires
+// stayed, as a hazard layer with no list and nothing to edit.
 //
-//   obstacle  what the flight is checked against. These are global and synced,
-//             because a tree is a tree whichever plan you are drawing today,
-//             and they are stored as the box records they always were: a tap
-//             plus a span is a small square, which is exactly what a walk stop
-//             already made. Nothing about the sync format changes.
+// Nothing here syncs any more either. The obstacle list was the only thing
+// that did; plans still travel by code, and a plan is its taps.
 
-import { createObstacleStore, normalizeRect, DEFAULT_HEIGHT } from './obstacles.js';
 import { mPerDegLat, mPerDegLon } from './geo.js';
 
-export { DEFAULT_HEIGHT };
+// The height a point starts at, before you say otherwise. Three metres is a
+// hedge, a van, a garden wall -- the commonest thing you point at, and low
+// enough that accepting it by mistake is not dangerous.
+export const DEFAULT_HEIGHT = 3;
+export const DEFAULT_POINT_HEIGHT = DEFAULT_HEIGHT;
 
-// The square a tap leaves behind: centred on the tap, sized by the span.
-//
-// It used to be grown by the accuracy of the GPS fix that placed it, because a
-// stop meant standing beside the thing rather than inside it and the fix had
-// its own radius of doubt. Nothing places one from a fix any more, so the
-// growing had nothing left to grow by.
-export function sampleRect({ lat, lon }, span) {
-  const half = Math.max(0.5, span / 2);
-  return {
-    north: lat + half / mPerDegLat(lat),
-    south: lat - half / mPerDegLat(lat),
-    east: lon + half / mPerDegLon(lat),
-    west: lon - half / mPerDegLon(lat),
-  };
-}
+// A plan code has to fit what the sync service will store (2000 characters),
+// and a tap costs about thirty. Fifty is far more than a footprint needs and
+// still leaves room for every control in the code.
+export const MAX_CAPTURE_POINTS = 50;
 
 // A height typed on a phone, which is not the same thing as a number.
 //
@@ -59,120 +48,13 @@ export function parseHeight(text) {
   return Math.round(v * 10) / 10;
 }
 
-
-// The height a point starts at, before you say otherwise. Three metres is a
-// hedge, a van, a garden wall -- the commonest thing you point at, and low
-// enough that accepting it by mistake is not dangerous.
-export const DEFAULT_POINT_HEIGHT = 3;
-
-// How wide a tapped obstacle is, when you have not said. A tap marks a spot,
-// not an outline: a wide thing is several taps, the same way a wide capture is.
-export const DEFAULT_OBSTACLE_SPAN = 6;
-
-// A plan code has to fit what the sync service will store (2000 characters),
-// and a tap costs about thirty. Fifty is far more than a footprint needs and
-// still leaves room for every control in the code.
-export const MAX_CAPTURE_POINTS = 50;
-
-// An obstacle's name carries two things the sync service already stores for
-// free, so neither needs a schema change: what it is, and whether its height
-// was measured or invented.
-//
-// A leading "~" means the height is an estimate -- the importer's per-class
-// guess rather than anything anyone measured. It is stripped the moment you
-// set the height yourself, because then it is yours and it is not a guess.
-export const EST_PREFIX = '~';
-export const isEstimated = (o) => String(o.name ?? '').startsWith(EST_PREFIX);
-export const labelOf = (o) => String(o.name ?? '').replace(/^~/, '');
-
-// Imported obstacles are flown around and checked against, never orbited. You
-// tapped a thing because you care about it; the importer only described the
-// surroundings, and eighty street trees would otherwise be eighty domes.
-// Where an imported obstacle came from. It matters on the label because the
-// two sources are not interchangeable: OpenStreetMap is whatever anyone
-// happened to map, and BDOT10k is the national survey, which is the only one
-// of the two that reliably knows about the wire over the field.
-export const IMPORTED = 'osm';
-export const SOURCES = ['osm', 'bdot'];
-const IMPORT_RE = new RegExp(`\\((${SOURCES.join('|')})\\)$`);
-export const isImported = (o) => IMPORT_RE.test(labelOf(o));
-
 let nextId = 1;
 const newId = () => `p${nextId++}${Math.random().toString(36).slice(2, 6)}`;
 
-// The centre of an obstacle's box, which is the tap that made it. Obstacles are
-// stored as rectangles -- that is the record the sync service validates and the
-// collision check consumes -- and this is the one place that reads one back as
-// the point it came from.
-export function pointOf(o) {
-  return { lat: (o.north + o.south) / 2, lon: (o.east + o.west) / 2 };
-}
-
-// A box has two dimensions. Flattening it to one is a lie about anything long,
-// and it was a dangerous one: auto-fit measured a 40 x 12 m building as a
-// 12 m square, decided the flight cleared it, and the collision check then
-// reported ten strikes against the same building.
-export function spansOf(o) {
-  const lat0 = (o.north + o.south) / 2;
-  return {
-    x: Math.max(1, (o.east - o.west) * 111320 * Math.cos((lat0 * Math.PI) / 180)),
-    y: Math.max(1, (o.north - o.south) * 111132),
-  };
-}
-
-// The single number the older callers want: the larger side, because that is
-// what something has to stand outside of.
-export function spanMOf(o) {
-  const s = spansOf(o);
-  return Math.round(Math.max(s.x, s.y));
-}
-
-export function createSite({ onChange = () => {}, onSync = () => {}, storage, fetchImpl, endpoint } = {}) {
-  // Capture points are the plan; obstacles are the world the plan flies through.
+export function createSite({ onChange = () => {} } = {}) {
   let capture = [];
-  // Imported obstacles never leave this device. They come from OpenStreetMap
-  // and BDOT10k, they are re-fetchable in a second from the button that made
-  // them, and they are not anybody's work -- while the things you placed by
-  // hand are exactly that. Keeping them out of the sync also removes the churn
-  // that made a capped list dangerous: importing three hundred obstacles and
-  // clearing them again used to write six hundred records into a shared list
-  // and quietly push a hand-placed one off the end.
-  const obstacles = createObstacleStore({ storage, fetchImpl, endpoint, local: isImported });
 
-  // One round trip at a time and in order: a save followed by a delete has to
-  // reach the service in that order, or the delete is the one that gets lost.
-  let queue = Promise.resolve();
-  let pending = null;
-
-  function sync({ quiet = false } = {}) {
-    queue = queue.then(async () => {
-      if (!obstacles.endpoint()) return;
-      try {
-        const { total, pulled } = await obstacles.sync();
-        if (pulled) changed({ obstacles: true, replaced: true });
-        onSync({ total, pulled, quiet });
-      } catch (e) {
-        // The write already landed locally, so this is never lost work -- the
-        // next sync sends it. Say so rather than looking like the edit failed.
-        onSync({ error: e.message, quiet });
-      }
-    });
-    return queue;
-  }
-
-  // Obstacles sync by themselves, because a tree you marked on the phone is
-  // only useful on the Mac that has the cable. Coalesced, though: holding the
-  // + button on a height is one edit to a person and a dozen writes to the
-  // store, and the service does not need to hear about each of them.
-  function syncSoon() {
-    clearTimeout(pending);
-    pending = setTimeout(() => sync({ quiet: true }), 900);
-  }
-
-  const changed = (how = {}) => {
-    onChange(how);
-    if (how.obstacles && !how.replaced) syncSoon();
-  };
+  const changed = (how = {}) => onChange(how);
 
   return {
     /* ---------- what to capture ---------- */
@@ -220,97 +102,5 @@ export function createSite({ onChange = () => {}, onSync = () => {}, storage, fe
       changed({ capture: true, replaced: true });
     },
 
-    /* ---------- what to avoid ---------- */
-    obstacles: () => obstacles.list(),
-
-    // A tap plus a span is a small square, because a tap is all the shape there
-    // is. Anything with a real outline is imported and carries one.
-    addObstacle({ lat, lon, height = DEFAULT_POINT_HEIGHT, span = DEFAULT_OBSTACLE_SPAN }) {
-      const rect = sampleRect({ lat, lon }, span);
-      const o = obstacles.put({ ...normalizeRect(rect), height, name: '' });
-      changed({ obstacles: true });
-      return o;
-    },
-
-    setObstacleHeight(id, height) {
-      const o = obstacles.list().find((x) => x.id === id);
-      if (!o) return;
-      // Setting it yourself makes it yours: the estimate mark goes.
-      obstacles.put({ ...o, name: labelOf(o), height: Math.max(0, height) });
-      changed({ obstacles: true });
-    },
-
-    // Everything the importer found, in one write, so a hundred trees are one
-    // undo step and one sync rather than a hundred of each.
-    addImported(found) {
-      let added = 0;
-      for (const f of found) {
-        const rect = normalizeRect({ north: f.north, south: f.south, east: f.east, west: f.west });
-        obstacles.put({
-          ...rect,
-          // The outline the source actually holds, when there is one. The store
-          // validates it against the rectangle and drops anything it cannot
-          // trust, so passing it on is never worse than not having it.
-          poly: f.poly,
-          height: Math.max(0, f.height),
-          name: `${f.assumed ? EST_PREFIX : ''}${f.label} (${f.source ?? IMPORTED})`,
-        });
-        added += 1;
-      }
-      if (added) changed({ obstacles: true });
-      return added;
-    },
-
-    // Taking an import back out again, without touching anything you placed.
-    clearImported() {
-      const gone = obstacles.list().filter(isImported);
-      for (const o of gone) obstacles.remove(o.id);
-      if (gone.length) changed({ obstacles: true });
-      return gone.length;
-    },
-
-    setObstacleSpan(id, span) {
-      const o = obstacles.list().find((x) => x.id === id);
-      if (!o) return;
-      obstacles.put({ ...o, ...normalizeRect(sampleRect(pointOf(o), Math.max(1, span))) });
-      changed({ obstacles: true });
-    },
-
-    // Moving one keeps its size and height and puts the same box somewhere
-    // else.
-    moveObstacle(id, lat, lon) {
-      const o = obstacles.list().find((x) => x.id === id);
-      if (!o) return;
-      obstacles.put({
-        ...o,
-        ...normalizeRect(sampleRect({ lat, lon }, spanMOf(o))),
-      });
-      changed({ obstacles: true });
-    },
-
-    removeObstacle(id) {
-      obstacles.remove(id);
-      changed({ obstacles: true });
-    },
-
-    // The undo stack restores whole worlds, so it needs to put the list back
-    // exactly -- including bringing back one that was deleted.
-    restoreObstacles(list) {
-      const now = obstacles.list();
-      const want = new Map(list.map((o) => [o.id, o]));
-      for (const o of now) if (!want.has(o.id)) obstacles.remove(o.id);
-      for (const o of list) {
-        const cur = now.find((x) => x.id === o.id);
-        if (!cur || JSON.stringify(cur) !== JSON.stringify(o)) obstacles.put(o);
-      }
-      changed({ obstacles: true, replaced: true });
-    },
-
-    endpoint: obstacles.endpoint,
-    sync,
-    // Called once at startup: whatever the other device drew is part of the
-    // world this plan is checked against, and it has to arrive before the
-    // first "does this flight clear everything" is worth anything.
-    start: () => sync({ quiet: true }),
   };
 }

@@ -31,15 +31,6 @@
       </div>
     </div>
 
-    <div id="modes" class="modes" role="tablist">
-      <button type="button" data-mode="capture" role="tab" class="on">
-        <b>Capture</b><span class="n" id="nCapture">0</span>
-      </button>
-      <button type="button" data-mode="obstacle" role="tab">
-        <b>Obstacles</b><span class="n" id="nObstacle">0</span>
-      </button>
-    </div>
-
     <p class="tip" id="tip">Tap the map on what you want captured.</p>
 
     <div id="readout" class="readout"></div>
@@ -164,7 +155,6 @@
         <circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none"/>
       </svg>
     </button>
-    <button id="hereBtn" type="button" class="here" hidden>Capture where I stand</button>
 
     <!-- The point you last touched. Sits over the map because the point is on
          the map, and the map is what you are looking at while you tune it. -->
@@ -200,12 +190,6 @@
         <button id="servicePing" type="button">Check the service</button>
       </div>
       <p class="hint" id="serviceHint"></p>
-
-      <button id="clearOsm" class="block" type="button">Remove imported obstacles</button>
-      <p class="hint"><b>Obstacles here</b>, over the map in obstacle mode, brings in buildings,
-      trees and power lines from OpenStreetMap for whatever is on screen. It knows where they
-      are; it mostly does not know how tall, so anything it guesses is marked and counted in
-      the warning above. Imported obstacles are flown around and never photographed.</p>
 
       <button id="surveyFit" class="block" type="button">Check what the survey sees</button>
       <p class="hint" id="surveyHint">Reads the national LiDAR under the whole flight and reports

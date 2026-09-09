@@ -32,10 +32,9 @@ import { encodePlan, decodePlan } from './share.js';
 import { initPlans } from './plansui.js';
 import { routeFromRead } from './route.js';
 import { createBasemaps } from './basemap.js';
-import { createSite, parseHeight, pointOf, spanMOf, spansOf, isEstimated, isImported, labelOf,
-  DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS } from './site.js';
-import { overlaps } from './obstacles.js';
-import { localPrisms, localSolid, ringLatLon } from './prism.js';
+import { createSite, parseHeight, DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS } from './site.js';
+import { localPrisms, overlaps } from './prism.js';
+import { spanQuads, LINE_SPAN } from './lines.js';
 import { checkObstacles, clearingAltitude } from './collide.js';
 import { createHistory } from './history.js';
 
@@ -47,7 +46,8 @@ const cam = CAMERAS.mini5pro;
 const $ = (id) => document.getElementById(id);
 
 const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff', surround: '#ff6fb5', establish: '#7ee0a0' };
-const OBSTACLE_COLOR = { clear: '#ffb84d', near: '#ff9f4d', strike: '#ff5d5d' };
+// A leg the check flagged, by how bad it is. Nothing is drawn 'clear'.
+const LEG_COLOR = { clear: '#ffb84d', near: '#ff9f4d', strike: '#ff5d5d' };
 const CLEARANCE_KEY = 'dji.clearance';
 
 let ready = false;
@@ -85,7 +85,6 @@ const map = L.map('map', { zoomControl: true, attributionControl: true }).setVie
 const layers = {
   footprint: L.polygon([], { color: '#4da3ff', weight: 1.5, dashArray: '5,4',
                              fill: true, fillOpacity: 0.05, interactive: false }).addTo(map),
-  obsBoxes: L.layerGroup().addTo(map),
   wires: L.layerGroup().addTo(map),
   path: L.layerGroup().addTo(map),
   dots: L.layerGroup().addTo(map),
@@ -442,21 +441,6 @@ const clearance = () => +$('clearance').value;
 
 /* ---------- what is on the ground ---------- */
 const site = createSite({
-  onSync: ({ pulled, error, quiet }) => {
-    if (error) { if (!quiet) toast(`Obstacles not synced — ${error}`); return; }
-    if (!pulled) return;
-    // A box that arrived from the other device is not an action taken here, so
-    // it is not one to undo -- but the stack HAS to be told, or the next undo
-    // reverts it by accident. Worse than by accident: restoring a snapshot
-    // deletes every obstacle the snapshot does not contain, and the first
-    // snapshot is taken at startup BEFORE the sync has pulled anything down.
-    // One undo then wipes the synced list and the delete travels to every
-    // device. `rebase` in createHistory exists for exactly this and was not
-    // being called; refresh is what calls it.
-    if (ready) history.refresh();
-    toast(`${pulled} obstacle${pulled === 1 ? '' : 's'} arrived from your other device.`);
-    renderIdentity();
-  },
   onChange: ({ replaced = false } = {}) => {
     if (!ready) return;
     renderPoints();
@@ -479,9 +463,21 @@ const site = createSite({
 // generous enough to reach the next town.
 const NEARBY_M = 400;
 
-function nearbyObstacles() {
+// The wires near the site, as the strips the collision check understands.
+//
+// This is the only thing the flight is checked against now. The obstacles you
+// used to draw and import are gone -- the survey is a better answer to "what
+// is standing there" and js/scene3d.js shows the flight inside it -- but the
+// survey provably cannot see a wire, so the register's wires are still checked
+// as well as drawn. Drawing a hazard and not checking it would be the worst of
+// the three options.
+//
+// Strips rather than boxes because a wire is a strip: one convex quad per
+// straight run, span wide, at whatever angle the run happens to be. See
+// spanQuads in js/lines.js.
+function wireHazards() {
   const pts = site.capture();
-  if (!pts.length) return [];
+  if (!pts.length || !wirePaths.length) return [];
   const lat0 = pts.reduce((t, q) => t + q.lat, 0) / pts.length;
   const box = {
     north: Math.max(...pts.map((q) => q.lat)) + NEARBY_M / mPerDegLat(lat0),
@@ -489,95 +485,47 @@ function nearbyObstacles() {
     east: Math.max(...pts.map((q) => q.lon)) + NEARBY_M / mPerDegLon(lat0),
     west: Math.min(...pts.map((q) => q.lon)) - NEARBY_M / mPerDegLon(lat0),
   };
-  return site.obstacles().filter((o) => overlaps(o, box));
+  const out = [];
+  wirePaths.forEach((w, i) => {
+    for (const rect of spanQuads(w.path, LINE_SPAN)) {
+      if (!overlaps(rect, box)) continue;
+      // Every strip of one run carries the RUN's id, so the check reports two
+      // wires rather than twelve pieces of them -- see byObstacle in
+      // js/collide.js, which exists for exactly this.
+      out.push({ id: `wire${i}`, name: w.label, height: w.height, ...rect });
+    }
+  });
+  return out;
 }
 
-// Obstacles go to the planner too, not just to the collision check: they are
-// tall things, and the flight that goes round a tall thing is the flight that
-// photographs it.
+// What the planner is given. No obstacles: it orbits the points you tapped and
+// avoids nothing, which is where this is meant to be until avoidance comes off
+// the survey. The wires are checked afterwards and reported, not flown around.
 const siteForPlanner = () => ({
   points: site.capture(),
   shape: $('shape').value,
-  obstacles: nearbyObstacles().map((o) => {
-    const sp = spansOf(o);
-    return {
-      ...pointOf(o), height: o.height,
-      span: Math.max(sp.x, sp.y), spanX: sp.x, spanY: sp.y,
-      // The outline as well as the box. The altitude search measures against
-      // the same geometry the collision check does, and the spans are still
-      // what decides how far out a ring has to stand.
-      poly: o.poly, north: o.north, south: o.south, east: o.east, west: o.west,
-      capture: !isImported(o),
-    };
-  }),
+  obstacles: [],
 });
 
 /* ---------- placing and editing points ---------- */
-const MODES = {
-  capture: {
-    label: 'capture point',
-    colour: '#4da3ff',
-    tip: 'Tap the map on what you want captured. Tap a point to set how tall it is.',
-    list: () => site.capture(),
-    at: (p) => ({ lat: p.lat, lon: p.lon }),
-    add: (at) => site.addCapture(at),
-    setHeight: (id, h) => site.setCaptureHeight(id, h),
-    remove: (id) => site.removeCapture(id),
-    clear: () => site.clearCapture(),
-  },
-  obstacle: {
-    label: 'obstacle',
-    // Obstacles are not walked to. A pylon is a thing you keep well away from,
-    // and the ones that matter most are wires you cannot stand under and read
-    // off a phone. So in this mode the button asks the map rather than the
-    // receiver: pan to the site and the tall things arrive. That is also what
-    // makes a mission plannable at a desk, with no fix at all.
-    here: 'Obstacles here',
-    colour: '#ffb84d',
-    tip: 'Tap the map where something stands. Tap a point to set how tall it is.',
-    list: () => site.obstacles(),
-    at: (o) => pointOf(o),
-    add: (at) => site.addObstacle(at),
-    setHeight: (id, h) => site.setObstacleHeight(id, h),
-    remove: (id) => site.removeObstacle(id),
-    clear: () => { for (const o of site.obstacles()) site.removeObstacle(o.id); },
-  },
-};
+// One kind of point. There were two -- capture and obstacle, in their own tabs
+// -- and the split described nothing: both were a place with a height on it,
+// and the only difference was what the planner did with them. Obstacles are
+// gone (see js/site.js for why the survey replaced them), so this is what a
+// tap makes and the only thing a tap makes.
+const POINT_COLOUR = '#4da3ff';
+const POINT_TIP = 'Tap the map on what you want captured. Tap a point to set how tall it is.';
 
-function setMode(mode) {
-  if (!MODES[mode]) return;
-  state.mode = mode;
-  state.selected = null;
-  for (const b of document.querySelectorAll('#modes button')) b.classList.toggle('on', b.dataset.mode === mode);
-  $('tip').textContent = MODES[mode].tip;
-  showTip();
-  // The button over the map belongs to obstacle mode: it asks OpenStreetMap
-  // about the view. Capture mode had one too -- a point placed where the phone
-  // said you were standing -- and it is gone, so a capture point is a tap and
-  // only a tap.
-  $('hereBtn').classList.add('obstacle');
-  $('hereBtn').hidden = mode !== 'obstacle';
-  if (!importing) $('hereBtn').textContent = MODES.obstacle.here;
-  $('hereBtn').title =
-    'Buildings, trees and overhead lines from OpenStreetMap, for whatever is on screen';
-  $('clearMode').textContent = mode === 'capture' ? 'Clear points' : 'Clear obstacles';
-  renderPoints();
-  renderPointBar();
-}
-for (const b of document.querySelectorAll('#modes button')) {
-  b.addEventListener('click', () => setMode(b.dataset.mode));
-}
-
-// One tap, one point, whichever mode you are in. Placing is the whole
-// interaction: there is no arm-then-drag, because on a phone in a field the
-// gesture you can rely on is a tap.
+// One tap, one point. Placing is the whole interaction: there is no
+// arm-then-drag, because on a phone in a field the gesture you can rely on is
+// a tap.
 function placeAt(latlng) {
-  if (state.mode === 'capture' && site.capture().length >= MAX_CAPTURE_POINTS) {
-    toast(`That is ${MAX_CAPTURE_POINTS} capture points — enough to describe anything this app can fly.`);
+  if (site.capture().length >= MAX_CAPTURE_POINTS) {
+    toast(`That is ${MAX_CAPTURE_POINTS} points — enough to describe anything this app can fly.`);
     return;
   }
-  const added = MODES[state.mode].add({ lat: latlng.lat, lon: latlng.lng });
-  if (added) state.selected = { kind: state.mode, id: added.id };
+  const added = site.addCapture({ lat: latlng.lat, lon: latlng.lng });
+  if (added) state.selected = { id: added.id };
   renderPointBar();
 }
 
@@ -698,63 +646,9 @@ async function loadWires() {
   }
 }
 
-// Outlines are kept and restyled, never rebuilt -- the same rule as the markers
-// below, learned the same way. Clearing the layer and drawing every outline
-// again is the simple version, and with a city block imported it is a hundred
-// and fifty polygons of thirty points each thrown away and remade on every
-// slider tick, which is most of what a replan costs. A record is replaced
-// wholesale whenever it changes, so its own identity says when the shape has to
-// be redrawn and when only the colour has moved.
-const obsShapes = new Map();   // obstacle id -> { shape, from, style }
-
 function renderPoints() {
-  const struck = new Set((state.hazard?.obstacles ?? [])
-    .filter((o) => o.grade !== 'clear').map((o) => o.id));
-
   const wanted = new Set();
-  const drawn = new Set();
-  for (const o of site.obstacles()) {
-    const grade = struck.has(o.id)
-      ? (state.hazard.obstacles.find((x) => x.id === o.id)?.grade ?? 'clear') : 'clear';
-    // A span is drawn as the line it is. Its boxes are still the geometry the
-    // collision check uses, but giving each one a draggable numbered dot buries
-    // the line under its own footprint and invites you to nudge a piece of a
-    // power cable, which is not a thing you can do.
-    const isWire = labelOf(o).endsWith(' (bdot)');
-    const style = {
-      color: OBSTACLE_COLOR[grade], weight: 1,
-      fillOpacity: isWire && grade === 'clear' ? 0 : 0.12,
-      opacity: isWire && grade === 'clear' ? 0 : 1,
-    };
-    // The outline the thing actually has, when the source knew it. A tapped
-    // obstacle's outline IS its rectangle, so this is one call for both.
-    drawn.add(o.id);
-    let kept = obsShapes.get(o.id);
-    if (!kept) {
-      const shape = L.polygon(ringLatLon(o).map((v) => [v.lat, v.lon]),
-        { ...style, interactive: false }).addTo(layers.obsBoxes);
-      obsShapes.set(o.id, { shape, from: o, style });
-    } else {
-      if (kept.from !== o) {
-        kept.shape.setLatLngs(ringLatLon(o).map((v) => [v.lat, v.lon]));
-        kept.from = o;
-      }
-      if (kept.style.color !== style.color || kept.style.opacity !== style.opacity
-          || kept.style.fillOpacity !== style.fillOpacity) {
-        kept.shape.setStyle(style);
-        kept.style = style;
-      }
-    }
-    if (isWire && grade === 'clear') continue;
-    wanted.add(syncPoint('obstacle', o.id, pointOf(o), o.height, grade !== 'clear'));
-  }
   for (const p of site.capture()) wanted.add(syncPoint('capture', p.id, p, p.height, false));
-
-  for (const [id, kept] of obsShapes) {
-    if (drawn.has(id)) continue;
-    layers.obsBoxes.removeLayer(kept.shape);
-    obsShapes.delete(id);
-  }
 
   for (const [key, m] of pointMarkers) {
     if (wanted.has(key)) continue;
@@ -809,16 +703,14 @@ function syncPoint(kind, id, at, height, bad) {
       iconSize: [size, size],
       iconAnchor: [size / 2, size / 2],
     }),
-    // Both kinds drag. You place them by eye against a photograph, and being
-    // able to nudge one is the difference between a tap being a commitment and
-    // a tap being a first guess. There was no reason for an obstacle to be the
-    // exception beyond nobody having written the move.
+    // They drag. You place them by eye against a photograph, and being able to
+    // nudge one is the difference between a tap being a commitment and a tap
+    // being a first guess.
     draggable: true,
   });
   m.on('click', (e) => {
     L.DomEvent.stopPropagation(e);
-    if (state.mode !== kind) setMode(kind);
-    state.selected = { kind, id };
+    state.selected = { id };
     renderPoints();
     renderPointBar();
   });
@@ -826,14 +718,13 @@ function syncPoint(kind, id, at, height, bad) {
   m._ptHtml = html;
   m.on('dragstart', () => {
     draggingKey = key;
-    state.selected = { kind, id };
+    state.selected = { id };
     renderPointBar();
   });
   m.on('dragend', () => {
     draggingKey = null;
     const ll = m.getLatLng();
-    if (kind === 'capture') site.moveCapture(id, ll.lat, ll.lng);
-    else site.moveObstacle(id, ll.lat, ll.lng);
+    site.moveCapture(id, ll.lat, ll.lng);
   });
   pointMarkers.set(key, m);
   return key;
@@ -841,9 +732,9 @@ function syncPoint(kind, id, at, height, bad) {
 
 function selectedPoint() {
   if (!state.selected) return null;
-  const { kind, id } = state.selected;
-  const found = MODES[kind].list().find((x) => x.id === id);
-  return found ? { kind, id, item: found } : null;
+  const { id } = state.selected;
+  const found = site.capture().find((x) => x.id === id);
+  return found ? { id, item: found } : null;
 }
 
 function renderPointBar() {
@@ -853,17 +744,16 @@ function renderPointBar() {
   // Here up out of the way rather than letting them stack.
   $('stage').classList.toggle('editing', Boolean(sel));
   if (!sel) return;
-  const list = MODES[sel.kind].list();
-  $('pointDot').className = `pdot ${sel.kind}`;
-  $('pointName').textContent = `${sel.kind === 'capture' ? 'Capture' : 'Obstacle'} `
-    + `${list.findIndex((x) => x.id === sel.id) + 1} of ${list.length}`;
+  const list = site.capture();
+  $('pointDot').className = 'pdot capture';
+  $('pointName').textContent = `Point ${list.findIndex((x) => x.id === sel.id) + 1} of ${list.length}`;
   if (document.activeElement !== $('pHeight')) $('pHeight').value = String(sel.item.height);
 }
 
 function nudgeHeight(by) {
   const sel = selectedPoint();
   if (!sel) return;
-  MODES[sel.kind].setHeight(sel.id, Math.max(0, Math.round((sel.item.height + by) * 10) / 10));
+  site.setCaptureHeight(sel.id, Math.max(0, Math.round((sel.item.height + by) * 10) / 10));
   renderPointBar();
 }
 $('pUp').addEventListener('click', () => nudgeHeight(1));
@@ -873,19 +763,18 @@ $('pHeight').addEventListener('change', () => {
   const h = parseHeight($('pHeight').value);
   if (!sel) return;
   if (h === null) { $('pHeight').value = String(sel.item.height); return; }
-  MODES[sel.kind].setHeight(sel.id, h);
+  site.setCaptureHeight(sel.id, h);
 });
 $('pDelete').addEventListener('click', () => {
   const sel = selectedPoint();
   if (!sel) return;
-  MODES[sel.kind].remove(sel.id);
+  site.removeCapture(sel.id);
   state.selected = null;
   renderPointBar();
 });
 $('clearMode').addEventListener('click', () => {
-  const m = MODES[state.mode];
-  if (!m.list().length) { toast(`No ${m.label}s to clear.`); return; }
-  m.clear();
+  if (!site.capture().length) { toast('No points to clear.'); return; }
+  site.clearCapture();
   state.selected = null;
   renderPointBar();
 });
@@ -911,7 +800,7 @@ function settleSoon() {
     readTerrain();
     // Convex pieces, not whole solids: what blocks a camera is worked out by
     // clipping a ray against a convex thing, and an L is not one.
-    const boxes = nearbyObstacles().flatMap((o) => localPrisms(o, state.mission.frame));
+    const boxes = wireHazards().flatMap((o) => localPrisms(o, state.mission.frame));
     state.coverage = scoreCoverage(state.mission, { maxCameras: 220, boxes });
     // Tagged so a later replan can tell whether this score is still about the
     // flight on screen, rather than leaving yesterday's number sitting there.
@@ -972,185 +861,6 @@ function autoFit() {
 }
 $('refit').addEventListener('click', () => { tuned = false; autoFit(); toast('Re-fitted to the site.'); });
 
-// What is already standing here, from OpenStreetMap: buildings, trees and --
-// the ones you cannot see from above and that actually bring an aircraft down
-// -- power lines. See js/osm.js for what it knows and what it is guessing.
-//
-// This is obstacle mode's button over the map, and it asks about the view. It
-// used to be a line in Advanced, next to a button that placed one obstacle at
-// the phone's position: the wrong two shapes round the wrong way, because the
-// gesture that fills a site in with what is standing on it is the one that
-// needs no receiver, and it belongs where the map is.
-let importing = false;
-async function importHere() {
-  const btn = $('hereBtn');
-  if (importing) return;
-  importing = true;
-  btn.disabled = true;
-  btn.textContent = 'Asking OpenStreetMap…';
-  try {
-    const { fetchAround } = await import('./osm.js');
-    const b = map.getBounds();
-    const raw = await fetchAround({
-      north: b.getNorth(), south: b.getSouth(), east: b.getEast(), west: b.getWest(),
-    });
-    if (!raw.length) { toast('Nothing mapped in this view.'); return; }
-
-    // OpenStreetMap says where things are; it very often does not say how tall.
-    // If the heights service is reachable it says how tall, from the national
-    // LiDAR. If it is not, or has no survey here, the estimates stand and the
-    // import behaves exactly as it did before this existed.
-    const { measure } = await import('./heights.js');
-    btn.textContent = 'Measuring heights…';
-    const { obstacles: found, measured, blanked } = await measure(raw, {
-      // Measured 152 s for one cold tile (Krakow, 2026-09-09). "About a minute"
-      // was wrong by two and a half times, and the wait is per tile.
-      onWait: () => toast('First visit here — downloading the survey. A few minutes; the estimates stand until it lands.'),
-      onProgress: (done, total) => { btn.textContent = `Measuring heights… ${done}/${total}`; },
-    });
-
-    // And the wires. OpenStreetMap has the pylons and hardly any of the
-    // distribution; BDOT10k has the lot, nationally, which is the difference
-    // between knowing about the 400 V run across a field and not.
-    const { fetchLines } = await import('./lines.js');
-    btn.textContent = 'Looking for overhead lines…';
-    const wires = await fetchLines(
-      { north: b.getNorth(), south: b.getSouth(), east: b.getEast(), west: b.getWest() },
-      { onProgress: (d, t) => { btn.textContent = `Overhead lines… ${d}/${t}`; } },
-    );
-
-    // The wires are their own layer with their own switch now, so an import
-    // that happens to fetch them hands them over rather than drawing them.
-    const seen = new Set(wirePaths.map((w) => JSON.stringify(w.path)));
-    wirePaths = [...wirePaths, ...wires.paths.filter((w) => !seen.has(JSON.stringify(w.path)))];
-    rememberWires();
-    drawWires();
-    const all = [...found, ...wires.obstacles];
-    const guessed = found.filter((f) => f.assumed).length;
-    site.addImported(all);
-    history.commit();
-    const parts = [`${all.length} added`];
-    if (measured) parts.push(`${measured} measured`);
-    if (wires.lines) parts.push(`${wires.lines} overhead line${wires.lines === 1 ? '' : 's'}`);
-    if (guessed) parts.push(`${guessed} still assumed`);
-    if (blanked) parts.push(`${blanked} over water or unsurveyed`);
-    toast(`${parts.join(' — ')}.`);
-  } catch (e) {
-    toast(`Import failed — ${e.message}`);
-  } finally {
-    importing = false;
-    btn.disabled = false;
-    // Whichever mode is in front now: a long import outlives a mode switch.
-    btn.textContent = MODES[state.mode].here;
-  }
-}
-
-// Planning around the ground rather than around a list.
-//
-// The obstacle list only ever contains what somebody mapped. The survey raster
-// contains what is actually standing -- the line of poplars along the field
-// edge, the pole, the crane -- at one measured byte per square metre. So this
-// asks it what the tallest thing under the whole flight is, which is the only
-// number that decides whether one barometric altitude is safe.
-//
-// On demand rather than on every replan: the first tile under a new site is a
-// couple of minutes and hundreds of megabytes, and spending that because
-// somebody nudged a slider would be rude to a public agency and to the user.
-{
-  const btn = $('surveyFit');
-  btn.addEventListener('click', async () => {
-    if (!state.mission) { toast('Draw something to fly first.'); return; }
-    const path = state.mission.exported ?? state.mission.waypoints ?? [];
-    if (!path.length) { toast('Nothing planned yet.'); return; }
-    // The area the aircraft actually crosses, which is what its altitude has
-    // to clear -- not the box you tapped.
-    const bounds = {
-      north: Math.max(...path.map((w) => w.lat)), south: Math.min(...path.map((w) => w.lat)),
-      east: Math.max(...path.map((w) => w.lon)), west: Math.min(...path.map((w) => w.lon)),
-    };
-    btn.disabled = true;
-    const was = btn.textContent;
-    try {
-      const { surveyCeiling } = await import('./heights.js');
-      state.survey = await surveyCeiling(bounds, {
-        onWait: () => toast('First look at this ground — downloading the survey. A few minutes.'),
-        onProgress: (d, n) => { btn.textContent = `Reading the survey… ${d}/${n}`; },
-      });
-      renderAlert(false);
-      const c = state.survey;
-      if (c.height === null) toast(c.reason ? `No survey here: ${c.reason}.` : 'The survey has not answered yet.');
-      else toast(`Tallest thing under this flight: ${c.height} m.`);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = was;
-    }
-  });
-}
-
-// Which service, and is it answering.
-//
-// There are two and they are named in js/service.js, so this offers the names
-// rather than an address to type: `auto` -- a page from this machine talks to a
-// service on this machine -- or either one on purpose. It was a URL you set in
-// localStorage from the console, which is a way to know where you are pointed
-// and not a way to point.
-//
-// The Check button exists because the two failure modes look identical from
-// here: nothing running on this laptop, and a tunnel that is down. One round
-// trip to /v1/health tells them apart, and it is the only request in the app
-// nobody has to make.
-{
-  const say = (text) => { $('serviceHint').textContent = text; };
-  const describe = () => {
-    say(`Talking to ${serviceUrl()}. Heights, overhead lines, the 3D model and`
-      + ' syncing your plans all go there.');
-  };
-  describe();
-
-  $('servicePing').addEventListener('click', async () => {
-    const url = serviceUrl();
-    $('servicePing').disabled = true;
-    say(`Asking ${url}…`);
-    try {
-      const res = await fetch(`${url}/v1/health`, { headers: serviceHeaders() });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) { say(`${url} answered ${res.status}.`); return; }
-      const busy = (body.building ?? 0) + (body.queued ?? 0);
-      say(`${url} is answering${busy ? `, building ${busy} tile${busy === 1 ? '' : 's'}` : ''}.`
-        + ` Survey grid ${body.tileMetres ?? '?'} m.`);
-    } catch (e) {
-      // A local service that is not running and a tunnel that is down both
-      // land here, which is why the address is in the message.
-      say(`${url} did not answer — ${e.message}.`);
-    } finally {
-      $('servicePing').disabled = false;
-    }
-  });
-}
-
-// The rough model, for looking at rather than planning with. The service
-// builds it from the same survey the heights come from and serves the viewer
-// itself, so this is a link and nothing more -- no state, no effect on the
-// plan. There is always a service now, so there is nothing to hide it behind.
-{
-  $('scene3d').addEventListener('click', () => {
-    const c = map.getCenter();
-    // The centre of the map, not the site: the model is a 500 m square of
-    // ground and you aim it by looking at where you are aiming.
-    window.open(`${serviceUrl()}/scene?lat=${c.lat.toFixed(6)}&lon=${c.lng.toFixed(6)}`,
-      '_blank', 'noopener');
-  });
-}
-
-$('clearOsm').addEventListener('click', () => {
-  wirePaths = [];
-  rememberWires();
-  drawWires();
-  const gone = site.clearImported();
-  history.commit();
-  toast(gone ? `Removed ${gone} imported obstacle${gone === 1 ? '' : 's'}.` : 'Nothing imported to remove.');
-});
-
 // The footprint, without planning anything. This is what the map draws while
 // you tap, and what the readout can say for free.
 function measure() {
@@ -1186,7 +896,7 @@ function computePlan() {
 
   const p = paramsFromUi(uiValues());
   p.subjectClearance = clearance();
-  const boxes0 = nearbyObstacles();
+  const hazards = wireHazards();
 
   try {
     state.mission = planMission(siteForPlanner(), p, cam);
@@ -1199,8 +909,8 @@ function computePlan() {
   // Two shapes of the same obstacles, for two jobs. The maths wants convex
   // pieces, because that is what makes the distance search exact; the eye wants
   // one solid per thing, because that is what a building is. See js/prism.js.
-  const prisms = boxes0.flatMap((o) => localPrisms(o, state.mission.frame));
-  const solids = boxes0.map((o) => localSolid(o, state.mission.frame));
+  const prisms = hazards.flatMap((o) => localPrisms(o, state.mission.frame));
+
   // Last score stays on screen only if it belongs to this many waypoints;
   // otherwise the tile says so until the new one lands.
   if (state.coverage?.forWaypoints !== state.mission.stats.waypoints) state.coverage = null;
@@ -1221,7 +931,9 @@ function computePlan() {
   renderIdentity();
   if (state.onDevice) showDeviceRoute(null);
   view3d.setMission(state.mission, state.coverage);
-  view3d.setObstacles(graded(solids), state.hazard.legs);
+  // Nothing solid to draw here any more, but the legs the check flagged are
+  // still worth seeing over the flight.
+  view3d.setObstacles([], state.hazard.legs);
   // Whichever surface is up gets the same flight. The survey view rebuilds the
   // path on every replan and the ground only when the frame moves.
   lidar?.setMission(state.mission, state.hazard);
@@ -1257,17 +969,11 @@ function setShowRoute(on) {
 }
 $('routeToggle').addEventListener('click', () => setShowRoute(!showRoute));
 
-const graded = (boxes) => boxes.map((b) => ({
-  ...b,
-  grade: state.hazard?.obstacles.find((o) => o.id === b.id)?.grade ?? 'clear',
-  selected: state.selected?.kind === 'obstacle' && state.selected.id === b.id,
-}));
-
 function renderConflicts() {
   layers.conflicts.clearLayers();
   for (const leg of state.hazard?.legs ?? []) {
     L.polyline([[leg.a.lat, leg.a.lon], [leg.b.lat, leg.b.lon]], {
-      color: OBSTACLE_COLOR[leg.grade], weight: 4, opacity: 0.9, interactive: false,
+      color: LEG_COLOR[leg.grade], weight: 4, opacity: 0.9, interactive: false,
     }).addTo(layers.conflicts);
   }
 }
@@ -1344,7 +1050,10 @@ function renderAlert(over) {
   const raiseTo = (m) => { if (Number.isFinite(m) && m > +$('altitude').value) raises.push(Math.ceil(m)); };
 
   const h = state.hazard;
-  if (h?.strikes) say('strike', `The flight hits ${h.strikes} obstacle${h.strikes === 1 ? '' : 's'}.`);
+  if (h?.strikes) {
+    say('strike', h.strikes === 1 ? 'The flight goes through an overhead line.'
+      : `The flight goes through ${h.strikes} overhead lines.`);
+  }
   else if (h?.near) {
     say('near', h.near === 1 ? 'One leg passes closer than your clearance.'
       : `${h.near} legs pass closer than your clearance.`);
@@ -1403,10 +1112,9 @@ function renderAlert(over) {
       + 'this flight, so nothing here is measured yet.');
   }
 
-  const guessed = nearbyObstacles().filter(isEstimated).length;
-  if (guessed) {
-    say('assumed', `${guessed} obstacle${guessed === 1 ? ' has an' : 's have'} assumed `
-      + `height${guessed === 1 ? '' : 's'} — check anything the flight passes close to.`);
+  if (wiresOn && wirePaths.length) {
+    say('assumed', 'Wire heights are the ones their voltage implies, never measured — '
+      + 'check anything the flight passes close to.');
   }
 
   if (over) {
@@ -1543,10 +1251,7 @@ function showDeviceRoute(src) {
   state.onDevice = !src ? null : src.kind === 'device' ? routeFromRead(src.read, cam) : src.mission;
   if (!state.onDevice) {
     view3d.setMission(state.mission, state.coverage);
-    view3d.setObstacles(
-      state.mission ? graded(nearbyObstacles().map((o) => localSolid(o, state.mission.frame))) : [],
-      state.hazard?.legs ?? [],
-    );
+    view3d.setObstacles([], state.hazard?.legs ?? []);
     return;
   }
   renderPath(state.onDevice, { groups: DEVICE_GROUPS(), dashed: true });
@@ -1554,7 +1259,7 @@ function showDeviceRoute(src) {
   // Ungraded: every grade on screen belongs to the plan, and colouring someone
   // else's route with the plan's verdict would be a lie in the most expensive
   // possible place.
-  view3d.setObstacles(nearbyObstacles().map((o) => localSolid(o, state.onDevice.frame)), []);
+  view3d.setObstacles([], []);
   map.fitBounds(L.latLngBounds(state.onDevice.waypoints.map((w) => [w.lat, w.lon])),
     { padding: [40, 40], maxZoom: 21 });
 }
@@ -1751,7 +1456,6 @@ $('wiresBtn').addEventListener('click', async () => {
 // a point where the phone said you were standing; it is gone, and with it the
 // live accuracy readout, whose whole job was telling you whether that button
 // was about to refuse your fix.
-$('hereBtn').addEventListener('click', () => importHere());
 
 /* ---------- the controller ---------- */
 const bridge = initInstall({
@@ -1776,15 +1480,13 @@ const dirty = () => Boolean(planCode()) && planCode() !== session.code;
 // the band is a third of a phone screen, and a sentence you have already read
 // is the first thing that should give its rows back to the map.
 function showTip() {
-  $('tip').hidden = MODES[state.mode].list().length > 0;
+  $('tip').hidden = site.capture().length > 0;
 }
 
 function renderIdentity() {
   showTip();
   $('planTitle').textContent = session.name ?? 'New plan';
   $('planTitle').classList.toggle('dirty', dirty());
-  $('nCapture').textContent = String(site.capture().length);
-  $('nObstacle').textContent = String(site.obstacles().length);
 }
 
 function applyPlan(plan) {
@@ -1853,28 +1555,20 @@ function describeSite() {
 const history = createHistory({
   snapshot: () => ({
     capture: site.capture().map((p) => ({ ...p })),
-    obstacles: site.obstacles().map((o) => ({ ...o })),
     ui: uiValues(),
   }),
   restore: (snap) => {
     applyUiValues(snap.ui);
     site.setCapture(snap.capture);
-    site.restoreObstacles(snap.obstacles);
     state.selected = null;
     renderPoints();
     renderPointBar();
     computePlan();
     renderIdentity();
   },
-  // A box that arrived from the other device belongs in every snapshot on the
-  // stack, or undoing past its arrival would delete it.
-  rebase: (snap, before, after) => {
-    const had = new Set(before.obstacles.map((o) => o.id));
-    const arrived = after.obstacles.filter((o) => !had.has(o.id));
-    if (!arrived.length) return snap;
-    const ids = new Set(snap.obstacles.map((o) => o.id));
-    return { ...snap, obstacles: [...snap.obstacles, ...arrived.filter((o) => !ids.has(o.id))] };
-  },
+  // Nothing arrives from anywhere else any more -- the obstacle list was the
+  // only synced thing -- so a snapshot is only ever what this device did, and
+  // there is nothing to rebase it against.
 });
 
 function stepHistory(back) {
@@ -1927,7 +1621,6 @@ $('clearance').addEventListener('change', () => {
 // A button, not a checkbox: it belongs over the 3D view it paints, not in a
 // sheet you have to go and open.
 
-$('syncNow').addEventListener('click', () => site.sync().then(renderIdentity));
 
 /* ---------- startup ---------- */
 applyUiValues({
@@ -1955,7 +1648,6 @@ const urlNamedAPlace = opened.has('c');
 
 ready = true;
 readUrl();
-setMode('capture');
 setShowRoute(showRoute);
 setView(activeView);   // put the map's own controls where this view wants them
 if (fromHash) applyPlan(fromHash);
@@ -1964,8 +1656,7 @@ drawWires();
 renderPoints();
 renderReadout();
 renderIdentity();
-site.start();        // what the other device drew is part of this plan's world
-history.refresh();   // and it must be in the stack's idea of now before any undo
+history.refresh();
 pushGround();
 urlFrozen = false;
 writeUrl();

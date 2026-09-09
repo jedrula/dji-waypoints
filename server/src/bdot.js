@@ -20,7 +20,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { unzip } from '../../js/kmzread.js';
-import { ASSUMED } from '../../js/osm.js';
+import { ASSUMED } from '../../js/lines.js';
 import { TILE_M } from './ndsm.js';
 import { clipSegment } from '../../js/shape.js';
 

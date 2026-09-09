@@ -346,3 +346,9 @@ export function rayClipsSolid(b, px, py, pz, dx, dy, dz, tMax) {
   // where it starts. A leg is tens of metres, so this is under a millimetre.
   return t1 > 1e-4;
 }
+
+// Do two lat/lon rectangles overlap? Exclusive at the edges, so two boxes that
+// merely touch are not "near" each other. It lived in js/obstacles.js, which
+// went with the obstacles.
+export const overlaps = (a, b) =>
+  a.west < b.east && a.east > b.west && a.south < b.north && a.north > b.south;

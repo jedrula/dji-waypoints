@@ -14,7 +14,6 @@
   --warn: #ff8f6b;
   --ok: #5ad19a;
   --capture: #4da3ff;
-  --obstacle: #ffb84d;
   --pad: 14px;
   --bar: 30dvh;
 }
@@ -63,19 +62,6 @@ body {
        border: 1px solid var(--line); border-radius: 999px; padding: 0 5px; }
 .tag.ok { color: var(--ok); border-color: transparent; font-size: 13px; padding: 0; }
 
-/* What a tap means. Two buttons, because there are two questions, and the one
-   that is lit is the one the map is answering. */
-.modes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.modes button { display: flex; align-items: center; justify-content: center; gap: 7px;
-                padding: 10px 8px; background: var(--panel2); color: var(--dim);
-                border: 1px solid var(--line); }
-.modes button b { font-weight: 600; font-size: 13.5px; }
-.modes button .n { font-variant-numeric: tabular-nums; font-size: 11.5px;
-                   border-radius: 999px; padding: 1px 7px; background: rgba(255,255,255,0.06); }
-.modes button[data-mode=capture].on { border-color: var(--capture); color: var(--text);
-                                      box-shadow: inset 0 -2px 0 var(--capture); }
-.modes button[data-mode=obstacle].on { border-color: var(--obstacle); color: var(--text);
-                                       box-shadow: inset 0 -2px 0 var(--obstacle); }
 .tip { margin: 0; color: var(--dim); font-size: 12px; }
 .tip[hidden] { display: none; }
 
@@ -169,7 +155,6 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
       border-radius: 50%; border: 2px solid #04101d; color: #04101d;
       font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .pt.capture { background: var(--capture); }
-.pt.obstacle { background: var(--obstacle); }
 .pt.on { outline: 2px solid #fff; outline-offset: 1px; }
 .pt.strike { background: #ff5d5d; color: #fff; }
 .gpsdot { background: var(--capture); border: 2px solid #fff; border-radius: 50%;
@@ -194,15 +179,13 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 #stage.split.tight #basetabs { display: none; }
 /* Everything that belongs to the map stays over the map. `--split` is a
    percentage, so half of it is the middle of the map's half. */
-#stage.split .here, #stage.split #mocknote, #stage.split #toast { left: calc(var(--split) / 2); }
+#stage.split #stage.split #mocknote, #stage.split #toast { left: calc(var(--split) / 2); }
 #stage.split .pointbar { right: calc(100% - var(--split) + 10px); }
 @media (max-width: 720px) {
   /* Stacked, so the map's half is the top one and the horizontal centre is
      unchanged -- it is the vertical position that has to come up. */
-  #stage.split .here, #stage.split #mocknote, #stage.split #toast { left: 50%; }
+  #stage.split #stage.split #mocknote, #stage.split #toast { left: 50%; }
   #stage.split .pointbar { right: 10px; bottom: calc(100% - var(--split) + 10px); }
-  #stage.split .here { bottom: calc(100% - var(--split) + 10px); }
-  #stage.split.editing .here { bottom: calc(100% - var(--split) + 62px); }
 }
 
 /* A wide invisible grab strip over a hairline: easy to hit with a mouse
@@ -293,15 +276,7 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 
 /* Standing next to the thing rather than looking at it on a map: one big
    target that puts a point where you are, not where you tapped. */
-.here { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 520;
-        transition: bottom 0.12s ease;
-        padding: 12px 22px; font-size: 14.5px; font-weight: 650; white-space: nowrap;
-        max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis;
-        background: var(--accent); border-color: var(--accent); color: #04101d; }
-.here[hidden] { display: none; }
-#stage.editing .here { bottom: 70px; }
 #stage.editing #toast { bottom: 124px; }
-.here.obstacle { background: var(--obstacle); border-color: var(--obstacle); }
 
 /* The point you last touched, over the map because the point is on the map. */
 .pointbar { position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 530;
@@ -310,7 +285,6 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
             border-radius: 11px; padding: 8px 10px; }
 .pointbar[hidden] { display: none; }
 .pdot { width: 11px; height: 11px; border-radius: 50%; flex: none; background: var(--capture); }
-.pdot.obstacle { background: var(--obstacle); }
 .pname { font-size: 12.5px; color: var(--dim); flex: 1; min-width: 0;
          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pheight { display: flex; align-items: center; gap: 4px; flex: none; }

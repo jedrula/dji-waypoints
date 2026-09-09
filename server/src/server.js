@@ -436,6 +436,12 @@ const server = http.createServer(async (req, res) => {
           sceneFailed.delete(`${tn}_${te}`);
           return send(res, 404, { error: failed }, origin);
         }
+        // `?peek=1` asks whether a tile is ready WITHOUT committing anyone to
+        // building it. Asking normally costs ~223 MB of LiDAR pulled from a
+        // public agency and minutes of CPU, so a caller that only wants a tile
+        // if it happens to exist -- the survey view filling in the ground
+        // AROUND a flight -- needs a way to ask that is free.
+        if (q.get('peek') === '1') return send(res, 404, { status: 'not built', tile: { tn, te } }, origin);
         requestScene(tn, te).catch(() => {});
         return send(res, 202, { status: 'building', tile: { tn, te } }, origin, { 'Retry-After': '15' });
       }

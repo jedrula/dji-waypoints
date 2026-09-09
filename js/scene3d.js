@@ -717,7 +717,10 @@ export function createScene3D(canvas) {
     const wantR0 = Math.floor((n0 + meta.tileMetres - (nMax + MARGIN_M)) / cell);
     const wantR1 = Math.ceil((n0 + meta.tileMetres - (nMin - MARGIN_M)) / cell);
     loaded.clipped = wantC0 < 0 || wantR0 < 0 || wantC1 > N - 1 || wantR1 > N - 1;
-    loaded.missing = (meta.wanted ?? 1) - (meta.tiles?.length ?? 1);
+    // Ground that is simply not surveyed here yet, as opposed to ground this
+    // view declined to commission -- see loadFor. The first is worth saying;
+    // the second is the normal state of the neighbourhood.
+    loaded.missing = (meta.wanted ?? 1) - (meta.tiles?.length ?? 1) - (meta.unbuilt ?? 0);
 
     loaded.datum = datum;
     // The inverse of toLocal, for turning where the camera is looking back
@@ -1034,28 +1037,57 @@ export function createScene3D(canvas) {
     const teB = Math.floor((e0 + side - 0.001) / TILE);
     const tnA = Math.floor(n0 / TILE);
     const tnB = Math.floor((n0 + side - 0.001) / TILE);
-    const want = [];
-    for (let tn = tnA; tn <= tnB; tn++) {
-      for (let te = teA; te <= teB; te++) want.push({ tn, te });
-    }
+    // WHICH TILES MAY COST SOMETHING, and this distinction is the whole reason
+    // browsing around cannot quietly pull gigabytes.
+    //
+    // A cold tile is ~223 MB of LiDAR fetched from GUGiK and minutes of CPU. So
+    // the margin -- which is context, there to stop the view being a patch of
+    // ground with no neighbourhood -- is never allowed to commission one. Only
+    // the ground the AIRCRAFT ACTUALLY CROSSES is worth that, because the
+    // clearance depends on it.
+    //
+    // Without the split, a 30 m site dropped near a tile corner spans 430 m
+    // with the margin and touches four tiles: ~892 MB, unasked, for one view.
+    // A 200 m site reaches nine, which is 2 GB. With it, the same site
+    // commissions the one or two tiles it is flown over and takes the rest only
+    // if they happen to be built already.
+    const inTiles = (a0, a1, b0, b1) => {
+      const out = [];
+      for (let tn = Math.floor(b0 / TILE); tn <= Math.floor((b1 - 0.001) / TILE); tn++) {
+        for (let te = Math.floor(a0 / TILE); te <= Math.floor((a1 - 0.001) / TILE); te++) {
+          out.push({ tn, te });
+        }
+      }
+      return out;
+    };
+    // The flight's own footprint, with a few metres of slack so a waypoint on a
+    // boundary does not depend on rounding.
+    const flown = inTiles(eMin - 5, eMax + 5, nMin - 5, nMax + 5);
+    const isFlown = (t) => flown.some((f) => f.tn === t.tn && f.te === t.te);
+    const want = inTiles(e0, e0 + side, n0, n0 + side);
     const key = `${cells}|${e0}|${n0}|${want.map((t) => `${t.tn}/${t.te}`).join(',')}`;
     if (loaded && loaded.key === key) return loaded;
 
-    // Every tile is asked for, and a tile nobody has built yet gets built --
-    // which is minutes and a couple of hundred megabytes of LiDAR from GUGiK,
-    // so the status says which one and how many are left rather than sitting
-    // silent. A tile that fails is skipped: better a surface with a hole in it,
-    // marked as unmeasured, than no surface at all.
+    // Flown tiles first, so the ground under the aircraft is there even if a
+    // context tile is slow. A tile that fails is skipped: better a surface with
+    // a hole in it, marked as unmeasured, than no surface at all.
+    const order = [...want].sort((a, b) => Number(isFlown(b)) - Number(isFlown(a)));
+    const building = order.filter(isFlown).length;
     const parts = [];
-    for (let i = 0; i < want.length; i++) {
-      const t = want[i];
-      const which = want.length > 1 ? ` (${i + 1} of ${want.length})` : '';
+    let skipped = 0;
+    for (let i = 0; i < order.length; i++) {
+      const t = order[i];
+      const flownOne = isFlown(t);
+      const which = building > 1 && flownOne ? ` (${i + 1} of ${building})` : '';
       onStatus(`Asking for the survey${which}…`);
       try {
-        const metaRes = await poll(`/v1/scene/${t.tn}/${t.te}.json`, {
+        // `peek=1` for context: it answers 404 for a tile nobody has built and
+        // does not start building it.
+        const metaRes = await poll(`/v1/scene/${t.tn}/${t.te}.json${flownOne ? '' : '?peek=1'}`, {
           signal,
           onWait: () => onStatus(
-            `First look at this ground${which} — building it from the LiDAR. A few minutes.`,
+            `First look at this ground${which} — building it from the LiDAR. `
+            + 'A few minutes and a few hundred megabytes.',
           ),
         });
         const m = await metaRes.json();
@@ -1071,7 +1103,10 @@ export function createScene3D(canvas) {
         });
       } catch (e) {
         if (signal?.aborted) throw e;
-        console.warn(`tile ${t.tn}/${t.te} could not be loaded:`, e);
+        // A context tile that is simply not built yet is the expected case, not
+        // a failure: it is the reason `peek` exists.
+        if (isFlown(t)) console.warn(`tile ${t.tn}/${t.te} could not be loaded:`, e);
+        else skipped++;
       }
     }
     if (!parts.length) throw new Error('no LiDAR here');
@@ -1093,6 +1128,10 @@ export function createScene3D(canvas) {
       // and the status can say how wide the picture really is.
       tiles: parts.map((q) => q.t),
       wanted: want.length,
+      // Context tiles nobody has built. Not an error, and not something to fix
+      // by building them: they are neighbourhood, and the aircraft is not
+      // going there.
+      unbuilt: skipped,
     };
     const next = {
       key,
@@ -1260,6 +1299,11 @@ export function createScene3D(canvas) {
           + (loaded.missing
             ? ` ${loaded.missing} tile${loaded.missing === 1 ? '' : 's'} would not build, so there `
               + `${loaded.missing === 1 ? 'is a hole' : 'are holes'} in it.`
+            : '')
+          + (loaded.meta.unbuilt
+            ? ` The ground around it is not surveyed yet — ${loaded.meta.unbuilt} `
+              + `neighbouring tile${loaded.meta.unbuilt === 1 ? '' : 's'}, not fetched, `
+              + 'because your flight does not go there.'
             : '')
           + (loaded.clipped
             ? ' The site is bigger than this view will stitch — what you see stops there.'

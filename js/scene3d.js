@@ -149,30 +149,89 @@ export function createScene3D(canvas) {
     // first time the view was ever opened.
     controls.enableDamping = false;
     controls.addEventListener('change', () => render());
-    // The service's own viewer shades the same surface as
+    // No lights. The surface shades itself -- see surfaceMaterial() -- and
+    // everything else in this scene is lines and points, which are unlit.
     //
-    //     lambert = 0.42 + 0.58 * max(dot(normal, SUN), 0)
-    //
-    // applied straight to the orthophoto -- see the fragment shader in
-    // server/public/scene.html. A wall therefore never falls below 0.42 of the
-    // photo, and nothing ever exceeds it. That is the right model for a drape:
-    // the photo is a photograph taken in sunlight and already has the sun in
-    // it, so the shading is only there to give the relief an edge.
-    //
-    // three.js lights physically -- what leaves a diffuse surface is
-    // albedo * irradiance / PI -- so multiplying both terms by PI reproduces
-    // that expression exactly, with no shader of our own.
-    //
-    // A HemisphereLight was tried here and is what made this view so much
-    // worse than the viewer on a dense street: its fill is keyed to how far a
-    // normal points at the sky, so every facade collapsed towards the
-    // ground-bounce colour, and in a city block seen from a low camera almost
-    // everything you look at IS a facade. Flat ambient is the honest one,
-    // because a drape has no more information about a wall than a floor.
-    const sun = new THREE.DirectionalLight(0xffffff, Math.PI * 0.58);
-    // The viewer's SUN, in the same frame: x east, y up, z south.
-    sun.position.set(0.45, 0.8, 0.35);
-    scene.add(sun, new THREE.AmbientLight(0xffffff, Math.PI * 0.42));
+    // A HemisphereLight used to be here and it is what made this view so much
+    // worse than the service's own viewer on a dense street: its fill is keyed
+    // to how far a normal points at the sky, so every facade collapsed towards
+    // the ground-bounce colour, and in a city block seen from a low camera
+    // almost everything you look at IS a facade.
+  }
+
+  // The surface's own shader, which is the service viewer's fragment shader
+  // ported: see server/public/scene.html. The two draw the same tile from the
+  // same bytes and they should not disagree about what it looks like, so the
+  // rules here are its rules and the constants here are its constants.
+  //
+  // Why not a stock material. Three of the four things this does are per
+  // FRAGMENT -- how much of this face is vertical, was anything measured here,
+  // and shade a photograph that already contains its own sunlight. A
+  // MeshLambertMaterial can do the last one (ambient PI*0.42 plus a
+  // directional PI*0.58 reproduces the expression below exactly), but the
+  // other two need to blend inside a triangle, and the version of this that
+  // tried to do it by splitting the mesh into two materials painted 40% of its
+  // brown onto surfaces that were not walls at all.
+  //
+  // It also puts the lighting where you can read it. There are no lights in
+  // this scene now: everything else drawn here is lines and points, which are
+  // unlit, so the surface carrying its own one-line shading rule is the whole
+  // of it.
+  function surfaceMaterial() {
+    return new THREE.ShaderMaterial({
+      uniforms: {
+        uOrtho: { value: loaded.ortho ?? null },
+        uHasOrtho: { value: loaded.ortho ? 1 : 0 },
+      },
+      vertexShader: `
+        attribute vec3 color;
+        attribute float aWall;
+        attribute float aKind;
+        varying vec2 vUv;
+        varying vec3 vColor, vNormal2;
+        varying float vWall, vKind;
+        void main() {
+          vUv = uv;
+          vColor = color;
+          vWall = aWall;
+          vKind = aKind;
+          vNormal2 = normalMatrix * normal;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: `
+        uniform sampler2D uOrtho;
+        uniform int uHasOrtho;
+        varying vec2 vUv;
+        varying vec3 vColor, vNormal2;
+        varying float vWall, vKind;
+
+        // The viewer's SUN, in the same frame: x east, y up, z south.
+        const vec3 SUN = normalize(vec3(0.45, 0.8, 0.35));
+
+        void main() {
+          // No photo here means most of the country outside the towns, and
+          // then the classification stands in -- one palette, KIND_COLOUR,
+          // arriving as a vertex colour so it is not written twice.
+          vec3 base = uHasOrtho == 1 ? texture2D(uOrtho, vUv).rgb : vColor;
+
+          // Cells nothing was measured in -- the river, mostly, and 38% of
+          // this tile -- read as a flat sheet, and saying so is better than
+          // pretending the photo is ground truth.
+          if (vKind < 0.5) base = mix(base, vec3(0.26, 0.45, 0.63), 0.22);
+
+          // A wall is a smear: the survey was flown looking straight down, so
+          // a vertical face has no pixels of its own and whatever the photo
+          // puts there is the roof edge stretched down the side. Paint it as
+          // unknown rather than dressing it up.
+          base = mix(base, vec3(0.54, 0.42, 0.29), vWall * 0.88);
+
+          // A photograph taken in sunlight already has the sun in it, so this
+          // only gives the relief an edge: never below 0.42 of the photo,
+          // never above it.
+          float lambert = 0.42 + 0.58 * max(dot(normalize(vNormal2), SUN), 0.0);
+          gl_FragColor = vec4(base * lambert, 1.0);
+        }`,
+    });
   }
 
   // The sky, as a vertical two-stop gradient on a 2 px-wide canvas. Cheaper
@@ -290,35 +349,47 @@ export function createScene3D(canvas) {
     // all over a canopy where there is no flat face and nothing being
     // occluded; and a step between cells nothing was measured in is the
     // hole-filling showing through, which points at the wrong thing entirely.
-    const isWall = (row, col) => {
-      if (kind[row * N + col] !== KIND_BUILDING) return false;
+    //
+    // A smoothstep and not a yes/no, and this is the whole reason the surface
+    // is drawn by a shader of ours instead of a stock three.js material. The
+    // first attempt split the mesh into a photographed group and a brown group
+    // and put a quad in the brown one if ANY of its corners was a wall. That
+    // painted big horizontal slabs of roof and of hole-filled apron, which is
+    // what made the picture worse rather than better -- measured over
+    // Cybulskiego 22, tile 725/724: of 19,333 quads it marked, 40% had less
+    // than the 1.75 m of vertical extent that defines a wall, and 16.7% were
+    // under 0.25 m, which is flat. A per-quad material split cannot do better
+    // than that, because "how much of this face is vertical" is a question
+    // about a fragment and not about a quad.
+    const wallAt = (row, col) => {
+      if (kind[row * N + col] !== KIND_BUILDING) return 0;
       const l = heightAt(row, Math.max(col - 1, 0));
       const r = heightAt(row, Math.min(col + 1, N - 1));
       const u = heightAt(Math.max(row - 1, 0), col);
       const d = heightAt(Math.min(row + 1, N - 1), col);
       // Full-resolution neighbours whatever the decimation, because the step is
       // a property of the ground and not of how coarsely we chose to draw it.
-      return Math.max(Math.abs(r - l), Math.abs(d - u)) * 0.5 >= WALL_STEP_M;
+      const drop = Math.max(Math.abs(r - l), Math.abs(d - u)) * 0.5;
+      // smoothstep(cut * 0.6, cut, drop), the viewer's own ramp.
+      const t = Math.min(Math.max((drop - WALL_STEP_M * 0.6) / (WALL_STEP_M * 0.4), 0), 1);
+      return t * t * (3 - 2 * t);
     };
-    const wallVert = new Uint8Array(cols * rows);
+    const wall = new Float32Array(cols * rows);
+    const kinds = new Float32Array(cols * rows);
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        wallVert[r * cols + c] = isWall(r0 + r * step, c0 + c * step) ? 1 : 0;
+        const row = r0 + r * step;
+        const col = c0 + c * step;
+        wall[r * cols + c] = wallAt(row, col);
+        kinds[r * cols + c] = kind[row * N + col];
       }
     }
 
-    // Two index buffers over one set of vertices: the photographed surface, and
-    // the faces that photograph cannot speak for. A quad goes to the second if
-    // any corner of it is a wall, so a facade is marked whole rather than
-    // dithered.
-    const skin = [];
-    const walls = [];
+    const index = [];
     for (let r = 0; r < rows - 1; r++) {
       for (let c = 0; c < cols - 1; c++) {
         const a = r * cols + c;
-        const to = (wallVert[a] || wallVert[a + 1] || wallVert[a + cols] || wallVert[a + cols + 1])
-          ? walls : skin;
-        to.push(a, a + cols, a + 1, a + 1, a + cols, a + cols + 1);
+        index.push(a, a + cols, a + 1, a + 1, a + cols, a + cols + 1);
       }
     }
 
@@ -326,26 +397,13 @@ export function createScene3D(canvas) {
     geom.setAttribute('position', new THREE.BufferAttribute(verts, 3));
     geom.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
     geom.setAttribute('color', new THREE.BufferAttribute(colours, 3));
-    // Both draws share these vertices and so share one normal per vertex,
-    // which is what makes the marked faces sit flush in the same light.
-    geom.setIndex(skin.concat(walls));
+    geom.setAttribute('aWall', new THREE.BufferAttribute(wall, 1));
+    geom.setAttribute('aKind', new THREE.BufferAttribute(kinds, 1));
+    geom.setIndex(index);
     geom.computeVertexNormals();
-    geom.clearGroups();
-    geom.addGroup(0, skin.length, 0);
-    geom.addGroup(skin.length, walls.length, 1);
 
     if (surfaceMesh) { scene.remove(surfaceMesh); surfaceMesh.geometry.dispose(); }
-    // Lambert, not Standard: the viewer's rule is pure Lambert with no
-    // specular term, and a roughness lobe over a photograph of a roof is
-    // inventing a highlight that nothing measured.
-    const skinMat = new THREE.MeshLambertMaterial({
-      map: loaded.ortho ?? null,
-      vertexColors: !loaded.ortho,
-    });
-    // The viewer's own "building wall (not seen)" brown, so the two pictures
-    // agree about what the colour means as well as where it goes.
-    const wallMat = new THREE.MeshLambertMaterial({ color: 0x8a6a4a });
-    surfaceMesh = new THREE.Mesh(geom, [skinMat, wallMat]);
+    surfaceMesh = new THREE.Mesh(geom, surfaceMaterial());
     scene.add(surfaceMesh);
 
     // Did the crop hit the edge of the tile rather than the margin it asked
@@ -607,7 +665,13 @@ export function createScene3D(canvas) {
         if (jpg.ok) {
           const bitmap = await createImageBitmap(await jpg.blob());
           const tex = new THREE.Texture(bitmap);
-          tex.colorSpace = THREE.SRGBColorSpace;
+          // Sampled raw, NOT as sRGB. Our surface shader writes gl_FragColor
+          // straight out with no encode of its own -- the same as the service
+          // viewer, which is a plain RGBA8 texture and a plain write -- so
+          // asking three.js to decode to linear on sample would leave the
+          // whole picture a stop and a half dark. The one place the two
+          // renderers could have silently disagreed about the same photo.
+          tex.colorSpace = THREE.NoColorSpace;
           tex.needsUpdate = true;
           next.ortho = tex;
         }

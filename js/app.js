@@ -102,7 +102,10 @@ const basemaps = createBasemaps({ map, onChange: () => { pushGround(); writeUrl(
 /* ---------- 3D ---------- */
 const view3d = createView3D($('scene'));
 let activeView = 'map';
-let groundOn = false;
+// Painted by default. It was opt-in while it was the only thing the 3D view
+// could put under a flight and it looked like a debug overlay; a flight over
+// bare grid is the less useful picture of the two.
+let groundOn = true;
 
 function setView(name) {
   activeView = name;
@@ -196,7 +199,7 @@ function writeUrl() {
   const c = map.getCenter();
   q.set('c', `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`);
   q.set('z', String(map.getZoom()));
-  if (groundOn) q.set('g', '1');
+  if (!groundOn) q.set('g', '0');
   for (const k of MOCK_KEYS) if (opened.has(k)) q.set(k, opened.get(k));
   const code = planCode();
   window.history.replaceState(null, '', `?${q}${code ? `#plan=${code}` : ''}`);
@@ -206,7 +209,7 @@ function readUrl() {
   const q = new URLSearchParams(location.search);
   basemaps.set(q.get('b') ?? basemaps.name());
   if (['map', 'split', '3d'].includes(q.get('v'))) setView(q.get('v'));
-  if (q.get('g') === '1') { groundOn = true; pushGround(); }
+  if (q.get('g') === '0') { groundOn = false; pushGround(); }
   const [lat, lon] = (q.get('c') ?? '').split(',').map(Number);
   const zoom = Number(q.get('z'));
   if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180

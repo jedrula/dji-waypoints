@@ -183,7 +183,10 @@ export function createView3D(canvas) {
       if (p.y < area.y0) area.y0 = p.y;
       if (p.y > area.y1) area.y1 = p.y;
     }
-    const margin = Math.max(area.x1 - area.x0, area.y1 - area.y0) * 0.12;
+    // Enough ground that the flight sits IN a place rather than on a platform
+    // the shape of itself. At 12% the plane ended a few metres beyond the
+    // outermost waypoint, which reads as the world running out.
+    const margin = Math.max(area.x1 - area.x0, area.y1 - area.y0) * 0.3;
     area.x0 -= margin; area.x1 += margin;
     area.y0 -= margin; area.y1 += margin;
 
@@ -368,8 +371,12 @@ export function createView3D(canvas) {
     // Never past what the service holds: beyond that it answers with a grey
     // placeholder tile rather than an error, which would paint "Map data not
     // yet available" across the ground and look like our bug.
+    // A wider ground plane must not mean blurrier imagery: the zoom is chosen
+    // to fit a tile budget, so widening the area without raising the budget
+    // buys ground by dropping a zoom level. 48 tiles of 256 px is about three
+    // megapixels and the cache holds 200.
     const z = pickZoom({ south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon },
-                       { maxZoom: ground.maxZoom ?? 19 });
+                       { maxZoom: ground.maxZoom ?? 19, maxTiles: 48 });
     const r = tileRange({ south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon }, z);
 
     for (let tx = r.x0; tx <= r.x1; tx++) {

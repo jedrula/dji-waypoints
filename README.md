@@ -678,16 +678,27 @@ themselves — a tree next to the house is not a surface you failed to photograp
 
 ## Imagery on the ground
 
-The 3D view can paint the map's own tiles onto the ground plane, so the flight
-sits over the actual roofs rather than over a wireframe grid. It is **off by
+The 3D view paints the map's own tiles onto the ground plane, so the flight
+sits over the actual roofs rather than over a wireframe grid. It is **on by
 default** — the button is top-right whenever a 3D pane is on screen, and the
-choice rides in the URL, so once you turn it on it stays on.
+choice rides in the URL, so turning it off sticks too.
 
-**Why off by default.** Satellite imagery is a photograph, not a model of the
+It was opt-in while it was the only thing the view could put under a flight and
+it looked like a debug overlay. A flight over bare grid is the less useful
+picture of the two, so the default flipped.
+
+**What it is not.** Satellite imagery is a photograph, not a model of the
 ground. Anything with height leans away from nadir, so a roof gets painted
 metres from the walls holding it up. That is fine for knowing where you are and
 misleading for judging clearance — which is the question the 3D view exists to
-answer. The boxes you draw are the truth; this is context.
+answer. The boxes are the truth; this is context.
+
+**How much ground.** The plane covers the plan's own box unioned with every
+waypoint — an orbit ring stands well outside the box it circles — plus 30%.
+It was 12%, which ended the world a few metres past the outermost waypoint and
+read as the flight sitting on a platform the shape of itself. Widening it alone
+would have made the imagery blurrier, because the zoom is chosen to fit a tile
+budget: the budget went from 24 tiles to 48 in the same change.
 
 ### Doing it in a 2D canvas
 

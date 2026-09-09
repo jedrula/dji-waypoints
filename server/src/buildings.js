@@ -80,10 +80,18 @@ export async function findPackage(east, north, { lod = 'lod1', fetchImpl = fetch
 //                     median |LoD1 roof - LiDAR surface| = 17.15 m
 //     first = EAST    73%,  median 0.55 m
 //
-// That second number is worth more than the axis order it settled: the heights
-// need no conversion. PL-KRON86-NH is the datum our own tile heights are in,
-// and a median half-metre between a flattened LoD1 roof and the measured
-// surface is the flattening, not a datum error.
+// That second number is worth more than the axis order it settled: half a metre
+// is the flattening, not a coordinate error, so the heights are usable as they
+// stand.
+//
+// They are NOT in the same vertical datum though, and this comment used to
+// claim they were. The CityGML says PL-KRON86-NH; our own LiDAR comes from the
+// GUGiK dataset published in EVRF2007 -- the WFS in src/gugik.js is literally
+// named DanePomiaroweLidarEVRF2007. The two differ across Poland by something
+// on the order of 15-20 cm, which is inside the 0.55 m measured above and has
+// not been separated from it here. It is worth knowing rather than fixing at
+// this size: the number this feeds is a clearance, `measuredTop` takes the
+// maximum, and the LiDAR is the source that wins.
 //
 // A LoD1 solid is a closed box: the first polygon is the footprint at ground
 // level, then one quad per wall, then the roof. So the first ring is the

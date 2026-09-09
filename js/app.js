@@ -58,9 +58,12 @@ let urlFrozen = true;
 // the first pan of the map would switch it off.
 const opened = new URLSearchParams(location.search);
 // Prototype switches the address bar carries. writeUrl rebuilds the query from
-// the keys it knows, so anything not listed here is dropped on the first write
-// -- which is how `?mesh=1` came to be gone before the survey view read it.
-const MOCK_KEYS = ['mockgps', 'acc', 'age', 'mesh'];
+// the keys it knows, so anything not listed here is dropped on the first write.
+//
+// `mesh` was here and is gone: the survey view asks for the photogrammetric
+// mesh first and falls back to the LiDAR surface where there is none, so
+// coverage decides and there is nothing to switch.
+const MOCK_KEYS = ['mockgps', 'acc', 'age'];
 
 const state = {
   mode: 'capture',            // what a tap on the map means

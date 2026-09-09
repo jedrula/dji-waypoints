@@ -119,7 +119,11 @@ export function createScene3D(canvas) {
   let meshGroup = null;
   // Tile name -> Mesh, so a neighbour asked for twice is fetched once.
   const meshTiles = new Map();
-  const meshMode = () => new URLSearchParams(location.search).has('mesh');
+  // The mesh is the picture wherever there is one, and the LiDAR heightfield is
+  // the fallback where there is not -- which is most of the country. There is
+  // no switch: coverage decides, and an option nobody can answer better than
+  // the data can is not worth carrying.
+  let meshMode = false;
   let wirePaths = [];
   let groundSpec = null;
   let looksOn = true;
@@ -940,10 +944,76 @@ export function createScene3D(canvas) {
     return Number.isFinite(lowest) ? lowest : 0;
   }
 
+  // A plate on the ground where a tile is missing, because "click the ground to
+  // fetch more" in a status line is not an affordance -- it was there, and it
+  // was missed. A square you can see and click is.
+  //
+  // These also make the click exact. Ray-testing against real objects says
+  // which tile you meant; an earlier version intersected an infinite plane at
+  // the datum, which on a slope answers with the wrong square.
+  let padGroup = null;
+  const PAD = 100;                       // a mesh tile is 100 m of ground
+
+  function buildPads() {
+    if (padGroup) { scene.remove(padGroup); padGroup = null; }
+    if (!meshMode || !meshTiles.size || !mission) return;
+    const { lat0, lon0 } = mission.frame;
+    const home = toPuwg92(lat0, lon0);
+    const toLocal = puwgToLocal(mission.frame, home.east, home.north);
+    const back = localToTile(mission.frame, home.east, home.north);
+
+    // Where each loaded tile sits, in PUWG metres from home, snapped to the
+    // 100 m grid the tiles come on.
+    const cell = (e, n) => `${Math.round(e / PAD)},${Math.round(n / PAD)}`;
+    const taken = new Set();
+    const centres = [];
+    for (const tile of meshTiles.values()) {
+      tile.geometry.computeBoundingBox();
+      const b = tile.geometry.boundingBox;
+      const c = back((b.min.x + b.max.x) / 2, -(b.min.z + b.max.z) / 2);
+      taken.add(cell(c.e, c.n));
+      centres.push(c);
+    }
+
+    padGroup = new THREE.Group();
+    const seen = new Set();
+    for (const c of centres) {
+      for (const [de, dn] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+        const e = c.e + de * PAD;
+        const n = c.n + dn * PAD;
+        const key = cell(e, n);
+        if (taken.has(key) || seen.has(key)) continue;
+        seen.add(key);
+        const p = toLocal(home.east + e, home.north + n);
+        // Slightly under the datum so it never fights the mesh for a pixel.
+        const pad = new THREE.Mesh(
+          new THREE.PlaneGeometry(PAD - 4, PAD - 4),
+          new THREE.MeshBasicMaterial({
+            color: 0x7ec8ff, transparent: true, opacity: 0.16,
+            side: THREE.DoubleSide, depthWrite: false,
+          }),
+        );
+        pad.rotation.x = -Math.PI / 2;
+        pad.position.set(p.x, -0.2, -p.y);
+        pad.userData.at = { e, n };
+        padGroup.add(pad);
+
+        const edge = new THREE.LineSegments(
+          new THREE.EdgesGeometry(new THREE.PlaneGeometry(PAD - 4, PAD - 4)),
+          new THREE.LineBasicMaterial({ color: 0x9fd8ff, transparent: true, opacity: 0.55 }),
+        );
+        edge.rotation.x = -Math.PI / 2;
+        edge.position.copy(pad.position);
+        padGroup.add(edge);
+      }
+    }
+    scene.add(padGroup);
+  }
+
   const sayMesh = () => onStatus(
     `Photogrammetric mesh, ${meshTiles.size} tile${meshTiles.size === 1 ? '' : 's'} `
-    + 'of 100 m, 0.09 m in position, flown 2025-03-20. '
-    + 'Click the ground beyond the edge to fetch the next one.',
+    + 'of 100 m, 0.09 m in position. '
+    + 'Click a blue square to load that ground — about 7 MB each.',
   );
 
   // Click bare ground to fetch the tile under it.
@@ -965,36 +1035,44 @@ export function createScene3D(canvas) {
     // native click event decides what a click IS -- an earlier version compared
     // pointerdown and pointerup coordinates by hand and silently rejected every
     // one of them, which cost an evening.
-    if (dragged || !meshMode() || !mission || !camera) return;
+    if (dragged || !meshMode || !mission || !camera || !padGroup) return;
     try {
-    const rect = canvas.getBoundingClientRect();
-    const ndc = new THREE.Vector2(
-      ((ev.clientX - rect.left) / rect.width) * 2 - 1,
-      -((ev.clientY - rect.top) / rect.height) * 2 + 1,
-    );
-    const ray = new THREE.Raycaster();
-    ray.setFromCamera(ndc, camera);
-    const hit = new THREE.Vector3();
-    if (!ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), hit)) return;
+      const rect = canvas.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+        -((ev.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(ndc, camera);
+      // Against the pads themselves, so the answer is which SQUARE you meant.
+      // Intersecting an infinite plane at the datum was the earlier way and it
+      // picks the wrong square on any slope.
+      const hits = ray.intersectObjects(padGroup.children, false);
+      const pad = hits.find((h) => h.object.userData.at);
+      if (!pad) return;
 
-    const { lat0, lon0 } = mission.frame;
-    const home = toPuwg92(lat0, lon0);
-    const back = localToTile(mission.frame, home.east, home.north);
-    const off = back(hit.x, -hit.z);
-    const g = puwgToWgs84(home.east + off.e, home.north + off.n);
+      const { lat0, lon0 } = mission.frame;
+      const home = toPuwg92(lat0, lon0);
+      const { e, n } = pad.object.userData.at;
+      const g = puwgToWgs84(home.east + e, home.north + n);
 
-    onStatus('Fetching the mesh tile you clicked…');
-    try {
+      onStatus('Fetching that tile — about 7 MB…');
       const got = await loadMeshTile(g.lat, g.lon);
-      if (!got.ok) { onStatus(`Nothing there — ${got.why}.`); return; }
-      if (got.already) { onStatus('That tile is already loaded.'); return; }
+      if (!got.ok) {
+        onStatus(`Nothing there — ${got.why}.`);
+        // Take the plate away: there is no tile to fetch and offering it again
+        // is a promise the data cannot keep.
+        pad.object.userData.at = null;
+        pad.object.material.color.set(0x6b7480);
+        pad.object.material.opacity = 0.08;
+        render();
+        return;
+      }
+      buildPads();
       render();
       sayMesh();
-    } catch (e) {
-      onStatus(`That tile would not load — ${e.message}`);
-    }
-    } catch (e) {
-      onStatus(`Could not work out where you clicked — ${e.message}`);
+    } catch (err) {
+      onStatus(`That tile would not load — ${err.message}`);
     }
   }
 
@@ -1494,20 +1572,26 @@ export function createScene3D(canvas) {
       const ctl = new AbortController();
       inFlight = ctl;
       try {
-        if (meshMode()) {
-          // No LiDAR at all in this mode -- see loadMeshTile. Building the
-          // heightfield first and hiding it when the mesh arrived meant
-          // waiting through minutes of the worse picture to reach the better
-          // one, and fetching hundreds of megabytes to throw away.
-          onStatus('Downloading the photogrammetric mesh…');
-          const got = await loadMeshTile(c.lat0, c.lon0, { signal: ctl.signal });
-          if (!got.ok) { onStatus(`No mesh here — ${got.why}.`); return; }
+        // The mesh first, always, because where it exists it is the better
+        // picture by a wide margin -- centimetres against half a metre, and
+        // walls that were photographed rather than inferred. It is asked for
+        // before the LiDAR rather than instead of it, so the fallback costs one
+        // small request and not a heightfield built and thrown away.
+        onStatus('Looking for a photogrammetric mesh…');
+        const mesh = await loadMeshTile(c.lat0, c.lon0, { signal: ctl.signal })
+          .catch(() => ({ ok: false, why: 'the mesh service did not answer' }));
+        if (mesh.ok) {
+          meshMode = true;
           buildMission();
           frameCamera();
+          buildPads();
           render();
           sayMesh();
           return;
         }
+        // No mesh over this ground, which is most of the country: the LiDAR
+        // heightfield, exactly as before.
+        onStatus('No mesh here — building the LiDAR surface instead…');
         await loadFor(c.lat0, c.lon0, { signal: ctl.signal });
         buildSurface();
         const n = loaded.meta.tiles?.length ?? 1;

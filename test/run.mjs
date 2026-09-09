@@ -1507,6 +1507,82 @@ console.log('\nthe shape a thing actually is');
   }
 }
 
+console.log('\nreading a survey tile');
+{
+  const { cellAt, onTile, groundAt, puwgToLocal, drapeWire } = await import('../js/surface.js');
+  const { toPuwg92, toWgs84 } = await import('../js/puwg92.js');
+  const { frame } = await import('../js/geo.js');
+
+  // A 10 x 10 tile of 1 m cells, 100 m of ground 60 m above sea level, with one
+  // 12 m building in it. Small enough to reason about by hand.
+  const meta = {
+    grid: 10, cellMetres: 1, tileMetres: 10, base: 60,
+    origin: { east: 567000, north: 244000 },
+  };
+  const height = new Uint16Array(meta.grid * meta.grid);   // 0 cm above base
+  const put = (row, col, metres) => { height[row * meta.grid + col] = metres * 100; };
+  const sw = toWgs84(meta.origin.east, meta.origin.north);
+  const ne = toWgs84(meta.origin.east + 10, meta.origin.north + 10);
+  const mid = toWgs84(meta.origin.east + 5.5, meta.origin.north + 5.5);
+
+  // Row 0 is the tile's NORTH edge. Getting that backwards mirrors the whole
+  // tile, which looks entirely plausible and is not.
+  ok('the south-west corner is the bottom-left cell',
+     cellAt(meta, sw.lat, sw.lon).row === meta.grid && cellAt(meta, sw.lat, sw.lon).col === 0);
+  ok('and the north-east corner is the top-right',
+     cellAt(meta, ne.lat, ne.lon).row === 0 && cellAt(meta, ne.lat, ne.lon).col === 10);
+  ok('a coordinate outside the tile is off it, not clamped onto it',
+     !onTile(meta, cellAt(meta, sw.lat - 0.01, sw.lon)));
+
+  const midCell = cellAt(meta, mid.lat, mid.lon);
+  put(midCell.row, midCell.col, 12);
+  // Two metres in from the corner, because the corner itself is the boundary
+  // and belongs to the next tile along -- which the assertions above are about.
+  const inside = toWgs84(meta.origin.east + 2, meta.origin.north + 2);
+  ok('flat ground reads as the tile base', groundAt(meta, height, inside.lat, inside.lon) === 60);
+  ok('and a 12 m building reads 12 m above it',
+     groundAt(meta, height, mid.lat, mid.lon) === 72);
+  // Off the tile is UNKNOWN ground, and unknown must never be read as zero --
+  // the same rule the height service holds to for a cell the laser missed.
+  ok('off the tile is nothing, not sea level',
+     groundAt(meta, height, sw.lat - 0.01, sw.lon) === null);
+
+  // The affine stand-in for the projection. Measured at 51 mm over a whole
+  // 500 m tile -- a twentieth of one cell, and four orders of magnitude under
+  // the clearances this app argues about. It is the projection's own scale
+  // distortion over that distance and not an error that can be tuned away.
+  const f = frame(mid.lat, mid.lon);
+  const toLocal = puwgToLocal(f, meta.origin.east, meta.origin.north);
+  let worst = 0;
+  for (let de = 0; de <= 500; de += 25) {
+    for (let dn = 0; dn <= 500; dn += 25) {
+      const e = meta.origin.east + de;
+      const n = meta.origin.north + dn;
+      const g = toWgs84(e, n);
+      const exact = f.toLocal(g.lat, g.lon);
+      const approx = toLocal(e, n);
+      worst = Math.max(worst, Math.hypot(exact.x - approx.x, exact.y - approx.y));
+    }
+  }
+  ok(`the affine stands in for the projection over a whole tile (worst ${(worst * 1000).toFixed(0)} mm)`,
+     worst < 0.08, `${worst} m`);
+
+  // A wire hangs above the GROUND under it, not above the takeoff point. Drawn
+  // at one altitude the run sinks into the first rise it meets.
+  const datum = 60;                     // took off on the flat part
+  const draped = drapeWire(meta, height, f, datum, {
+    height: 16,
+    path: [{ lat: inside.lat, lon: inside.lon }, { lat: mid.lat, lon: mid.lon }],
+  });
+  ok('a wire over flat ground hangs at its own height', near(draped[0].y, 16, 1e-9));
+  ok('and over a 12 m building it is 12 m higher, not the same height',
+     near(draped[1].y, 28, 1e-9), String(draped[1].y));
+  const off = drapeWire(meta, height, f, datum, {
+    height: 16, path: [{ lat: sw.lat - 0.01, lon: sw.lon }, { lat: mid.lat, lon: mid.lon }],
+  });
+  ok('a vertex with no ground under it is dropped rather than guessed', off.length === 1);
+}
+
 console.log('\nwhat a tap leaves behind');
 {
   const { sampleRect, parseHeight } = await import('../js/site.js');

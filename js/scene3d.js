@@ -23,7 +23,8 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { toPuwg92, toWgs84 } from './puwg92.js';
+import { toPuwg92 } from './puwg92.js';
+import { groundAt, puwgToLocal, drapeWire } from './surface.js';
 import { serviceUrl, serviceHeaders } from './service.js';
 
 // How much ground round the flight, and how fine. The tile is 500 m of
@@ -36,6 +37,11 @@ const MAX_VERTS = 420_000;
 
 // A cell's classification, for when there is no orthophoto to drape. Deliberately
 // flat colours: this is "what kind of thing is that", not a rendering.
+// The same four the map uses, so a red line is a red line in both pictures.
+const WIRE_COLOUR = {
+  WN: 0xff5d5d, SN: 0xff9c3d, 'n/n': 0xffd85e, LTK: 0x6aa9ff,
+};
+
 const KIND_COLOUR = [
   [0.42, 0.44, 0.47],   // none, guessed by filling a hole
   [0.36, 0.42, 0.32],   // ground
@@ -71,43 +77,21 @@ async function poll(path, { onWait, signal } = {}) {
   }
 }
 
-// PUWG92 metres to the mission's own local metres, as an affine map.
-//
-// Doing it properly per vertex means an inverse projection each time, and there
-// are hundreds of thousands of vertices. Both frames are metric and the tile is
-// 500 m across, over which the difference between the true mapping and its
-// linearisation is far under a centimetre -- so the map is derived once from
-// three points and then it is two multiplies and an add per vertex.
-function puwgToLocal(frame, e0, n0) {
-  const at = (e, n) => {
-    const g = toWgs84(e, n);
-    return frame.toLocal(g.lat, g.lon);
-  };
-  const o = at(e0, n0);
-  const de = at(e0 + 100, n0);
-  const dn = at(e0, n0 + 100);
-  const ex = (de.x - o.x) / 100;
-  const ey = (de.y - o.y) / 100;
-  const nx = (dn.x - o.x) / 100;
-  const ny = (dn.y - o.y) / 100;
-  return (e, n) => ({
-    x: o.x + (e - e0) * ex + (n - n0) * nx,
-    y: o.y + (e - e0) * ey + (n - n0) * ny,
-  });
-}
-
 export function createScene3D(canvas) {
   let renderer = null;
   let scene = null;
   let camera = null;
   let controls = null;
   let missionGroup = null;
+  let wireGroup = null;
+  let wirePaths = [];
   let surfaceMesh = null;
   let loaded = null;       // { tn, te, meta, height, kind, base }
   let mission = null;
   let hazard = null;
   let onStatus = () => {};
   let running = false;
+  let opening = false;
   let inFlight = null;
 
   function boot() {
@@ -191,11 +175,11 @@ export function createScene3D(canvas) {
     const rows = Math.floor((r1 - r0) / step) + 1;
 
     const heightAt = (row, col) => meta.base + height[row * N + col] / 100;
-    const home = path[0] ? toPuwg92(path[0].lat, path[0].lon) : null;
-    const homeRow = home
-      ? clamp(Math.round((n0 + meta.tileMetres - home.north) / cell), 0, N - 1) : r0;
-    const homeCol = home ? clamp(Math.round((home.east - e0) / cell), 0, N - 1) : c0;
-    const datum = heightAt(homeRow, homeCol);
+    // The zero everything is measured from: the ground under the home point.
+    // Off the tile there is nothing to measure from, so the lowest corner of
+    // the crop stands in -- wrong by a metre or two, and not silently absent.
+    const datum = (path[0] && groundAt(meta, height, path[0].lat, path[0].lon))
+      ?? heightAt(r0, c0);
 
     const verts = new Float32Array(cols * rows * 3);
     const uvs = new Float32Array(cols * rows * 2);
@@ -260,7 +244,38 @@ export function createScene3D(canvas) {
     loaded.cells = cols * rows;
     loaded.step = step;
     buildMission();
+    buildWires();
     frameCamera();
+  }
+
+  // Overhead lines, at the height the voltage implies, over the ground that is
+  // actually under them.
+  //
+  // That last part is why this waits for the surface: a wire's height is
+  // metres above the ground beneath it, not above the takeoff point, so every
+  // vertex is lifted by the surface it crosses. Drawn flat at one altitude the
+  // whole run would sink into the first hill it met.
+  //
+  // The register knows where they run and not how high they hang -- see
+  // js/lines.js -- so this is an assumption drawn as confidently as the
+  // geometry it hangs on, which is worth remembering when it looks precise.
+  function buildWires() {
+    if (!scene) return;
+    if (wireGroup) { scene.remove(wireGroup); wireGroup = null; }
+    if (!wirePaths.length || !loaded?.meta || !mission || loaded.datum === undefined) return;
+    const { meta, height } = loaded;
+    const frame = mission.frame;
+    wireGroup = new THREE.Group();
+    for (const w of wirePaths) {
+      const pts = drapeWire(meta, height, frame, loaded.datum, w)
+        .map((p) => new THREE.Vector3(p.x, p.y, p.z));
+      if (pts.length < 2) continue;
+      const g = new THREE.BufferGeometry().setFromPoints(pts);
+      wireGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({
+        color: WIRE_COLOUR[w.kind] ?? 0xff9c3d,
+      })));
+    }
+    scene.add(wireGroup);
   }
 
   function buildMission() {
@@ -375,7 +390,7 @@ export function createScene3D(canvas) {
     return loaded;
   }
 
-  return {
+  const api = {
     // The mission is pushed on every replan, like view3d's. Rebuilding the
     // flight is cheap; the surface is not, so it is only rebuilt when the frame
     // it is expressed in has actually moved.
@@ -384,8 +399,23 @@ export function createScene3D(canvas) {
         || mission.frame.lat0 !== m.frame.lat0 || mission.frame.lon0 !== m.frame.lon0;
       mission = m;
       hazard = h;
-      if (!renderer || !loaded || !mission) return;
+      if (!renderer || !mission) return;
+      // The view can be open before there is anything to look at -- picked
+      // straight from the address bar, before a single point is tapped -- and
+      // then it is the arrival of a flight that has to start the loading. Not
+      // doing this left the survey blank for exactly that entry, which is the
+      // one a shared link uses.
+      if (!loaded) { api.open(); return; }
       if (moved) buildSurface(); else { buildMission(); render(); }
+    },
+
+    // The same list the map draws, so the two pictures cannot disagree about
+    // where a wire is.
+    setWires(paths) {
+      wirePaths = paths ?? [];
+      if (!renderer) return;
+      buildWires();
+      render();
     },
 
     onStatus(fn) { onStatus = fn ?? (() => {}); },
@@ -396,6 +426,11 @@ export function createScene3D(canvas) {
       boot();
       running = true;
       if (!mission) { onStatus('Tap out a site first — this draws the ground under a flight.'); return; }
+      // setMission fires on every replan, and a replan lands on every slider
+      // tick, so without this a slow first load would be started a hundred
+      // times over.
+      if (opening) return;
+      opening = true;
       const c = mission.frame;
       inFlight?.abort?.();
       const ctl = new AbortController();
@@ -413,6 +448,8 @@ export function createScene3D(canvas) {
         render();
       } catch (e) {
         if (e.name !== 'AbortError') onStatus(`No surface — ${e.message}`);
+      } finally {
+        opening = false;
       }
     },
 
@@ -420,4 +457,5 @@ export function createScene3D(canvas) {
     resize() { render(); },
     ready: () => Boolean(loaded),
   };
+  return api;
 }

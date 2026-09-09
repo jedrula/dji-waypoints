@@ -254,8 +254,11 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 #groundtabs button.on { background: var(--panel2); color: var(--accent); }
 /* Third in the left stack, and only there when you have lost the site: a
    control offering to take you somewhere you already are is just clutter. */
-#recentre { top: 226px; }
-#findplace { top: 180px; }
+#recentre { top: 272px; }
+#findplace { top: 226px; }
+/* Wires belong to both views at once -- they are a hazard, not a backdrop --
+   so this is the one .maptoggle that stays put when the 3D comes up. */
+#wiresBtn { top: 180px; }
 
 /* Searching is how a mission usually starts -- you know the address before you
    know anything else -- so it lives on the map rather than behind a sheet, and

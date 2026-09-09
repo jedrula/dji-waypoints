@@ -111,6 +111,18 @@
         </svg>
       </button>
     </div>
+    <!-- Overhead lines, from the national register. Its own control rather than
+         part of the ground picker, because it is a hazard layer and not a
+         backdrop: it belongs on the map AND in the survey, at the same time. -->
+    <button id="wiresBtn" type="button" class="maptoggle"
+            title="Show the overhead power lines from BDOT10k">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+           stroke-width="1.7" stroke-linecap="round">
+        <path d="M5 4v16M19 4v16"/>
+        <path d="M5 7c4.7 2.6 9.3 2.6 14 0"/>
+        <path d="M5 12c4.7 2.6 9.3 2.6 14 0"/>
+      </svg>
+    </button>
     <button id="findplace" type="button" class="maptoggle" title="Go to an address or coordinates">
       <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
            stroke-width="1.9" stroke-linecap="round">

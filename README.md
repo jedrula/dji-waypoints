@@ -676,6 +676,31 @@ Obstacles also block the **camera**, not just the aircraft: the coverage score
 stops counting a surface it can only see through a box. They are never scored
 themselves — a tree next to the house is not a surface you failed to photograph.
 
+## Overhead lines
+
+Their own switch in the left stack, on the map and in the survey at the same
+time — because a wire is a hazard and not a backdrop, which is why it is not
+one of the ground choices below. Press it and it asks the register about
+whatever is on screen; pan somewhere new and press again, and the field you
+were just looking at keeps its wires. They are cached between sessions, since a
+wire does not move.
+
+**Why they are not the LiDAR's job.** They cannot be. No wire class appears in
+any tile sampled — see the survey notes above — and `tools/wire-spike.mjs` is a
+full attempt at recovering them by rule, kept as a negative result: a wire is a
+thin band with air beneath and a tree is a solid column, which is a real
+distinction that still finds nothing but roof ridges and bare winter branches.
+Filtering on it leaves zero candidates on both tiles. So the surface can show
+you every building and every tree and will never show you the one thing most
+likely to bring the aircraft down. That comes from BDOT10k, which knows where
+they run and not how high they hang; the height is the one the voltage implies,
+and it is drawn as confidently as the geometry it hangs on.
+
+In the survey view each vertex is lifted by the ground under it, because a
+wire's height is metres above that ground and not above your takeoff point —
+drawn at one altitude a run sinks into the first rise it meets. A vertex with
+no surveyed ground beneath it is dropped rather than guessed.
+
 ## What the flight is drawn over
 
 Three answers to one question, as a segmented picker under the view tabs

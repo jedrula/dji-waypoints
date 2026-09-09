@@ -120,6 +120,16 @@ const GROUNDS = ['simple', 'imagery', 'survey'];
 let groundMode = 'imagery';
 let lidar = null;
 
+// Overhead lines, and whether they are being shown.
+//
+// Not part of the ground picker, deliberately: the ground is a backdrop and you
+// pick one, while a wire is a hazard and belongs on the map AND in the survey at
+// the same time. It is also the one hazard the LiDAR cannot supply -- see
+// tools/wire-spike.mjs for the attempt and why it found nothing -- so it comes
+// from the national register instead, and is worth its own switch.
+let wiresOn = false;
+let wirePaths = [];
+
 async function lidarView() {
   if (!lidar) {
     const { createScene3D } = await import('./scene3d.js');
@@ -251,6 +261,7 @@ function writeUrl() {
   q.set('c', `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`);
   q.set('z', String(map.getZoom()));
   if (groundMode !== 'imagery') q.set('s', groundMode);
+  if (wiresOn) q.set('w', '1');
   for (const k of MOCK_KEYS) if (opened.has(k)) q.set(k, opened.get(k));
   const code = planCode();
   window.history.replaceState(null, '', `?${q}${code ? `#plan=${code}` : ''}`);
@@ -261,6 +272,7 @@ function readUrl() {
   basemaps.set(q.get('b') ?? basemaps.name());
   if (['map', 'split', '3d'].includes(q.get('v'))) setView(q.get('v'));
   if (GROUNDS.includes(q.get('s'))) setGround(q.get('s'));
+  if (q.get('w') === '1') { wiresOn = true; drawWires(); }
   const [lat, lon] = (q.get('c') ?? '').split(',').map(Number);
   const zoom = Number(q.get('z'));
   if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
@@ -615,31 +627,70 @@ const WIRE_STYLE = {
 };
 const WIRES_KEY = 'dji.wires';
 
-function drawWires(paths) {
+// Both views, from one list. The map gets polylines it can label; the survey
+// gets the same vertices draped over the real ground at the height the voltage
+// implies. Neither is the source of truth -- the register is -- so they are
+// drawn from the same array and never from each other.
+function drawWires() {
   layers.wires.clearLayers();
-  for (const w of paths ?? []) {
-    const style = WIRE_STYLE[w.kind] ?? { color: '#ff9c3d', weight: 2 };
-    L.polyline(w.path.map((q) => [q.lat, q.lon]), {
-      ...style, opacity: 0.95, interactive: true,
-    }).bindTooltip(`${w.label} — assumed ${w.height} m`, { sticky: true })
-      .addTo(layers.wires);
+  if (wiresOn) {
+    for (const w of wirePaths) {
+      const style = WIRE_STYLE[w.kind] ?? { color: '#ff9c3d', weight: 2 };
+      L.polyline(w.path.map((q) => [q.lat, q.lon]), {
+        ...style, opacity: 0.95, interactive: true,
+      }).bindTooltip(`${w.label} — assumed ${w.height} m`, { sticky: true })
+        .addTo(layers.wires);
+    }
   }
+  lidar?.setWires(wiresOn ? wirePaths : []);
+  $('wiresBtn').classList.toggle('on', wiresOn);
 }
 
-function rememberWires(paths) {
+function rememberWires() {
   try {
-    const keep = (paths ?? []).map((w) => ({ kind: w.kind, label: w.label, height: w.height,
+    const keep = wirePaths.map((w) => ({ kind: w.kind, label: w.label, height: w.height,
       path: w.path.map((q) => [+q.lat.toFixed(6), +q.lon.toFixed(6)]) }));
     localStorage.setItem(WIRES_KEY, JSON.stringify(keep));
-  } catch { /* a full or blocked store is not worth failing an import over */ }
+  } catch { /* a full or blocked store is not worth failing a fetch over */ }
 }
 
+// Kept between sessions, because a wire does not move and asking the register
+// again for the same field is a round trip nobody needs.
 function restoreWires() {
   try {
     const raw = JSON.parse(localStorage.getItem(WIRES_KEY) ?? '[]');
-    if (!Array.isArray(raw) || !raw.length) return;
-    drawWires(raw.map((w) => ({ ...w, path: w.path.map(([lat, lon]) => ({ lat, lon })) })));
+    if (!Array.isArray(raw)) return;
+    wirePaths = raw.map((w) => ({ ...w, path: w.path.map(([lat, lon]) => ({ lat, lon })) }));
   } catch { /* nothing drawn is the right failure */ }
+}
+
+// Asking the register about what is on screen. Additive: pan somewhere new,
+// press it again, and the field you were just looking at keeps its wires.
+async function loadWires() {
+  const btn = $('wiresBtn');
+  btn.disabled = true;
+  try {
+    const { fetchLines } = await import('./lines.js');
+    const b = map.getBounds();
+    const got = await fetchLines({
+      north: b.getNorth(), south: b.getSouth(), east: b.getEast(), west: b.getWest(),
+    });
+    if (got.reason && !got.paths.length) { toast(`No overhead lines — ${got.reason}.`); return; }
+    // One entry per run of wire, and the same run asked for twice is the same
+    // run: keyed on where it goes, since the register has no id for it.
+    const seen = new Set(wirePaths.map((w) => JSON.stringify(w.path)));
+    const fresh = got.paths.filter((w) => !seen.has(JSON.stringify(w.path)));
+    wirePaths = [...wirePaths, ...fresh];
+    rememberWires();
+    drawWires();
+    toast(fresh.length
+      ? `${fresh.length} overhead line${fresh.length === 1 ? '' : 's'} here.`
+      : 'No overhead lines mapped in this view.');
+  } catch (e) {
+    toast(`Overhead lines failed — ${e.message}`);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // Outlines are kept and restyled, never rebuilt -- the same rule as the markers
@@ -963,8 +1014,12 @@ async function importHere() {
       { onProgress: (d, t) => { btn.textContent = `Overhead lines… ${d}/${t}`; } },
     );
 
-    drawWires(wires.paths);
-    rememberWires(wires.paths);
+    // The wires are their own layer with their own switch now, so an import
+    // that happens to fetch them hands them over rather than drawing them.
+    const seen = new Set(wirePaths.map((w) => JSON.stringify(w.path)));
+    wirePaths = [...wirePaths, ...wires.paths.filter((w) => !seen.has(JSON.stringify(w.path)))];
+    rememberWires();
+    drawWires();
     const all = [...found, ...wires.obstacles];
     const guessed = found.filter((f) => f.assumed).length;
     site.addImported(all);
@@ -1083,8 +1138,9 @@ async function importHere() {
 }
 
 $('clearOsm').addEventListener('click', () => {
-  layers.wires.clearLayers();
-  rememberWires([]);
+  wirePaths = [];
+  rememberWires();
+  drawWires();
   const gone = site.clearImported();
   history.commit();
   toast(gone ? `Removed ${gone} imported obstacle${gone === 1 ? '' : 's'}.` : 'Nothing imported to remove.');
@@ -1619,6 +1675,16 @@ for (const b of document.querySelectorAll('#groundtabs button')) {
   b.addEventListener('click', () => setGround(b.dataset.ground));
 }
 
+// Overhead lines: on, and fetch any this view has not asked about yet. The
+// register is the only source for them, so the switch does the asking too --
+// there is nothing else to turn on.
+$('wiresBtn').addEventListener('click', async () => {
+  wiresOn = !wiresOn;
+  drawWires();
+  writeUrl();
+  if (wiresOn) await loadWires();
+});
+
 // The button over the map is obstacle mode's, and it asks OpenStreetMap about
 // the view rather than the receiver. Capture mode had one beside it that placed
 // a point where the phone said you were standing; it is gone, and with it the
@@ -1833,6 +1899,7 @@ setShowRoute(showRoute);
 setView(activeView);   // put the map's own controls where this view wants them
 if (fromHash) applyPlan(fromHash);
 restoreWires();
+drawWires();
 renderPoints();
 renderReadout();
 renderIdentity();

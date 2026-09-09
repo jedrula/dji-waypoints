@@ -214,11 +214,15 @@
       It never lowers your altitude, and it says so when a tile has not been built yet rather than
       calling that flat ground. The first look at new ground takes a few minutes.</p>
 
+      <!-- Not hidden any more: it was hidden until a service was configured,
+           and there is always one now. -->
       <button id="scene3d" class="block" type="button">Look at the ground in 3D</button>
-      <p class="hint" id="scene3dHint" hidden>Opens the survey itself for the 500 m square in the
+      <p class="hint" id="scene3dHint">Opens the survey itself for the 500 m square in the
       middle of the map — the ground, the buildings and the trees as the LiDAR saw them, with the
-      power lines over the top. The first look at a new square downloads it and takes minutes;
-      after that it is instant. Nothing to do with your plan, and it changes nothing.</p>
+      power lines over the top, in the service's own viewer. That page has nothing of ours in
+      front of it, so it is what you compare against when the survey view looks wrong. The first
+      look at a new square downloads it and takes minutes; after that it is instant. Nothing to
+      do with your plan, and it changes nothing.</p>
 
       <button id="refit" class="block" type="button">Re-fit to the site</button>
       <p class="hint">Lowest altitude and ring count that fit one battery and DJI Fly's

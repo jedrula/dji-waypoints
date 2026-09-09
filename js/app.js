@@ -1449,6 +1449,98 @@ $('syncToMap').addEventListener('click', () => {
 // Overhead lines: on, and fetch any this view has not asked about yet. The
 // register is the only source for them, so the switch does the asking too --
 // there is nothing else to turn on.
+// The three buttons in Advanced. Their handlers were deleted as collateral in
+// daa56de, which took out the service chooser and took these with it -- and
+// left the buttons in index.html, so all three sat there looking live and did
+// nothing. #surveyFit was the worse one: renderAlert still reads state.survey,
+// so the survey ceiling could never appear in the readout either, and a
+// clearance the app was able to measure silently stopped being measured.
+
+// Is the service answering. Its two failure modes look identical from here --
+// nothing running, and a tunnel that is down -- and one round trip to
+// /v1/health tells them apart. The only request in the app nobody has to make.
+{
+  const say = (text) => { $('serviceHint').textContent = text; };
+  say(`Talking to ${serviceUrl()}. Heights, overhead lines, the 3D model and`
+    + ' syncing your plans all go there.');
+
+  $('servicePing').addEventListener('click', async () => {
+    const url = serviceUrl();
+    $('servicePing').disabled = true;
+    say(`Asking ${url}…`);
+    try {
+      const res = await fetch(`${url}/v1/health`, { headers: serviceHeaders() });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) { say(`${url} answered ${res.status}.`); return; }
+      const busy = (body.building ?? 0) + (body.queued ?? 0);
+      say(`${url} is answering${busy ? `, building ${busy} tile${busy === 1 ? '' : 's'}` : ''}.`
+        + ` Survey grid ${body.tileMetres ?? '?'} m.`);
+    } catch (e) {
+      // The address is in the message because that is the half you cannot see.
+      say(`${url} did not answer — ${e.message}.`);
+    } finally {
+      $('servicePing').disabled = false;
+    }
+  });
+}
+
+// What the survey sees, which is everything standing and not only what was
+// mapped. `measure` corrects the height of something OpenStreetMap already
+// knew about; it can say nothing at all about a line of poplars, a pole or a
+// crane. The raster saw all of it, so the honest ceiling for a flight is the
+// tallest measured cell anywhere under it -- the number that decides whether
+// one barometric altitude is safe.
+//
+// On demand rather than on every replan: the first tile under a new site is a
+// couple of minutes and hundreds of megabytes, and spending that because
+// somebody nudged a slider would be rude to a public agency and to the user.
+{
+  const btn = $('surveyFit');
+  btn.addEventListener('click', async () => {
+    if (!state.mission) { toast('Tap out a site to fly first.'); return; }
+    const path = state.mission.exported ?? state.mission.waypoints ?? [];
+    if (!path.length) { toast('Nothing planned yet.'); return; }
+    // The area the aircraft actually crosses, which is what its altitude has
+    // to clear -- not the points you tapped.
+    const bounds = {
+      north: Math.max(...path.map((w) => w.lat)), south: Math.min(...path.map((w) => w.lat)),
+      east: Math.max(...path.map((w) => w.lon)), west: Math.min(...path.map((w) => w.lon)),
+    };
+    btn.disabled = true;
+    const was = btn.textContent;
+    try {
+      const { surveyCeiling } = await import('./heights.js');
+      state.survey = await surveyCeiling(bounds, {
+        onWait: () => toast('First look at this ground — downloading the survey. A few minutes.'),
+        onProgress: (d, n) => { btn.textContent = `Reading the survey… ${d}/${n}`; },
+      });
+      renderAlert(false);
+      const c = state.survey;
+      if (c.height === null) toast(c.reason ? `No survey here: ${c.reason}.` : 'The survey has not answered yet.');
+      else toast(`Tallest thing under this flight: ${c.height} m.`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = was;
+    }
+  });
+}
+
+// The service's own viewer, for looking at rather than planning with. It builds
+// the model from the same survey the heights come from and serves the page
+// itself, so this is a link and nothing more -- no state, no effect on the
+// plan. Worth keeping now that the survey view draws the same ground with the
+// flight in it: this is the one picture with nothing of ours in front of it, so
+// it is what you compare against when the survey view looks wrong.
+{
+  $('scene3d').addEventListener('click', () => {
+    const c = map.getCenter();
+    // The centre of the map, not the site: the model is a 500 m square of
+    // ground and you aim it by looking at where you are aiming.
+    window.open(`${serviceUrl()}/scene?lat=${c.lat.toFixed(6)}&lon=${c.lng.toFixed(6)}`,
+      '_blank', 'noopener');
+  });
+}
+
 // Which way every lens is facing, drawn in the space it faces into. One line
 // of state, because the picture is built from the plan the view already has --
 // yaw and pitch are resolved by the planner for every heading mode, so there is

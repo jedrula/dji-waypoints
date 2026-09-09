@@ -898,7 +898,7 @@ async function importHere() {
     // LiDAR. If it is not, or has no survey here, the estimates stand and the
     // import behaves exactly as it did before this existed.
     const { measure } = await import('./heights.js');
-    if (serviceUrl()) btn.textContent = 'Measuring heights…';
+    btn.textContent = 'Measuring heights…';
     const { obstacles: found, measured, blanked } = await measure(raw, {
       // Measured 152 s for one cold tile (Krakow, 2026-09-09). "About a minute"
       // was wrong by two and a half times, and the wait is per tile.
@@ -910,7 +910,7 @@ async function importHere() {
     // distribution; BDOT10k has the lot, nationally, which is the difference
     // between knowing about the 400 V run across a field and not.
     const { fetchLines } = await import('./lines.js');
-    if (serviceUrl()) btn.textContent = 'Looking for overhead lines…';
+    btn.textContent = 'Looking for overhead lines…';
     const wires = await fetchLines(
       { north: b.getNorth(), south: b.getSouth(), east: b.getEast(), west: b.getWest() },
       { onProgress: (d, t) => { btn.textContent = `Overhead lines… ${d}/${t}`; } },
@@ -951,8 +951,6 @@ async function importHere() {
 // somebody nudged a slider would be rude to a public agency and to the user.
 {
   const btn = $('surveyFit');
-  btn.hidden = !serviceUrl();
-  $('surveyHint').hidden = !serviceUrl();
   btn.addEventListener('click', async () => {
     if (!state.mission) { toast('Draw something to fly first.'); return; }
     const path = state.mission.exported ?? state.mission.waypoints ?? [];
@@ -1050,12 +1048,8 @@ async function importHere() {
 // The rough model, for looking at rather than planning with. The service
 // builds it from the same survey the heights come from and serves the viewer
 // itself, so this is a link and nothing more -- no state, no effect on the
-// plan. Hidden when there is no service, because then there is nothing to open
-// and a dead button is worse than no button.
+// plan. There is always a service now, so there is nothing to hide it behind.
 {
-  const url = serviceUrl();
-  $('scene3d').hidden = !url;
-  $('scene3dHint').hidden = !url;
   $('scene3d').addEventListener('click', () => {
     const c = map.getCenter();
     // The centre of the map, not the site: the model is a 500 m square of
@@ -1252,9 +1246,25 @@ function renderAlert(over) {
   if (t && t.shortfall > 0) {
     el.hidden = false;
     el.className = 'alert';
-    el.textContent = `The ground rises ${t.relief.toFixed(0)} m across this site. `
-      + `At ${state.mission.params.altitude} m above your takeoff point the flight is `
-      + `${Math.abs(t.aboveHighestGround).toFixed(0)} m BELOW the highest ground. `;
+    // Two different problems produce a shortfall, and telling someone the
+    // wrong one is worse than telling them nothing. Below the highest ground
+    // means you will fly into a hill. Above it but inside the clearance means
+    // you will pass closer than you asked to. This printed
+    // `Math.abs(aboveHighestGround) + " BELOW"` for both, so a flight sitting
+    // 5 m ABOVE flat ground was told it was 5 m BELOW the ground -- alarming,
+    // and false. The Math.abs was the tell: it was written for the hillside.
+    //
+    // The relief sentence is dropped when the ground is flat, because "the
+    // ground rises 0 m across this site" opened a warning that had nothing to
+    // do with the ground.
+    const above = t.aboveHighestGround;
+    const lead = t.relief >= 1 ? `The ground rises ${t.relief.toFixed(0)} m across this site. ` : '';
+    el.textContent = above < 0
+      ? `${lead}At ${state.mission.params.altitude} m above your takeoff point the flight is `
+        + `${(-above).toFixed(0)} m BELOW the highest ground. `
+      : `${lead}At ${state.mission.params.altitude} m above your takeoff point the flight clears `
+        + `the highest ground by ${above.toFixed(0)} m, which is less than your `
+        + `${clearance()} m clearance. `;
     const b = document.createElement('button');
     b.type = 'button';
     b.textContent = `Raise to ${t.needed} m`;

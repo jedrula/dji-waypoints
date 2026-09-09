@@ -26,6 +26,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { toPuwg92 } from './puwg92.js';
 import { groundAt, puwgToLocal, drapeWire } from './surface.js';
 import { serviceUrl, serviceHeaders } from './service.js';
+import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, asHex } from './palette.js';
 
 // How much ground round the flight, and how fine. The tile is 500 m of
 // half-metre cells -- a million of them -- and a site is a couple of hundred
@@ -289,15 +290,41 @@ export function createScene3D(canvas) {
       return new THREE.Vector3(l.x, w.alt, -l.y);
     };
 
-    const line = new THREE.BufferGeometry().setFromPoints(path.map(at));
-    missionGroup.add(new THREE.Line(line, new THREE.LineBasicMaterial({ color: 0x4da3ff })));
+    // One line per RUN of same-pass waypoints, in that pass's own colour --
+    // the way the map and the flat view both draw it. This was a single blue
+    // polyline for the whole flight, which made the survey view a picture of a
+    // different mission: on the left a green orbit and an orange grid, on the
+    // right one blue scribble.
+    let run = [];
+    let runPass = path[0]?.pass;
+    const flushRun = () => {
+      if (run.length > 1) {
+        const g = new THREE.BufferGeometry().setFromPoints(run);
+        missionGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({
+          color: asHex(PASS_COLOR[runPass] ?? PASS_FALLBACK),
+        })));
+      }
+      run = run.length ? [run[run.length - 1]] : [];
+    };
+    for (const w of path) {
+      if (w.pass !== runPass) { flushRun(); runPass = w.pass; }
+      run.push(at(w));
+    }
+    flushRun();
 
-    // The waypoints themselves, so the passes read as stations rather than as
-    // one continuous scribble.
-    const dots = new THREE.BufferGeometry().setFromPoints(path.map(at));
-    missionGroup.add(new THREE.Points(dots, new THREE.PointsMaterial({
-      color: 0x9ecbff, size: 2.2, sizeAttenuation: true,
-    })));
+    // The stations themselves, so a pass reads as the shots it is rather than
+    // as one continuous stroke. Grouped by pass so each keeps its own colour.
+    const byPass = new Map();
+    for (const w of path) {
+      if (!byPass.has(w.pass)) byPass.set(w.pass, []);
+      byPass.get(w.pass).push(at(w));
+    }
+    for (const [pass, pts] of byPass) {
+      const g = new THREE.BufferGeometry().setFromPoints(pts);
+      missionGroup.add(new THREE.Points(g, new THREE.PointsMaterial({
+        color: asHex(PASS_COLOR[pass] ?? PASS_FALLBACK), size: 2.2, sizeAttenuation: true,
+      })));
+    }
 
     // The legs the collision check flagged, drawn over the top in its colours.
     // A strike and a near miss are not the same news, so they are not the same
@@ -305,7 +332,7 @@ export function createScene3D(canvas) {
     for (const leg of hazard?.legs ?? []) {
       const g = new THREE.BufferGeometry().setFromPoints([at(leg.a), at(leg.b)]);
       missionGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({
-        color: leg.grade === 'strike' ? 0xff5470 : 0xffb84d,
+        color: asHex(LEG_COLOR[leg.grade] ?? LEG_COLOR.near),
       })));
     }
     scene.add(missionGroup);

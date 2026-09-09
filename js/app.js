@@ -24,6 +24,7 @@ import { planMission, proposePlan, splitMission, pointsFromRect, DEFAULTS, DJI_F
 import { SHAPES, DEFAULT_SHAPE, footprintOf, polygonArea } from './shape.js';
 import { frame, mPerDegLat, mPerDegLon } from './geo.js';
 import { mPerPx } from './tiles.js';
+import { PASS_COLOR, LEG_COLOR, passColour } from './palette.js';
 import { buildKmz } from './wpml.js';
 import { createView3D } from './view3d.js';
 import { scoreCoverage } from './coverage.js';
@@ -45,9 +46,7 @@ import { serviceUrl, serviceHeaders } from './service.js';
 const cam = CAMERAS.mini5pro;
 const $ = (id) => document.getElementById(id);
 
-const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff', surround: '#ff6fb5', establish: '#7ee0a0' };
-// A leg the check flagged, by how bad it is. Nothing is drawn 'clear'.
-const LEG_COLOR = { clear: '#ffb84d', near: '#ff9f4d', strike: '#ff5d5d' };
+
 const CLEARANCE_KEY = 'dji.clearance';
 
 let ready = false;
@@ -1166,8 +1165,7 @@ function renderPasses() {
   const box = $('passList');
   box.innerHTML = '';
   for (const p of state.mission?.passes ?? []) {
-    const key = p.name.toLowerCase().split(/[\s-]/)[0];
-    const colour = PASS_COLOR[key] ?? PASS_COLOR[Object.keys(PASS_COLOR).find((k) => p.name.toLowerCase().startsWith(k))] ?? '#8b98a5';
+    const colour = passColour(p.name);
     const row = document.createElement('div');
     row.className = 'passrow';
     row.innerHTML = `<span class="sw" style="background:${colour}"></span><b></b><em></em><span class="cnt"></span>`;

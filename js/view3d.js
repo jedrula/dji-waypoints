@@ -1,16 +1,19 @@
 import { fov, orientation } from './camera.js';
 import { GRADE_COLOR } from './coverage.js';
+import { PASS_COLOR, LEG_COLOR } from './palette.js';
 import { createTileCache, pickZoom, tileRange, tileBounds, TILE_PX } from './tiles.js';
 
 // A small hand-rolled 3D view. The scene is a few thousand line segments, so a
 // WebGL library would be more dependency than drawing. Coordinates are local
 // ENU metres: x east, y north, z up.
 
-const PASS_COLOR = { nadir: '#4da3ff', oblique: '#ffb84d', orbit: '#5ad19a', transect: '#c98bff', surround: '#ff6fb5', establish: '#7ee0a0' };
+
 // Obstacles are the world, not the plan, so they get their own family of
 // colours rather than borrowing a pass's: slate while the flight stays clear of
 // them, and the grade of the trouble once it does not.
-const CONFLICT_COLOR = { strike: '#ff5d5d', near: '#ffb84d' };
+// A flagged leg, from the shared table -- the same news in the same colour as
+// the map gives it.
+const CONFLICT_COLOR = LEG_COLOR;
 const OBSTACLE_COLOR = { clear: '#9aa7b4', near: '#ffb84d', strike: '#ff5d5d' };
 const HOVER_COLOR = '#4da3ff';
 const DEG = Math.PI / 180;

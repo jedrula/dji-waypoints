@@ -24,7 +24,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { toPuwg92, toWgs84 } from './puwg92.js';
-import { pickZoom, tileRange, tileBounds, TILE_PX } from './tiles.js';
+import { tileRange, tileCount, tileBounds, mPerPx, TILE_PX } from './tiles.js';
 import { groundAt, puwgToLocal, localToTile, drapeWire } from './surface.js';
 import { serviceUrl, serviceHeaders } from './service.js';
 import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, asHex } from './palette.js';
@@ -238,7 +238,7 @@ export function createScene3D(canvas) {
           surfaceMesh.material.uniforms.uPatch.value = patchUv();
         }
         render();
-      } catch { /* keep the picture we have */ } finally { redraping = false; }
+      } catch (e) { console.warn('re-drape failed:', e); } finally { redraping = false; }
     }, 350);
   }
 
@@ -338,6 +338,60 @@ export function createScene3D(canvas) {
     });
   }
 
+  // One image, loaded. Basemap tiles do send CORS headers -- measured, see the
+  // note in js/tiles.js -- and without asking for it the canvas would be
+  // tainted and could not become a WebGL texture at all.
+  const loadTile = (url) => new Promise((done) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => done(img);
+    img.onerror = () => done(null);
+    img.src = url;
+  });
+
+  // Does this zoom hold real imagery here?
+  //
+  // Worth asking rather than declaring. ArcGIS answers a request past its own
+  // coverage with an enlargement of the deepest real tile rather than an error,
+  // so asking too deep costs four times the tiles for a blur -- and `maxNative`
+  // in js/basemap.js is one number for the whole world, which the truth is not.
+  // Measured 2026-09-09 through this very endpoint: zoom 21 exists over
+  // Wroclaw, Krakow and the Tatras, and does not exist over rural Mazowieckie.
+  //
+  // The first attempt at this compared a tile against its parent enlarged and
+  // called the higher zoom real if it carried a quarter more high-frequency
+  // detail. It does work on a textured roof -- zoom 20 over Cybulskiego scored
+  // 1.8x -- and it fails on a car park, because smooth ground has little
+  // detail to carry at any resolution. It rejected native tiles and cost the
+  // picture more than it saved. A service that will simply tell you is better
+  // than a heuristic about pixels.
+  //
+  // Measured through this endpoint 2026-09-09, which shows the declared number
+  // was wrong in BOTH directions:
+  //
+  //     Wroclaw Cybulskiego   z20 held   z21 held   z22 held
+  //     rural Mazowieckie     z20 held   z21 NOT held
+  //
+  // So 21 was costing detail in the city and buying enlargements in the
+  // countryside. Nothing here clamps to maxNative any more; the zoom is what
+  // the output needs, bounded by the tile budget and by what is actually held.
+  //
+  // Cached per service, zoom and neighbourhood, and the PROMISE is cached, so
+  // a run of re-drapes over the same ground asks once. A probe that fails
+  // answers yes: not knowing must not cost detail.
+  const probes = new Map();
+  function nativeAt(z, x, y) {
+    if (!groundSpec?.tilemap) return Promise.resolve(true);
+    const key = `${groundSpec.url(0, 0, 0)}|${z}|${x >> 3}|${y >> 3}`;
+    if (probes.has(key)) return probes.get(key);
+    const job = fetch(groundSpec.tilemap(z, x, y, 2, 2))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => !Array.isArray(j?.data) || j.data.some(Boolean))
+      .catch(() => true);
+    probes.set(key, job);
+    return job;
+  }
+
   // The map's own imagery, reprojected onto the tile. The only source of
   // colour this view has.
   //
@@ -391,20 +445,33 @@ export function createScene3D(canvas) {
     const ne = toWgs84(E0 + b.e1, N0 + b.n1);
     const bbox = { south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon };
 
-    // A bigger tile budget than the flat view's, because this is fetched on a
-    // camera settling rather than on every frame. Zoom 19 over a whole tile is
-    // about 121 requests of a few tens of kilobytes, which is what a map pane
-    // loads while you pan.
-    const z = Math.min(
-      pickZoom(bbox, { maxTiles: 160, maxZoom: 22 }),
-      groundSpec.maxZoom ?? 19,
-    );
-    const r = tileRange(bbox, z);
-
     // 2048 across the patch. Over a whole tile that is 24 cm a pixel -- what
     // the national orthophoto was, and finer than the half-metre height grid it
-    // is draped on. Over a 100 m patch it is 5 cm.
+    // is draped on. Over a 100 m patch it is 5 cm. Declared here rather than
+    // beside the canvas it sizes, because the zoom below is chosen FROM it: it
+    // was below, and `const` in a temporal dead zone threw a ReferenceError
+    // that both callers swallowed, so the drape silently never happened.
     const P = 2048;
+
+    // Deep enough to fill the output and no deeper. tiles.js's pickZoom answers
+    // a different question -- the most detail that fits a budget -- and using
+    // it here fetched four times the tiles for pixels the canvas cannot hold.
+    const target = (b.e1 - b.e0) / P;
+    const midLat = (bbox.south + bbox.north) / 2;
+    let z = 14;
+    while (z < 23 && mPerPx(midLat, z) > target) z++;
+
+    // Then within reach: a budget, because this is a burst of requests at a
+    // public CDN, and then the probe, because asking for detail the service
+    // does not hold costs four times the tiles for an enlargement.
+    while (z > 14 && tileCount(tileRange(bbox, z)) > 160) z--;
+    for (let guard = 0; guard < 6 && z > 14; guard++) {
+      const at = tileRange(bbox, z);
+      if (await nativeAt(z, at.x0, at.y0)) break;
+      z--;
+    }
+    const r = tileRange(bbox, z);
+
     const c = document.createElement('canvas');
     c.width = P;
     c.height = P;
@@ -416,19 +483,11 @@ export function createScene3D(canvas) {
       y: (((N0 + b.n1) - n) / (b.n1 - b.n0)) * P,
     });
 
-    const load = (url) => new Promise((done) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';   // it becomes a WebGL texture
-      img.onload = () => done(img);
-      img.onerror = () => done(null);
-      img.src = url;
-    });
-
     const jobs = [];
     for (let ty = r.y0; ty <= r.y1; ty++) {
       for (let tx = r.x0; tx <= r.x1; tx++) jobs.push({ tx, ty });
     }
-    const imgs = await Promise.all(jobs.map((j) => load(groundSpec.url(z, j.tx, j.ty))));
+    const imgs = await Promise.all(jobs.map((j) => loadTile(groundSpec.url(z, j.tx, j.ty))));
 
     let drawn = 0;
     for (let i = 0; i < jobs.length; i++) {
@@ -972,7 +1031,13 @@ export function createScene3D(canvas) {
       next.ortho = got?.tex ?? null;
       next.orthoBox = got?.box ?? null;
       next.orthoMpp = got?.metresPerPixel ?? null;
-    } catch { /* colour by classification instead, which is no less true */ }
+    } catch (e) {
+      // Classification colours instead, which is no less true -- but say so.
+      // A bare catch here hid a ReferenceError through several rounds of
+      // testing, and "the picture is missing" is indistinguishable from "this
+      // ground has no picture" unless the error is spoken.
+      console.warn('the map could not be draped:', e);
+    }
 
     // The buildings, as solids with walls -- the one thing the surface cannot
     // hold. Not fatal if it fails: the surface stands on its own and the wall
@@ -1036,7 +1101,8 @@ export function createScene3D(canvas) {
       groundSpec = spec ?? null;
       const now = groundSpec?.url?.(0, 0, 0) ?? null;
       if (was === now || !loaded || !renderer) return;
-      const got = await basemapTexture(loaded.meta, loaded.orthoBox).catch(() => null);
+      const got = await basemapTexture(loaded.meta, loaded.orthoBox)
+        .catch((e) => { console.warn('re-drape failed:', e); return null; });
       if (!got) return;
       loaded.ortho?.dispose?.();
       loaded.ortho = got.tex;

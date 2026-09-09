@@ -36,6 +36,19 @@ const KEY = 'dji.basemap';
 export const tileUrl = (service) => (z, x, y) =>
   `https://server.arcgisonline.com/ArcGIS/rest/services/${service}/MapServer/tile/${z}/${y}/${x}`;
 
+// Which tiles the service actually HOLDS, as opposed to which it will answer
+// for. ArcGIS answers a request past its own coverage with an enlargement of
+// the deepest real tile rather than an error, so `maxNative` above is the only
+// thing standing between us and fetching four times the tiles for a blur -- and
+// it is one number for the whole world, which the truth is not: measured
+// 2026-09-09, zoom 21 exists over Wroclaw, Krakow and the Tatras and does not
+// exist over rural Mazowieckie.
+//
+// This endpoint answers per place. `data` is a row-major block of 1s and 0s,
+// one per tile, and it is a small JSON rather than an image.
+export const tilemapUrl = (service) => (z, x, y, w = 2, h = 2) =>
+  `https://server.arcgisonline.com/ArcGIS/rest/services/${service}/MapServer/tilemap/${z}/${y}/${x}/${w}/${h}`;
+
 export function createBasemaps({ map, onChange = () => {} }) {
   const layers = {};
   let active = 'satellite';
@@ -91,6 +104,7 @@ export function createBasemaps({ map, onChange = () => {} }) {
       return {
         on,
         url: tileUrl(spec.url),
+        tilemap: tilemapUrl(spec.url),
         maxZoom: spec.maxNative,
         attribution: spec.attribution.replace(/&copy;/g, '©'),
       };

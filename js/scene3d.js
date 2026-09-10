@@ -1689,7 +1689,11 @@ export function createScene3D(canvas) {
       // second test every replan reopened the view and re-fetched the mesh,
       // which is 7.3 MB a time.
       if (!loaded && !meshTiles.size) { api.open(); return; }
-      if (meshTiles.size) { buildMission(); render(); return; }
+      // Re-checked, not just redrawn. The whole point of the finding is that
+      // acting on it makes it go away, and a stale "25 legs fly into
+      // buildings" after you raised the flight is worse than no finding: it
+      // says the fix did not work when it did.
+      if (meshTiles.size) { buildMission(); reportMesh(); render(); return; }
       if (moved) buildSurface(); else { buildMission(); render(); }
     },
 

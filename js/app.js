@@ -1106,9 +1106,15 @@ function renderAlert(over) {
   // an overhead line, because a facade is not a guess.
   const mesh = state.mesh;
   if (mesh?.hits) {
-    say('strike', mesh.hits === 1
-      ? 'One leg flies into a building the mesh has measured.'
-      : `${mesh.hits} legs fly into buildings the mesh has measured.`);
+    // Raising the altitude does NOT clear these, and saying otherwise would be
+    // the worst kind of wrong. Measured over Cybulskiego: 27 m and 40 m both
+    // leave 25 legs through buildings, because ring heights are FRACTIONS of
+    // the altitude -- the lowest orbit ring sits near a quarter of it -- so
+    // clearing 24 m of building that way needs about 165 m, past the 120 m the
+    // readout will ever offer. The lever is the ring height, not the altitude.
+    say('strike', `${mesh.hits === 1 ? 'One leg flies' : `${mesh.hits} legs fly`} into `
+      + 'buildings the mesh has measured. Raising the altitude will not clear this — '
+      + 'the low rings scale with it. Fewer rings, or a smaller site, will.');
   }
   if (mesh?.tallest !== null && mesh?.tallest !== undefined) {
     const need = mesh.tallest + clearance();

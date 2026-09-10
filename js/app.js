@@ -949,6 +949,10 @@ function computePlan() {
     for (const g of [layers.path, layers.dots, layers.poses, layers.conflicts]) g.clearLayers();
     view3d.setMission(null);
     view3d.setObstacles([], []);
+    view3d.setVerdict(null);
+    // The survey view was never told, so Clear cleared the map and the flat
+    // view and left the orbits hanging in the mesh.
+    lidar?.setMission(null, null);
     renderPoints();
     renderReadout();
     writeUrl();
@@ -1058,6 +1062,8 @@ function renderReadout() {
     // speaks when it has something the tip does not: a site with every pass
     // switched off plans nothing, and that is not obvious from the map.
     box.textContent = site.capture().length ? 'Enable at least one pass in Advanced.' : '';
+    // An empty box is a grey stripe saying nothing, so it goes away entirely.
+    box.hidden = !box.textContent;
     renderFix();
     renderPasses();
     return;
@@ -1070,6 +1076,7 @@ function renderReadout() {
   const sum = state.coverage?.summary;
   const cov = sum ? Math.round(sum.good + sum.flat) : null;
   const covText = cov === null ? '…' : `${cov}%`;
+  box.hidden = false;
   box.className = 'readout';
   box.innerHTML = `
     <div><b>${s.photos}</b><span>photos</span></div>

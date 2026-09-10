@@ -2657,9 +2657,26 @@ export function createScene3D(canvas) {
       // every replan of an empty site -- the app clears the plan when the last
       // point goes -- and clearing the anchor there threw away the frame the
       // view was standing on before it had drawn a single tile.
-      if (m) anchor = null;
+      // Clearing the points does not clear the GROUND, so the frame the
+      // ground is drawn in has to survive: the mission's own frame becomes the
+      // anchor, and the tiles, the squares and click-to-fetch all keep working
+      // in the coordinates they are already in.
+      if (m) anchor = null; else if (was) anchor = was;
       hazard = h;
-      if (!renderer || !mission) return;
+      if (!renderer) return;
+      // No flight: take the flight away. This used to `return` here with the
+      // mission already nulled, so Clear left the last plan's orbits, its
+      // chips and its camera wedges drawn over the mesh -- and every one of
+      // them belonged to a plan that no longer existed.
+      if (!mission) {
+        if (missionGroup) { scene.remove(missionGroup); dropFat(missionGroup); missionGroup = null; }
+        if (wireGroup) { scene.remove(wireGroup); wireGroup = null; }
+        meshHazard = null;
+        buildLevelChips();
+        onMesh(null);
+        render();
+        return;
+      }
       // The view can be open before there is anything to look at -- picked
       // straight from the address bar, before a single point is tapped -- and
       // then it is the arrival of a flight that has to start the loading. Not

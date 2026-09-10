@@ -1102,6 +1102,60 @@ export function createScene3D(canvas) {
     onMesh(found);
   }
 
+  // The lowest each orbit ring can fly and still clear what the mesh measured.
+  //
+  // This is the shape of the thing worth having: tight, not high. Raising the
+  // altitude lifts everything and throws away the close work; this lifts each
+  // ring by exactly what that ring needs, so a ring in a courtyard clears the
+  // courtyard and a ring outside it stays where it was.
+  //
+  // Per ring rather than per flight because that is where the problem lives.
+  // The ground under a ring is the roofline it circles, and the rings differ:
+  // over Cybulskiego the lowest sat at 6.3 m under 24 m of building while the
+  // top one was already clear.
+  //
+  // One pass, deliberately. Lifting a ring makes the dome pull in, so the
+  // waypoints move and the answer shifts slightly -- and the collision check
+  // runs again straight after and says whether it is clear. Iterating to a
+  // fixed point would be a solver where a number and a re-check will do.
+  //
+  // Waypoints over ground no tile covers are skipped, not assumed clear. A
+  // ring only partly seen is lifted by what can be seen of it, and the readout
+  // says how much was not.
+  function fitRings(clearanceM) {
+    if (!meshMode || !heights || !mission) return null;
+    const rings = mission.heights?.orbit;
+    if (!rings?.length) return null;
+    const path = mission.exported ?? mission.waypoints ?? [];
+    const frame = mission.frame;
+
+    const needed = rings.map(() => -Infinity);
+    let judged = 0;
+    let skipped = 0;
+    for (const w of path) {
+      if (w.pass !== 'orbit') continue;
+      // Which ring this waypoint belongs to: the one whose height it flies.
+      let ri = -1;
+      for (let i = 0; i < rings.length; i++) {
+        if (Math.abs(rings[i] - w.alt) < 0.05) { ri = i; break; }
+      }
+      if (ri < 0) continue;
+      const l = frame.toLocal(w.lat, w.lon);
+      const g = groundUnder(l.x, -l.y);
+      if (g === null) { skipped++; continue; }
+      judged++;
+      if (g + clearanceM > needed[ri]) needed[ri] = g + clearanceM;
+    }
+    if (!judged) return null;
+
+    // Never lower than it flies now: this only ever lifts. A ring the mesh
+    // says is already clear is left exactly where you put it.
+    const to = rings.map((h, i) => (Number.isFinite(needed[i])
+      ? Math.round(Math.max(h, needed[i]) * 10) / 10
+      : h));
+    return { rings, to, judged, skipped, changed: to.some((z, i) => z > rings[i] + 0.05) };
+  }
+
   const sayMesh = () => onStatus(
     `Photogrammetric mesh, ${meshTiles.size} tile${meshTiles.size === 1 ? '' : 's'} `
     + 'of 100 m, 0.09 m in position. '
@@ -1365,14 +1419,33 @@ export function createScene3D(canvas) {
     // ENU (x east, y north, z up) to three.js (x east, y up, z south).
     const dir = (o) => new THREE.Vector3(o.x, o.z, -o.y);
 
-    // Readable rather than to scale, and the same rule view3d.js uses so a
-    // wedge is the same size in both views: a tenth of the site, capped by the
-    // height flown so a low pass cannot draw a cone through the ground.
+    // How far a wedge reaches: to whatever its camera is actually looking at.
+    //
+    // It used to be a tenth of the FLIGHT's extent, capped by the altitude --
+    // which on a tight site is 5.4 m, so every wedge was a stub, and the low
+    // orbit rings were stubs hidden behind the buildings they were pointing at.
+    // Length carried no information either: a camera aimed at a wall ten metres
+    // away drew the same cone as one aimed at the ground forty metres below.
+    //
+    // Now each one is marched along its own axis against the height grid the
+    // collision check uses, and stops where it meets something. So the wedge
+    // lands ON the roof or facade it is framing, which is the thing you wanted
+    // to see, and its length tells you the shot distance. 8,400 grid lookups
+    // for seventy wedges, which is nothing.
     const box = new THREE.Box3();
     for (const w of path) box.expandByPoint(at(w));
-    const size = box.getSize(new THREE.Vector3());
-    const span = Math.max(size.x, size.z, 20);
-    const len = Math.max(2, Math.min(span * 0.09, Math.max(box.max.y, 1) * 0.7));
+    const span = Math.max(box.getSize(new THREE.Vector3()).x, 20);
+    const fallback = Math.max(6, Math.min(span * 0.25, Math.max(box.max.y, 1) * 0.8));
+    const REACH = 140;
+    const reachOf = (apex, fwd) => {
+      if (!heights) return fallback;
+      for (let d = 2; d <= REACH; d += 1) {
+        const g = groundUnder(apex.x + fwd.x * d, apex.z + fwd.z * d);
+        if (g !== null && apex.y + fwd.y * d <= g) return d;
+      }
+      // Nothing in shot -- pointing at the sky, or off the fetched ground.
+      return fallback;
+    };
 
     // Every waypoint is too many to see through, and this is a diagram of the
     // camera work rather than an inventory. Same thinning rule as view3d.
@@ -1391,6 +1464,7 @@ export function createScene3D(canvas) {
         const f = dir(o.forward);
         const r = dir(o.right);
         const u = dir(o.up);
+        const len = reachOf(apex, f);
         const far = corners.map(([sx, sy]) => apex.clone().add(
           f.clone().addScaledVector(r, sx * th).addScaledVector(u, sy * tv)
             .normalize().multiplyScalar(len)));
@@ -1408,8 +1482,9 @@ export function createScene3D(canvas) {
       const g = new THREE.BufferGeometry().setFromPoints(pts);
       missionGroup.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({
         color: asHex(PASS_COLOR[pass] ?? PASS_FALLBACK),
-        // Faint: they are context for the route, and there are a lot of them.
-        transparent: true, opacity: 0.34,
+        // Faint, but not invisible. 0.34 was lost against a photographic
+        // surface once the mesh replaced flat classification colours.
+        transparent: true, opacity: 0.62,
       })));
     }
   }
@@ -1750,6 +1825,10 @@ export function createScene3D(canvas) {
     // rather than returned, because it is answered when a tile arrives and not
     // when anybody asks.
     onMesh(fn) { onMesh = fn ?? (() => {}); },
+
+    // The lowest the rings can fly and still clear the mesh. Asked for by the
+    // readout when somebody takes the offer, not computed speculatively.
+    fitRings,
 
     // Opening the view is what fetches three.js, the surface and the photo. The
     // first time over new ground that is minutes, and the status says so.

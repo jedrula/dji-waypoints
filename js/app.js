@@ -1131,7 +1131,7 @@ function renderAlert(over) {
     // readout will ever offer. The lever is the ring height, not the altitude.
     say('strike', `${mesh.hits === 1 ? 'One leg flies' : `${mesh.hits} legs fly`} into `
       + 'buildings the mesh has measured. Raising the altitude will not clear it — the low '
-      + 'rings scale with it. Drag a low ring up in the flat 3D view instead.');
+      + 'rings scale with it, so lift the rings themselves.');
   }
   if (mesh?.tallest !== null && mesh?.tallest !== undefined) {
     const need = mesh.tallest + clearance();
@@ -1221,6 +1221,42 @@ function renderAlert(over) {
     line.className = f.rank_ === 'fit' ? 'fitnote' : '';
     line.textContent = f.text;
     el.append(line);
+  }
+
+  // One action, and when the mesh has found a facade it is THIS one rather than
+  // a raise -- because raising cannot clear a facade and lifting the rings can.
+  // Offered ahead of the raise for the same reason the finding is ranked above
+  // it: it is the fix that works.
+  const fit = mesh?.hits ? lidar?.fitRings(clearance()) : null;
+  if (fit?.changed) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = 'Lift the rings clear of the mesh';
+    b.addEventListener('click', () => {
+      tuned = true;
+      pinned.orbitHeights = fit.to;
+      computePlan();
+      history.commit();
+    });
+    el.append(b);
+    const note = document.createElement('div');
+    note.className = 'fitnote';
+    // What it will do, before it does it -- and what it costs. Rings that all
+    // circle the same courtyard all have to clear the same roofline, so they
+    // land within a metre of each other and the vertical parallax that three
+    // rings exist for is gone. That is the clearance talking, not the fitter:
+    // at 15 m nothing can be tight beside a 24 m building.
+    const spread = Math.max(...fit.to) - Math.min(...fit.to);
+    note.textContent = `${fit.rings.map((h, i) => (fit.to[i] > h + 0.05
+      ? `${h.toFixed(0)}→${fit.to[i].toFixed(0)} m`
+      : `${h.toFixed(0)} m stays`)).join(', ')}`
+      + (fit.to.length > 1 && spread < 3
+        ? ` · they end up within ${spread.toFixed(1)} m of each other, so the rings stop `
+          + `buying different viewpoints — lower the ${clearance()} m clearance to stay tighter`
+        : '')
+      + (fit.skipped ? ` · ${fit.skipped} waypoints over ground not fetched, so not judged` : '');
+    el.append(note);
+    return;
   }
 
   // One action. Raising to the tallest requirement satisfies the shorter ones,

@@ -1780,17 +1780,19 @@ applyUiValues({
   shotsPerStop: DEFAULTS.shotsPerStop,
   orbitRings: DEFAULTS.orbitRings,
   surroundRings: DEFAULTS.surroundRings,
-  // ONE pass to open with: the nadir grid, which is the orthophoto mission and
-  // the thing everybody wants first. Everything else is a checkbox in Advanced
-  // and adds itself to this.
+  // TWO passes to open with, which is the smallest thing that is still a
+  // reconstruction: the nadir grid for the ground -- the orthophoto mission --
+  // and one dome round each thing you tapped, for its sides. A grid alone
+  // photographs roofs and pavement and gives a splat nothing to stand up.
   //
-  // It opened with five passes on -- nadir, oblique, orbit, surround and the
-  // establishing ring -- which is a good 3DGS recipe and a terrible first
-  // screen: a hundred waypoints and four coloured passes over a site you have
-  // just tapped, before you have said what you are doing. js/planner.js keeps
-  // the full recipe as its DEFAULTS, because that is the library's answer to
-  // "plan me a reconstruction"; this is the app's answer to "I just opened it".
-  nadir: true, oblique: false, orbit: false, surround: false, transect: false, establish: false,
+  // It opened with five on -- adding oblique, surround and the establishing
+  // ring -- which is a good 3DGS recipe and a terrible first screen: a hundred
+  // waypoints and four coloured passes over a site you have just tapped,
+  // before you have said what you are doing. The other three are checkboxes in
+  // Advanced and add themselves to this. js/planner.js keeps the full recipe
+  // as its DEFAULTS, because that is the library's answer to "plan me a
+  // reconstruction"; this is the app's answer to "I just opened it".
+  nadir: true, orbit: true, oblique: false, surround: false, transect: false, establish: false,
 });
 try {
   const c = localStorage.getItem(CLEARANCE_KEY);

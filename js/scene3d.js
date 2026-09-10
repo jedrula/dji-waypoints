@@ -632,6 +632,9 @@ export function createScene3D(canvas) {
     renderer.setSize(w, h, false);
     // In CSS pixels, which is the unit `linewidth` is then in.
     for (const m of fatMats) m.resolution.set(w, h);
+    // And gl_PointSize is in framebuffer pixels, so the tap dots have to be
+    // scaled by the ratio to stay ten CSS pixels across.
+    tapSkin.size = TAP_PX * dpr;
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   }
@@ -2177,15 +2180,53 @@ export function createScene3D(canvas) {
     });
   }
 
-  // The taps themselves, as balls: geometry and material built once, because
-  // buildMission runs on every slider tick.
-  // Two metres of radius: about four pixels at the distance this view opens
-  // at, which is the smallest thing you can still recognise as the circle from
-  // the map. It is a marker, not a model -- it does not mean the thing you
-  // tapped is 4 m across.
-  const TAP_R = 2;
-  const tapBall = new THREE.SphereGeometry(TAP_R, 16, 12);
-  const tapSkin = new THREE.MeshBasicMaterial({ color: asHex(TAP_COLOR) });
+  // The taps themselves, as dots of a FIXED SIZE ON SCREEN.
+  //
+  // They were 2 m spheres, and a sphere is the wrong object: the marker sits at
+  // the height you said the thing is, the mesh draws the roof it is standing
+  // on, and the two agree to about 30 cm -- measured over Cybulskiego, the
+  // mesh roof is 22.7 m above its own datum where the taps say 23 -- so a ball
+  // with a 2 m radius is half buried in the roof and half floating over it.
+  // Unlit, that reads as a disc pasted at the wrong place rather than a marker
+  // on a surface. A point sprite has no size in the world at all: it is ten
+  // pixels wherever the camera is, which is what the circle on the map is too.
+  //
+  // gl_PointSize is in FRAMEBUFFER pixels, so the size is set from the device
+  // pixel ratio in size() rather than here.
+  const TAP_PX = 10;
+  const tapSkin = new THREE.PointsMaterial({
+    color: asHex(TAP_COLOR),
+    size: TAP_PX,
+    sizeAttenuation: false,
+    map: dotTexture(),
+    transparent: true,
+    // Cut the square corners of the sprite rather than blending them, so a dot
+    // is a dot and one behind a wall is still hidden by the wall.
+    alphaTest: 0.5,
+  });
+
+  // A filled circle, for the sprite above. Drawn rather than fetched: an
+  // eight-by-eight PNG is not worth a request, and this view already builds
+  // its sky the same way.
+  function dotTexture() {
+    const c = document.createElement('canvas');
+    c.width = 32;
+    c.height = 32;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(16, 16, 13, 0, Math.PI * 2);
+    ctx.fill();
+    // A dark ring, because a ten-pixel dot has to read on a white roof and in
+    // the shadow beside it, and the same blue does neither on its own. The map
+    // gets this for free from its own circle border.
+    ctx.strokeStyle = 'rgba(8,12,18,0.85)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
 
   function buildMission() {
     if (!scene || !mission) return;
@@ -2207,15 +2248,24 @@ export function createScene3D(canvas) {
     // pointed and the stem says how tall you said it was. Unlit on purpose --
     // it is a marker, and a marker that takes the scene's light reads as an
     // object standing there.
-    for (const q of mission.points ?? []) {
-      const top = Math.max(q.height ?? 0, TAP_R);
-      const ball = new THREE.Mesh(tapBall, tapSkin);
-      ball.position.set(q.x, top, -q.y);
-      missionGroup.add(ball);
-      if (top > TAP_R * 1.5) {
-        missionGroup.add(fatSegments([
-          { x: q.x, y: 0, z: -q.y }, { x: q.x, y: top - TAP_R, z: -q.y },
-        ], { color: asHex(TAP_COLOR), linewidth: 2, transparent: true, opacity: 0.6 }));
+    const taps = mission.points ?? [];
+    if (taps.length) {
+      const heads = taps.map((q) => new THREE.Vector3(q.x, Math.max(q.height ?? 0, 0), -q.y));
+      missionGroup.add(new THREE.Points(
+        new THREE.BufferGeometry().setFromPoints(heads), tapSkin,
+      ));
+      // A stem to the ground under each, so a dot at 23 m is a dot on top of
+      // something rather than a dot hanging in the air. Where the thing is
+      // solid the stem is inside it and the mesh hides it, which is correct.
+      const stems = [];
+      for (const q of taps) {
+        if ((q.height ?? 0) < 1) continue;
+        stems.push({ x: q.x, y: 0, z: -q.y }, { x: q.x, y: q.height, z: -q.y });
+      }
+      if (stems.length) {
+        missionGroup.add(fatSegments(stems, {
+          color: asHex(TAP_COLOR), linewidth: 2, transparent: true, opacity: 0.55,
+        }));
       }
     }
 

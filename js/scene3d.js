@@ -38,7 +38,7 @@ import { tileRange, tileCount, tileBounds, mPerPx, TILE_PX } from './tiles.js';
 import { groundAt, puwgToLocal, localToTile, drapeWire, stitch } from './surface.js';
 import { toWgs84 as puwgToWgs84 } from './puwg92.js';
 import { serviceUrl, serviceHeaders } from './service.js';
-import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, VERDICT_COLOR, asHex } from './palette.js';
+import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, VERDICT_COLOR, TAP_COLOR, asHex } from './palette.js';
 import { fov, orientation } from './camera.js';
 // A local tangent frame, for when there is no mission to borrow one from.
 import { frame } from './geo.js';
@@ -2177,6 +2177,16 @@ export function createScene3D(canvas) {
     });
   }
 
+  // The taps themselves, as balls: geometry and material built once, because
+  // buildMission runs on every slider tick.
+  // Two metres of radius: about four pixels at the distance this view opens
+  // at, which is the smallest thing you can still recognise as the circle from
+  // the map. It is a marker, not a model -- it does not mean the thing you
+  // tapped is 4 m across.
+  const TAP_R = 2;
+  const tapBall = new THREE.SphereGeometry(TAP_R, 16, 12);
+  const tapSkin = new THREE.MeshBasicMaterial({ color: asHex(TAP_COLOR) });
+
   function buildMission() {
     if (!scene || !mission) return;
     if (missionGroup) { scene.remove(missionGroup); dropFat(missionGroup); }
@@ -2187,6 +2197,27 @@ export function createScene3D(canvas) {
       const l = frame.toLocal(w.lat, w.lon);
       return new THREE.Vector3(l.x, w.alt, -l.y);
     };
+
+    // What you tapped, in the blue the map draws its circles in.
+    //
+    // This view drew everything EXCEPT that: the flight, the ground, the
+    // squares, the wires -- all of them derived from the taps, and the taps
+    // themselves invisible. So a ball sits at the tapped height, which is the
+    // top of the thing, on a stem down to the ground: the ball says where you
+    // pointed and the stem says how tall you said it was. Unlit on purpose --
+    // it is a marker, and a marker that takes the scene's light reads as an
+    // object standing there.
+    for (const q of mission.points ?? []) {
+      const top = Math.max(q.height ?? 0, TAP_R);
+      const ball = new THREE.Mesh(tapBall, tapSkin);
+      ball.position.set(q.x, top, -q.y);
+      missionGroup.add(ball);
+      if (top > TAP_R * 1.5) {
+        missionGroup.add(fatSegments([
+          { x: q.x, y: 0, z: -q.y }, { x: q.x, y: top - TAP_R, z: -q.y },
+        ], { color: asHex(TAP_COLOR), linewidth: 2, transparent: true, opacity: 0.6 }));
+      }
+    }
 
     // Collision mode: forget which pass a leg belongs to and say only whether
     // it can be flown. Green clear, red into something, grey never checked --

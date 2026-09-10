@@ -24,7 +24,7 @@ import { planMission, proposePlan, splitMission, pointsFromRect, DEFAULTS, DJI_F
 import { SHAPES, DEFAULT_SHAPE, footprintOf, polygonArea } from './shape.js';
 import { frame, mPerDegLat, mPerDegLon } from './geo.js';
 import { mPerPx } from './tiles.js';
-import { PASS_COLOR, LEG_COLOR, passColour } from './palette.js';
+import { PASS_COLOR, LEG_COLOR, TAP_COLOR, passColour } from './palette.js';
 import { buildKmz } from './wpml.js';
 import { createView3D } from './view3d.js';
 import { scoreCoverage } from './coverage.js';
@@ -599,7 +599,7 @@ const siteForPlanner = () => ({
 // and the only difference was what the planner did with them. Obstacles are
 // gone (see js/site.js for why the survey replaced them), so this is what a
 // tap makes and the only thing a tap makes.
-const POINT_COLOUR = '#4da3ff';
+const POINT_COLOUR = TAP_COLOR;
 const POINT_TIP = 'Tap the map on what you want captured. Tap a point to set how tall it is.';
 
 // One tap, one point. Placing is the whole interaction: there is no

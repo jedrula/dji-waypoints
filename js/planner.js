@@ -27,26 +27,21 @@ export const DEFAULTS = {
   orbit: true,
   orbitPad: 15,          // metres outside the box corners
   subjectClearance: 2,   // how far a dome stands off a thing, and off its neighbours
-  // Rings per THING, not per site. TWO of them: one below the top of the
-  // subject and one above it, which is what buys a facade its vertical
-  // parallax -- a subject seen from one elevation only has no depth on its
-  // walls at all.
+  // Rings per THING, not per site, and ONE of them: a single circle standing
+  // above what you tapped and looking down at it. That is the simple known-good
+  // pattern -- a grid for the ground, a circle above the thing for its sides --
+  // and it is what the app opens with. More rings are an opt-in.
   //
-  // It was three, on the reasoning "one looking up, one level, one looking
-  // down", and the measurement does not support the middle one. Re-measured
-  // 2026-09-10 with 3 m of clearance, coverage as the scorer reports it:
+  // It was three ("up, level, down"), then two, and the measurements are why it
+  // is now one. Coverage as the scorer reports it, 3 m clearance, 2026-09-10:
   //
   //     one tap, 23 m tall      1 ring 93.9%   2 rings 100%   3 rings +0.0
   //     a 40 x 20 m block       1 ring 98.3%   2 rings 100%   3 rings +0.0
   //
-  // and the third ring costs 21 waypoints and 1.6 minutes on the tap, 42 and
-  // 3.1 on the block. The scorer saturates -- it asks whether every surface is
-  // seen from three directions with enough spread, not whether a splat comes
-  // out prettier -- so this is not "three cannot help". It is that nothing
-  // here can show that it does, and this app does not spend a third of a
-  // battery on a number it cannot measure. Raise it in Advanced for a facade
-  // you care about.
-  orbitRings: 2,
+  // Two is measurably better than one and three is not measurably better than
+  // two -- but two costs 60% more flying than one for those few points, and a
+  // first plan is worth more simple than complete. The picker goes to five.
+  orbitRings: 1,
   // Where the LOWEST ring sits, in metres AGL. null spreads from half the set
   // altitude, which is an arbitrary anchor that happens to look reasonable. A
   // number here is the honest version: the height of the tallest thing under
@@ -426,8 +421,17 @@ function objectPass(g) {
   // it is honestly one ring.
   const spread = highZ - lowZ;
   const useRings = rings <= 1 || spread < 2 ? 1 : rings;
+  // ONE ring flies ABOVE the thing, not level with the middle of it.
+  //
+  // It used to sit at aimZ, the subject's own half-height, which is the best
+  // single elevation for a facade and a poor one for everything else: from
+  // level with the middle of a building you cannot see its roof at all, and
+  // the picture you get of a tapped point is a horizontal slice through it.
+  // Above the top, aimed down at the middle, one circle sees the roof, the
+  // upper walls and the ground around it -- over a 23 m subject that is 31 m
+  // up at a 34 degree tilt. It is the pattern anyone would fly by hand.
   const derived = useRings === 1
-    ? [Math.max(lowZ, Math.min(highZ, aimZ > lowZ ? aimZ : lowZ))]
+    ? [highZ]
     : Array.from({ length: useRings }, (_, k) => lowZ + (spread * k) / (useRings - 1));
 
   // Heights dragged in the 3D view win over the derived spread, the same way
@@ -1148,7 +1152,13 @@ export function proposePlan(site, base, cam, budget = {}) {
   const probe = planMission(site, { ...base, altitude: 40 }, cam);
   const subjectHeight = probe.params.subjectHeight;
   const hasHeight = subjectHeight > 0.5;
-  const ringChoices = hasHeight ? [2, 1] : [1];
+  // Down from whatever is set, never up. Auto-fit exists to make a plan FIT --
+  // a battery, DJI Fly's waypoint cap, the obstacles -- and dropping a ring is
+  // one of the few ways it can. Adding one is not its business: a plan opens
+  // with a single ring and the rest are yours to ask for, and a search that
+  // started at three handed back three however few you had chosen.
+  const want = hasHeight ? Math.max(1, Math.round(base.orbitRings ?? DEFAULTS.orbitRings)) : 1;
+  const ringChoices = Array.from({ length: want }, (_, i) => want - i);
 
   // How low the search may go. Over flat ground 20 m is a sensible floor. With
   // a subject that has height, the useful altitudes are just above it -- an

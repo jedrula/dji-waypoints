@@ -1,6 +1,6 @@
 import { fov, orientation } from './camera.js';
 import { GRADE_COLOR } from './coverage.js';
-import { PASS_COLOR, LEG_COLOR, VERDICT_COLOR } from './palette.js';
+import { PASS_COLOR, LEG_COLOR, VERDICT_COLOR, TAP_COLOR } from './palette.js';
 import { createTileCache, pickZoom, tileRange, tileBounds, TILE_PX } from './tiles.js';
 
 // A small hand-rolled 3D view. The scene is a few thousand line segments, so a
@@ -172,6 +172,10 @@ export function createView3D(canvas) {
       }))
       .sort((a, b) => a.z - b.z);
 
+    // The taps, in this frame's metres. Drawn as discs on stems -- the same
+    // thing the survey view draws as balls and the map as circles.
+    const taps = (mission.points ?? []).map((q) => ({ x: q.x, y: q.y, z: Math.max(q.height ?? 0, 0) }));
+
     // What actually flies, which is also what every collision check judges:
     // js/collide.js and js/scene3d.js both walk `exported`, and in interval
     // photo mode that skips the intermediate grid points -- so a verdict
@@ -206,7 +210,7 @@ export function createView3D(canvas) {
     area.x0 -= margin; area.x1 += margin;
     area.y0 -= margin; area.y1 += margin;
 
-    scene = { pts, flown, box, span, maxAlt, frustumLen, step, levels, legs, area };
+    scene = { pts, flown, taps, box, span, maxAlt, frustumLen, step, levels, legs, area };
 
     // Re-frame only when the ground box itself changed. Replanning -- which
     // happens on every slider tick and on every pixel of a level drag -- must
@@ -517,6 +521,29 @@ export function createView3D(canvas) {
     // Painter's algorithm over the visible faces of every box at once: there is
     // no depth buffer, so far faces have to be laid down before near ones.
     drawObstacles(b, w, h, f);
+
+    // What you tapped: a disc where you pointed, at the height you said, on a
+    // stem down to the ground. Before the flight, so the flight draws over it.
+    if (scene.taps.length) {
+      ctx.strokeStyle = TAP_COLOR;
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (const q of scene.taps) line({ ...q, z: 0 }, q, b, w, h, f);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = TAP_COLOR;
+      for (const q of scene.taps) {
+        const v = toView(q, b);
+        if (v.z <= NEAR) continue;
+        const p = project(v, w, h, f);
+        ctx.beginPath();
+        // A fixed size on screen, because it is a marker and not a thing that
+        // gets smaller as you pull the camera back.
+        ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
 
     // The flight. Normally one stroke per pass, so the colours say which pass
     // a line belongs to; in collision mode, one colour per VERDICT, because

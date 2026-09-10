@@ -164,11 +164,24 @@ ok('and the dome is flown around the tap itself',
    near(domesOf(tower)[0][0].heading.poi.lat, 50.061, 1e-5)
    && near(domesOf(tower)[0][0].heading.poi.lon, 19.931, 1e-5));
 {
-  const alts = [...new Set(domesOf(tower)[0].map((w) => Math.round(w.alt)))].sort((a, b) => a - b);
-  ok(`rings straddle the thing rather than sitting over it (${alts.join('/')} m for an 18 m tower)`,
+  // The DEFAULT is one ring, and it flies over the thing looking down at it --
+  // level with the middle of an 18 m tower you cannot see its roof.
+  const one = domesOf(tower)[0];
+  const oneAlts = [...new Set(one.map((w) => Math.round(w.alt)))];
+  ok(`one ring by default, above the thing (${oneAlts.join('/')} m over an 18 m tower)`,
+     oneAlts.length === 1 && oneAlts[0] > 18, oneAlts.join('/'));
+  ok(`and it looks down at it (${one[0].pitch}°)`, one[0].pitch < -10, String(one[0].pitch));
+}
+{
+  // Three rings, asked for: they straddle the thing rather than stacking over
+  // it, and the low one looks up where the high one looks down.
+  const three = planMission({ points: [{ lat: 50.061, lon: 19.931, height: 18 }] },
+    { altitude: 40, orbitRings: 3, nadir: false, oblique: false, surround: false }, cam);
+  const alts = [...new Set(domesOf(three)[0].map((w) => Math.round(w.alt)))].sort((a, b) => a - b);
+  ok(`three rings straddle the thing rather than sitting over it (${alts.join('/')} m for an 18 m tower)`,
      alts[0] < 18 && alts[alts.length - 1] > 18);
-  const low = domesOf(tower)[0].find((w) => w.alt === Math.min(...domesOf(tower)[0].map((q) => q.alt)));
-  const high = domesOf(tower)[0].find((w) => w.alt === Math.max(...domesOf(tower)[0].map((q) => q.alt)));
+  const low = domesOf(three)[0].find((w) => w.alt === Math.min(...domesOf(three)[0].map((q) => q.alt)));
+  const high = domesOf(three)[0].find((w) => w.alt === Math.max(...domesOf(three)[0].map((q) => q.alt)));
   ok(`a ring below the middle looks up and one above looks down (${low.pitch}° / ${high.pitch}°)`,
      low.pitch > high.pitch);
   // Every station aims at the thing's own middle, which is what frames it
@@ -733,8 +746,21 @@ ok('coordinates are lon,lat pairs', d.coords_ok);
 // Transits between domes are places the aircraft passes through, not stations,
 // so they carry no shutter.
 const shooting = m.exported.filter((w) => w.photo !== false).length;
-ok('one takePhoto per station, and none at a transit',
-   d.photos === shooting && shooting < m.exported.length, `${d.photos} of ${m.exported.length}`);
+ok('one takePhoto per station', d.photos === shooting, `${d.photos} of ${shooting}`);
+// And a transit is a place the aircraft passes through, not a station. They
+// only exist where a dome sits below the height the aircraft travels at, which
+// with one ring over one thing it does not -- so this asks a plan that has
+// them. Checked on the plan rather than on the KMZ because the rule is the
+// planner's: js/wpml.js writes a shutter for every station it is given.
+{
+  const two = planMission({ points: [
+    { lat: 50.061, lon: 19.931, height: 18 },
+    { lat: 50.061, lon: 19.9325, height: 6 },
+  ] }, { altitude: 25, orbitRings: 3, nadir: false, oblique: false, surround: false }, cam);
+  const transits = two.exported.filter((w) => w.transit);
+  ok(`a transit carries no shutter (${transits.length} of them)`,
+     transits.length > 0 && transits.every((w) => w.photo === false), String(transits.length));
+}
 ok('single-shot mode plans one frame per stop', m.exported.every(w => w.shots.length === 1));
 // The gimbal is commanded once per pitch change, not once per waypoint.
 const pitchChanges = m.exported.reduce((n, w, i) => n + (i === 0 || w.pitch !== m.exported[i - 1].pitch ? 1 : 0), 0);
@@ -2286,9 +2312,12 @@ console.log('\ncontroller bridge');
   ok('a site too big for the ceiling says how much it did fit',
      !hugeEst || /whole site|% of the site/.test(hugeEst.detail), hugeEst?.detail);
 
-  // Rule: 3.1 says repeat the orbit at different altitudes, low to top.
-  const rings = new Set(tall.exported.filter((w) => w.pass === 'orbit').map((w) => Math.round(w.alt)));
-  ok('the subject is orbited from more than one height', rings.size >= 3, `${rings.size} heights`);
+  // Rule: 3.1 says repeat the orbit at different altitudes, low to top. Asked
+  // for rather than assumed: the plan opens with ONE ring over the thing, and
+  // the low-to-top spread is what the ring picker buys.
+  const spread = planMission(square(30, 25), { ...DEFAULTS, orbitRings: 3 }, cam);
+  const rings = new Set(spread.exported.filter((w) => w.pass === 'orbit').map((w) => Math.round(w.alt)));
+  ok('the subject can be orbited from more than one height', rings.size >= 3, `${rings.size} heights`);
 }
 
 // -- what a list is allowed to forget ----------------------------------------

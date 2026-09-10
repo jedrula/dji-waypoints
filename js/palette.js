@@ -26,6 +26,12 @@ export const PASS_FALLBACK = '#8b98a5';
 // miss are not the same news, so they are not the same colour.
 export const LEG_COLOR = { clear: '#ffb84d', near: '#ff9f4d', strike: '#ff5d5d' };
 
+// A point you tapped. The map draws it as a circle, the flat 3D as a disc on a
+// stem and the survey as a ball on one -- one colour, because they are the same
+// thing seen three ways, and the whole point of the ball is that you recognise
+// it from the map.
+export const TAP_COLOR = '#4da3ff';
+
 // Collision mode: the flight painted by whether it can be flown at all, which
 // replaces the pass colours while it is on. Here rather than in either
 // renderer because both the flat view and the survey draw it, and a green that

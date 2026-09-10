@@ -135,6 +135,10 @@ export function createScene3D(canvas) {
   let onMesh = () => {};
   let meshHazard = null;
   let framedMesh = false;
+  let onLevel = () => {};
+  let onLevelDone = () => {};
+  let chipBox = null;
+  const chips = [];
   let running = false;
   let opening = false;
   let inFlight = null;
@@ -163,6 +167,14 @@ export function createScene3D(canvas) {
     // first time the view was ever opened.
     controls.enableDamping = false;
     controls.addEventListener('change', () => { render(); scheduleRedrape(); });
+    // The chips live over the canvas, and a drag on one is not an orbit.
+    chipBox = document.createElement('div');
+    chipBox.id = 'levelchips';
+    canvas.parentElement?.append(chipBox);
+    globalThis.addEventListener('pointermove', moveChip);
+    globalThis.addEventListener('pointerup', endChip);
+    globalThis.addEventListener('pointercancel', endChip);
+
     canvas.addEventListener('pointerdown', meshDown);
     canvas.addEventListener('pointermove', meshMove);
     canvas.addEventListener('click', meshClick);
@@ -576,6 +588,7 @@ export function createScene3D(canvas) {
     if (!renderer || !running) return;
     size();
     renderer.render(scene, camera);
+    placeLevelChips();
   }
 
   // Y is metres above the mission's home point, which is what every altitude in
@@ -1100,6 +1113,7 @@ export function createScene3D(canvas) {
     const found = checkMesh();
     meshHazard = found;
     buildMission();
+    buildLevelChips();
     onMesh(found);
   }
 
@@ -1310,6 +1324,123 @@ export function createScene3D(canvas) {
     const v = heights.max[r * heights.nx + c];
     return Number.isFinite(v) ? v : null;
   };
+
+  // Every height the flight uses, as a chip you can drag.
+  //
+  // This is the flat view's own gesture brought here, deliberately unchanged:
+  // the same chips down the left edge, the same grip, the same drag. The flat
+  // view had it and the mesh view -- the one that can actually tell you a ring
+  // is inside a building -- had nothing, so adjusting meant one view and
+  // checking meant the other.
+  //
+  // HTML over the canvas rather than geometry in it. A ring is a thin thing to
+  // hit and it can be behind a building; a chip is always reachable, always
+  // legible, and the browser does the hit-testing. `mission.levels` already
+  // tags every height with the knob that owns it -- altitude, orbit or transect
+  // -- which is what makes a drag land back on the right one.
+  function buildLevelChips() {
+    for (const c of chips) c.el.remove();
+    chips.length = 0;
+    if (!chipBox || !mission) return;
+    const levels = mission.levels ?? [];
+    if (!levels.length) return;
+
+    // Owners grouped by height: several passes can share one, and dragging it
+    // must move all of them or the flight would tear apart.
+    const byZ = new Map();
+    for (const lv of levels) {
+      const key = Math.round(lv.z * 10) / 10;
+      if (!byZ.has(key)) byZ.set(key, []);
+      byZ.get(key).push(lv);
+    }
+    // What flies at each height, so a chip says what it is and not just a
+    // number.
+    const passesAt = new Map();
+    for (const w of mission.exported ?? mission.waypoints ?? []) {
+      const key = Math.round(w.alt * 10) / 10;
+      if (!passesAt.has(key)) passesAt.set(key, new Set());
+      passesAt.get(key).add(w.pass);
+    }
+
+    for (const [z, handles] of [...byZ].sort((a, b) => b[0] - a[0])) {
+      const el = document.createElement('div');
+      el.className = 'levelchip';
+      const near = [...passesAt.keys()].reduce((best, k) => (Math.abs(k - z) < Math.abs(best - z) ? k : best), z);
+      const what = [...(passesAt.get(near) ?? [])].join(' + ') || handles[0].kind;
+      el.innerHTML = `<b></b><span></span>`;
+      el.querySelector('b').textContent = `${z < 10 ? z.toFixed(1) : z.toFixed(0)} m`;
+      el.querySelector('span').textContent = what;
+      chipBox.append(el);
+      const chip = { el, z, handles };
+      chips.push(chip);
+      el.addEventListener('pointerdown', (ev) => startChip(ev, chip));
+    }
+    placeLevelChips();
+  }
+
+  // Chips follow their height as you orbit, so the one you want is the one
+  // beside the ring it moves.
+  function placeLevelChips() {
+    if (!chipBox || !camera || !controls) return;
+    const h = canvas.clientHeight || 1;
+    const want = [];
+    for (const c of chips) {
+      const p = new THREE.Vector3(controls.target.x, c.z, controls.target.z).project(camera);
+      const y = ((1 - p.y) / 2) * h;
+      c.el.hidden = p.z > 1;
+      want.push({ c, y });
+    }
+
+    // Pushed apart, because zoomed out the levels project within a couple of
+    // pixels of each other and three chips became one illegible pile. Sorted
+    // by height and separated downwards, so the order still reads as the order
+    // they fly at even where the spacing no longer matches the metres.
+    const GAP = 25;
+    want.sort((a, b) => a.y - b.y);
+    for (let i = 1; i < want.length; i++) {
+      if (want[i].y - want[i - 1].y < GAP) want[i].y = want[i - 1].y + GAP;
+    }
+    // And if that pushed the stack off the bottom, slide the whole thing back
+    // up rather than letting the last ones fall out of the view.
+    const overflow = want.length ? want[want.length - 1].y - (h - 16) : 0;
+    if (overflow > 0) for (const w of want) w.y -= overflow;
+
+    for (const w of want) {
+      w.c.el.style.top = `${Math.max(4, w.y - 11)}px`;
+    }
+  }
+
+  let chipDrag = null;
+  function startChip(ev, chip) {
+    ev.stopPropagation();          // not an orbit, and not a pad click
+    ev.preventDefault();
+    // Metres per pixel at this height, measured rather than assumed: it depends
+    // on the camera distance and the projection, and it changes as you zoom.
+    const at = (z) => {
+      const p = new THREE.Vector3(controls.target.x, z, controls.target.z).project(camera);
+      return ((1 - p.y) / 2) * (canvas.clientHeight || 1);
+    };
+    const per = at(chip.z) - at(chip.z + 1);
+    chipDrag = { chip, y: ev.clientY, z0: chip.z, per: Math.abs(per) > 0.2 ? per : 4 };
+    chip.el.classList.add('dragging');
+    chip.el.setPointerCapture?.(ev.pointerId);
+  }
+  function moveChip(ev) {
+    if (!chipDrag) return;
+    const { chip, y, z0, per } = chipDrag;
+    // Up on screen is up in the air, which is why this subtracts.
+    const z = Math.round(Math.max(1, Math.min(500, z0 + (y - ev.clientY) / per)) * 10) / 10;
+    if (z === chip.z) return;
+    chip.z = z;
+    chip.el.querySelector('b').textContent = `${z < 10 ? z.toFixed(1) : z.toFixed(0)} m`;
+    onLevel(chip.handles, z);
+  }
+  function endChip() {
+    if (!chipDrag) return;
+    chipDrag.chip.el.classList.remove('dragging');
+    chipDrag = null;
+    onLevelDone();
+  }
 
   function buildWires() {
     if (!scene) return;
@@ -1830,6 +1961,11 @@ export function createScene3D(canvas) {
     // rather than returned, because it is answered when a tile arrives and not
     // when anybody asks.
     onMesh(fn) { onMesh = fn ?? (() => {}); },
+
+    // A level dragged in this view, and the end of that gesture -- the same two
+    // callbacks js/view3d.js offers, so the app wires one behaviour for both.
+    onLevel(fn) { onLevel = fn ?? (() => {}); },
+    onLevelDone(fn) { onLevelDone = fn ?? (() => {}); },
 
     // The lowest the rings can fly and still clear the mesh. Asked for by the
     // readout when somebody takes the offer, not computed speculatively.

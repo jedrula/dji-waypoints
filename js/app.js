@@ -149,6 +149,8 @@ async function lidarView() {
     // view, judgement here: it reports what is under the flight and what the
     // flight runs into, and the readout decides whether that is too close.
     lidar.onMesh((m) => { state.mesh = m; renderAlert(false); });
+    lidar.onLevel(moveLevel);
+    lidar.onLevelDone(() => history.commit());
     lidar.setLooks(looksOn);
     // Set here as well as in setView, because this is created lazily and the
     // first tile can load before the view is switched to.
@@ -167,7 +169,17 @@ async function setGround(name) {
   pushGround();
   applyViewCanvases();
   writeUrl();
-  if (name !== 'survey') { lidar?.close(); return; }
+  if (name !== 'survey') {
+    lidar?.close();
+    // Tell the flat view what it is standing on and make it draw. Neither
+    // happened here: setView set the ground spec and setGround did not, and
+    // nothing asked for a frame -- so picking "no ground" or "imagery" showed
+    // an empty canvas until some other event happened to trigger a draw, which
+    // in practice meant nudging the view.
+    view3d.setGround(basemaps.groundSpec(name === 'imagery'));
+    view3d.draw();
+    return;
+  }
   const view = await lidarView();
   view.setMission(state.mission, state.hazard);
   await view.open();
@@ -182,6 +194,9 @@ function applyViewCanvases() {
   $('scene').hidden = !show3d || survey;
   $('lidar').hidden = !show3d || !survey;
   if (show3d && survey) lidar?.resize();
+  // The same for the flat canvas: it had no client size while hidden, so
+  // whatever it drew last was drawn at the wrong size or not at all.
+  if (show3d && !survey) view3d.draw();
 }
 
 
@@ -1547,8 +1562,17 @@ $('findme').addEventListener('click', () => findMe());
 // slider here already does on every tick, and what makes the flight follow your
 // finger. The undo entry is committed at the end of the gesture, not during it,
 // or one drag would leave forty steps to undo.
-view3d.onLevelChange((handles, z) => {
+function moveLevel(handles, z) {
   for (const h of handles) {
+    // The altitude level is the altitude knob, not a pinned list. Dragging the
+    // grid height IS dragging the altitude slider, and it has to move with it
+    // or the two would disagree about the same number.
+    if (h.kind === 'altitude') {
+      tuned = true;
+      $('altitude').value = String(Math.round(Math.max(2, Math.min(120, z))));
+      readOuts();
+      continue;
+    }
     const key = h.kind === 'orbit' ? 'orbitHeights' : 'transectHeights';
     // What the plan actually flew is the base to edit: the spread comes from
     // the ring count until somebody pins one, and after that the pinned list
@@ -1560,7 +1584,12 @@ view3d.onLevelChange((handles, z) => {
     pinned[key] = list;
   }
   computePlan();
-});
+}
+
+// One behaviour, both views. The flat view drags a level on its own canvas and
+// the survey view drags a chip over the mesh; they hand back the same handles,
+// so there is one place that decides what a dragged height means.
+view3d.onLevelChange(moveLevel);
 view3d.onLevelDone(() => history.commit());
 
 // Nothing, a photograph, or the survey. Same kind of choice as the basemap

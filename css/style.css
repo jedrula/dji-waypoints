@@ -410,3 +410,25 @@ code { background: var(--panel2); border-radius: 4px; padding: 1px 5px; font-siz
   .readout b { font-size: 16px; }
   input[type=range] { height: 36px; }
 }
+
+/* Every height the flight uses, as a chip you can drag. Over the survey canvas
+   rather than in it: a ring is thin to hit and can be behind a building, and a
+   chip is always reachable and always legible. Same look as the flat view's,
+   because it is the same gesture. */
+/* Clear of the left button stack, which is 40 px wide at left:10 and was
+   sitting on top of the lower chips. */
+#levelchips { position: absolute; left: 60px; top: 0; bottom: 0; width: 0;
+              z-index: 480; pointer-events: none; }
+.levelchip { position: absolute; left: 0; display: flex; gap: 7px; align-items: baseline;
+             white-space: nowrap; padding: 3px 9px 4px; border-radius: 7px;
+             background: rgba(16,20,24,0.86); border: 1px solid var(--line);
+             color: var(--text); font-size: 11px; cursor: ns-resize;
+             pointer-events: auto; touch-action: none; }
+.levelchip::before { content: '\2261'; color: var(--dim); margin-right: 1px; }
+.levelchip:hover { border-color: #3d4753; background: rgba(22,28,34,0.95); }
+.levelchip.dragging { border-color: var(--accent); color: var(--accent); }
+.levelchip b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.levelchip span { color: var(--dim); }
+/* The map pane owns the left edge in split view -- and its buttons with it --
+   so there the chips sit just inside the survey pane with nothing to clear. */
+#stage.split #levelchips { left: calc(var(--split) + 12px); }

@@ -11,6 +11,10 @@
     "install-mission": "node tools/install.mjs",
     "slots": "node tools/install.mjs --list",
     "compare": "node tools/compare.mjs",
-    "bridge": "node tools/bridge.mjs"
+    "bridge": "node tools/bridge.mjs",
+    "desktop": "electron electron/main.mjs"
+  },
+  "devDependencies": {
+    "electron": "^44.3.0"
   }
 }

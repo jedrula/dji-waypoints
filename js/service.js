@@ -114,6 +114,14 @@ export const serviceHeaders = (extra = {}) => ({ 'X-Sync-Key': serviceKey(), ...
 // No location at all -- node, a worker, a test -- is the hosted one, because
 // the only thing with no origin here is a test, and a test that silently
 // pointed at a developer's laptop would pass on that laptop alone.
-export const serviceUrl = () => (
-  LOCAL_HOSTS.has(globalThis.location?.hostname ?? '') && globalThis.location ? LOCAL : HOSTED
-);
+//
+// And the desktop build is the one case where localhost does NOT mean "there is
+// a service next to me": it serves the app from a loopback port of its own (see
+// electron/main.mjs) and ships no heights service, so it says so through the
+// preload rather than being guessed at. Still one rule you can read: the
+// address decides, unless the thing at that address tells you it is the app in
+// a window.
+export const serviceUrl = () => {
+  if (globalThis.dji?.desktop) return HOSTED;
+  return LOCAL_HOSTS.has(globalThis.location?.hostname ?? '') && globalThis.location ? LOCAL : HOSTED;
+};

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { readFile, stat } from 'node:fs/promises';
 import { join, extname, normalize } from 'node:path';
 import { detect, listSlots, pullSlot, install } from './bridge.mjs';
@@ -13,8 +15,13 @@ import { detect, listSlots, pullSlot, install } from './bridge.mjs';
 // connected controller. The published copy on GitHub Pages has no such server,
 // so the page treats the whole panel as absent when these routes 404.
 
-const ROOT = process.cwd();
-const PORT = Number(process.env.PORT ?? 8123);
+// The desktop build starts this in-process rather than as a command, so the
+// root and the port are arguments now: an Electron main process has its own
+// cwd and wants a port nobody else is on. `serve()` at the bottom is the whole
+// difference; everything between here and there is what it always was.
+const DEFAULT_ROOT = process.cwd();
+const DEFAULT_PORT = Number(process.env.PORT ?? 8123);
+let ROOT = DEFAULT_ROOT;
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -96,7 +103,7 @@ async function api(req, res, url, params) {
   return sendJson(res, 404, { error: `no such route: ${url}` });
 }
 
-createServer(async (req, res) => {
+const server = createServer(async (req, res) => {
   const raw = req.url ?? '/';
   const url = decodeURIComponent(raw.split('?')[0]);
 
@@ -129,7 +136,22 @@ createServer(async (req, res) => {
   } catch {
     res.writeHead(404, { 'Content-Type': 'text/plain' }).end(`not found: ${rel}`);
   }
-}).listen(PORT, () => {
-  console.log(`3DGS mission planner  →  http://localhost:${PORT}`);
-  console.log('(no-store: edits show up on plain reload)');
 });
+
+// Started either way: `npm start` from a terminal, or the desktop app calling
+// this with a root and port 0 and reading back what it got.
+export function serve({ root = DEFAULT_ROOT, port = DEFAULT_PORT, host = '127.0.0.1' } = {}) {
+  ROOT = root;
+  return new Promise((ok, fail) => {
+    server.once('error', fail);
+    server.listen(port, host, () => ok({ server, port: server.address().port }));
+  });
+}
+
+// Run directly and it behaves exactly as it did: the repo, port 8123, loud
+// about the address so the link is one click away in the terminal.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+  const { port } = await serve();
+  console.log(`3DGS mission planner  →  http://localhost:${port}`);
+  console.log('(no-store: edits show up on plain reload)');
+}

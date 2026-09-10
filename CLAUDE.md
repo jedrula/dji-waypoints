@@ -68,12 +68,22 @@ Write the constraint, the measurement, or the bug that motivated the line —
 any restatement of what the code does. Match the surrounding density: this repo
 comments heavily and in prose.
 
-## No dependencies
+## Dependencies: use them, and keep the browser app buildless
 
-The app has zero runtime dependencies and no build step — plain ES modules
-served as files, Leaflet from a CDN. The service has one (`laz-perf`, because
-decoding LAZ is not worth writing). Adding a dependency needs a reason that
-survives being asked twice.
+Reversed on 2026-09-10, by Andrzej: "i am fine with dependencies, not sure if
+we try to be so super duper lightweight, dont reinvent the wheel, i think it
+was a wrong policy we took early on to roll everything on our own". So take the
+library. Don't write a zip reader, an XML writer or a projection by hand because
+a rule said so.
+
+What is worth keeping from the old rule is narrower and still true: **the pages
+under `js/` have no build step.** They are plain ES modules served as files,
+with Leaflet and three.js from a CDN, and that is what makes the GitHub Pages
+copy work by pushing it and a stale module impossible to ship. Anything a
+browser has to load stays that way, or it stops being a thing you can open.
+
+Everywhere else — the service, the tools, the desktop build — a dependency is
+just a dependency. `laz-perf` was the first, Electron the second.
 
 ## Safety is the point
 

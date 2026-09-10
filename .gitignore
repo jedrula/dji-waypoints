@@ -14,3 +14,6 @@ captures/
 
 # papers read while building this, re-downloadable and too big to carry
 docs/flymethrough-*.pdf
+
+# the packaged desktop build
+dist/

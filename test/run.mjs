@@ -358,29 +358,35 @@ ok('2 rings fly at two distinct heights',
 }
 
 // The orbit standoff -- the slider, and the shift-drag on the ring itself --
-// pulls the domes in, and the pull stops at the clearance floor rather than at
-// whatever was asked for. The subject is 20 m tall and 6 m of span, so framing
-// puts the ring at 25.0 m and the floor -- span/2 + clearance + 2 -- at 7.0 m.
+// changes the distance the rings hold from the thing they orbit, and the pull
+// stops at the clearance floor rather than at whatever was asked for.
+//
+// Measured as the SLANT, because that is what the standoff sets and what
+// decides the picture: a single ring flies above its subject, so its radius is
+// the leg of that triangle and not the distance. The subject is 20 m tall and
+// 6 m of span, so framing wants 25.0 m of slant and the floor is
+// span/2 + clearance + 1 = 6.0 m of radius.
 {
   const at = (tighten) => {
     const mm = planMission({ points: [{ lat: 50.061, lon: 19.931, height: 20 }] },
       { altitude: 40, orbitRings: 1, nadir: false, oblique: false, surround: false,
         establish: false, orbitStandoff: -tighten }, cam);
     const ring = mm.waypoints.filter((w) => w.pass === 'orbit' && !w.transit);
-    const r = ring.map((w) => {
+    const aimZ = 10;
+    const each = ring.map((w) => {
       const l = mm.frame.toLocal(w.lat, w.lon);
-      return Math.hypot(l.x, l.y);
+      return { r: Math.hypot(l.x, l.y), slant: Math.hypot(Math.hypot(l.x, l.y), w.alt - aimZ) };
     });
-    return Math.min(...r);
+    return { r: Math.min(...each.map((q) => q.r)), slant: Math.min(...each.map((q) => q.slant)) };
   };
   const wide = at(0);
   const tight = at(10);
   const absurd = at(400);
-  ok(`a 10 m pull-in tightens the dome (${wide.toFixed(1)} -> ${tight.toFixed(1)} m)`,
-     tight < wide - 9 && tight > wide - 11, `${wide} ${tight}`);
-  ok(`pulling in 400 m stops at the clearance floor (${absurd.toFixed(1)} m)`,
-     absurd > 6.9 && absurd < 7.1, String(absurd));
-  ok(`dragging outwards widens it (${at(-10).toFixed(1)} m)`, at(-10) > wide + 9);
+  ok(`a 10 m pull-in shortens the slant (${wide.slant.toFixed(1)} -> ${tight.slant.toFixed(1)} m)`,
+     tight.slant < wide.slant - 5, `${wide.slant} ${tight.slant}`);
+  ok(`pulling in 400 m stops at the clearance floor (${absurd.r.toFixed(1)} m radius)`,
+     absurd.r > 5.9 && absurd.r < 6.1, String(absurd.r));
+  ok(`dragging outwards lengthens it (${at(-10).slant.toFixed(1)} m)`, at(-10).slant > wide.slant + 9);
 }
 
 

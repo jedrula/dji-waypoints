@@ -461,16 +461,31 @@ function objectPass(g) {
   // which is what Andrzej was looking at when he asked whether these were sane
   // defaults. They were not defaults at all. Off the lowest ring, the same
   // three heights give 21, 20 and 20 m.
-  const slant = Math.hypot(r, Math.max(0.5, Math.min(...heights) - aimZ));
+  // ONE ring is the exception, and it is the default: it flies over the thing
+  // rather than beside it, so `r` is its SLANT range and not its radius.
+  //
+  // `r` is the distance at which the subject's height fills the frame, and the
+  // camera is looking DOWN it -- so putting the ring at radius r and then
+  // lifting it left the real distance at hypot(r, rise), which over a 24 m
+  // subject is 36 m where 30 was wanted: a 60 m circle round a 15 m building,
+  // with the building small in the middle of every frame. Solving for radius
+  // instead gives 22 m, the slant comes out at the 30 m that was asked for, and
+  // the ground sample improves by 17% for a shorter flight.
+  const slant = useRings === 1
+    ? r
+    : Math.hypot(r, Math.max(0.5, Math.min(...heights) - aimZ));
   const centre = f.toLatLon(cx, cy);
   const pts = [];
+  const radii = [];
 
   for (let ri = 0; ri < heights.length; ri++) {
     const h = heights[ri];
     const rise = h - aimZ;
-    const ringR = useRings === 1
-      ? r
-      : Math.max(span / 2 + clearance + 1, Math.sqrt(Math.max(9, slant * slant - rise * rise)));
+    // Every ring, including the single one, pulls in to hold that slant -- and
+    // never inside the thing itself.
+    const ringR = Math.max(span / 2 + clearance + 1,
+      Math.sqrt(Math.max(9, slant * slant - rise * rise)));
+    radii.push(ringR);
     // Spacing comes from the slant range to the thing, not from height above
     // the ground: the camera is aimed sideways at it.
     const range = Math.hypot(ringR, rise);
@@ -501,7 +516,10 @@ function objectPass(g) {
       });
     }
   }
-  return { pts, r, heights, top: highZ };
+  // `r` is the framing distance the rings hold as a SLANT; `radii` is how wide
+  // the circles actually are, which is the number you see on the map and the
+  // one the readout quotes.
+  return { pts, r, radii, heights, top: highZ };
 }
 
 
@@ -915,7 +933,7 @@ export function planMission(site, opts, cam) {
       // that reads as "enormous" rather than as "the framing distance".
       detail: `${sameEverywhere ? `${flownRings[0]} ring${flownRings[0] === 1 ? '' : 's'} each`
         : `rings ${ringTally}`} · tallest ${tallest.subject.height.toFixed(0)} m`
-        + ` · r = ${tallest.r.r.toFixed(0)} m`
+        + ` · r = ${Math.round(Math.max(...tallest.r.radii))} m`
         + `${nObs ? ` · ${nCap} tapped, ${nObs} obstacles` : ''}`,
     });
   }

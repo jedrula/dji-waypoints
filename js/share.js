@@ -37,7 +37,13 @@ const FIELDS = [
 // Append only: the mask is positional, so a code written before a pass existed
 // decodes with that pass OFF. That is the right answer -- a restored plan has to
 // be the plan that was saved, not today's defaults applied to yesterday's box.
-const PASSES = ['nadir', 'oblique', 'orbit', 'transect', 'surround'];
+//
+// `establish` was missing from this list, so the establishing ring -- 17
+// waypoints that measurably take walls from 13% to 49% -- did not survive a
+// share link or a saved plan: it came back off, and the preset picker read the
+// restored plan as Custom because of it. Appended, which is exactly what this
+// comment says to do, and every existing code decodes with it off as before.
+const PASSES = ['nadir', 'oblique', 'orbit', 'transect', 'surround', 'establish'];
 
 function b64url(s) {
   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');

@@ -81,9 +81,59 @@ export function adbDevices() {
 // kill it immediately before each command rather than once at the start.
 // Android File Transfer grabs the same device just as exclusively, and its
 // agent lingers in the background long after you have closed the window.
-function shooAwayImageCapture() {
-  const holders = ['ptpcamerad', 'mscamerad-xpc', 'Android File Transfer Agent', 'Android File Transfer'];
-  try { execFileSync('/usr/bin/killall', ['-9', ...holders], { stdio: 'ignore' }); } catch { /* not running */ }
+// Declared up here because usbHolders() below reads it, and this file has been
+// bitten by a const-below-its-use twice.
+const DJI_VENDOR_ID = 11427; // 0x2ca3
+
+const KILLABLE = ['ptpcamerad', 'mscamerad-xpc', 'Android File Transfer Agent', 'Android File Transfer'];
+
+function shooAwayImageCapture({ alsoAdb = false } = {}) {
+  try { execFileSync('/usr/bin/killall', ['-9', ...KILLABLE], { stdio: 'ignore' }); } catch { /* not running */ }
+  // An adb server holds the whole DEVICE rather than one interface, and libusb
+  // cannot then read even the descriptors -- so libmtp reports "no mtp device"
+  // about a controller sitting right there in the registry. Killing the server
+  // is what `adb kill-server` does and adb starts a new one on its next
+  // command, so it costs nothing but the second it takes.
+  //
+  // Only on a retry: the adb path is how a plan reaches DJI Fly on a phone, and
+  // tearing its server down before the first attempt would be rude to a tool
+  // that was not in the way.
+  if (!alsoAdb) return;
+  try { adb(['kill-server']); } catch {
+    try { execFileSync('/usr/bin/killall', ['-9', 'adb'], { stdio: 'ignore' }); } catch { /* not running */ }
+  }
+}
+
+// Who is actually holding the controller, asked of the registry rather than
+// guessed from an error string.
+//
+// Every process with the device open appears as an AppleUSBHostDeviceUserClient
+// child of its node, named after itself -- the manual recipe in the README,
+// automated, because the answer decides what can be done about it: ptpcamerad
+// and Android File Transfer are killed, an adb server is restarted, and a
+// browser tab can only be reported. "Google Chrome (pid 56377) is holding the
+// controller" is a thing somebody can act on; "no mtp device" is not.
+export function usbHolders() {
+  if (process.platform !== 'darwin') return [];
+  try {
+    const usb = execFileSync('/usr/sbin/ioreg', ['-p', 'IOUSB', '-w0', '-l'],
+      { encoding: 'utf8', maxBuffer: 1 << 26 });
+    // The node whose block carries DJI's vendor id, by its own name.
+    const blocks = usb.split(/\n(?=\s*\+-o )/);
+    const mine = blocks.find((b) => b.includes(`"idVendor" = ${DJI_VENDOR_ID}`));
+    const name = /\+-o ([^<]+?)\s+</.exec(mine ?? '')?.[1];
+    if (!name) return [];
+    const tree = execFileSync('/usr/sbin/ioreg', ['-p', 'IOService', '-w0', '-r', '-n', name, '-l'],
+      { encoding: 'utf8', maxBuffer: 1 << 26 });
+    const out = [];
+    for (const m of tree.matchAll(/"IOUserClientCreator" = "pid (\d+), ([^"]+)"/g)) {
+      const pid = Number(m[1]);
+      if (!out.some((h) => h.pid === pid)) out.push({ pid, name: m[2].trim() });
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 let mtpToolChecked = false;
@@ -115,22 +165,55 @@ export function mtpTool() {
 // like the controller was broken. So: shoo the holders away, and if it failed
 // the way a busy device fails, give it a moment and go once more.
 const TRANSIENT = /claim_interface|PTP_ERROR_IO|another process is holding it|did not come up cleanly|Unable to initialize device/;
+// "no mtp device" is libmtp finding nothing to detect, which means one of two
+// opposite things: nothing is plugged in, or something holds the device so
+// completely that libusb cannot even read its descriptors. The registry tells
+// them apart in milliseconds, so it is asked rather than assumed -- this used
+// to be the one failure that got no retry at all, and it is the one a busy
+// Chrome or adb server produces.
+const NO_DEVICE = /no mtp device/;
+// Three goes, backing off. One was not enough with three processes coming and
+// going on the same interface; past three, the thing in the way is not a race.
+const WAITS = [0.4, 0.9, 1.8];
 
 function mtp(args) {
   const bin = mtpTool();
   if (!bin) throw new Error('mtp helper unavailable — needs libmtp (brew install libmtp) and a compiler');
   for (let attempt = 0; ; attempt++) {
-    shooAwayImageCapture();
+    shooAwayImageCapture({ alsoAdb: attempt > 0 });
     try {
       return execFileSync(bin, args, { encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
       const why = `${e.stderr ?? ''}${e.message ?? ''}`;
-      if (attempt >= 1 || !TRANSIENT.test(why)) throw e;
+      const busy = TRANSIENT.test(why) || (NO_DEVICE.test(why) && mtpDevices().length > 0);
+      // Only a busy failure gets the holder's name attached. "no such folder"
+      // is not Chrome's fault and saying so sends somebody hunting the wrong
+      // thing -- the first version of this blamed a browser tab for a typo.
+      if (attempt >= WAITS.length || !busy) {
+        // And the other half of "no mtp device": the registry agrees, so there
+        // is genuinely nothing on the cable. Say that, rather than handing on a
+        // line of libmtp that reads like a broken controller.
+        if (NO_DEVICE.test(why) && !mtpDevices().length) {
+          throw new Error('no controller on the cable — plug the RC in, wake its screen, '
+            + 'and check the cable carries data rather than only charge');
+        }
+        throw busy ? named(e, why) : e;
+      }
       // Long enough for a killed holder to be gone and a reset interface to
       // settle, short enough that a person does not read it as a hang.
-      try { execFileSync('/bin/sleep', ['0.6'], { stdio: 'ignore' }); } catch { /* nothing to do */ }
+      try { execFileSync('/bin/sleep', [String(WAITS[attempt])], { stdio: 'ignore' }); } catch { /* nothing to do */ }
     }
   }
+}
+
+// The same failure, with the name of whoever caused it.
+function named(e, why) {
+  const stuck = usbHolders().filter((h) => !KILLABLE.includes(h.name) && h.name !== 'adb');
+  if (!stuck.length) return e;
+  const who = stuck.map((h) => `${h.name} (pid ${h.pid})`).join(' and ');
+  const last = why.trim().split('\n').filter(Boolean).pop() ?? '';
+  return new Error(`${who} ${stuck.length > 1 ? 'are' : 'is'} holding the controller — `
+    + `close it and try again. ${last}`);
 }
 
 // "d|f<TAB>id<TAB>size<TAB>name" per line.
@@ -144,7 +227,6 @@ function mtpList(path) {
 // Opening an MTP session on this controller costs several seconds, which is far
 // too slow for "is anything plugged in?". The USB registry answers that in
 // milliseconds, and DJI's vendor id is enough to know.
-const DJI_VENDOR_ID = 11427; // 0x2ca3
 export function mtpDevices() {
   if (!mtpTool()) return [];
   if (process.platform !== 'darwin') {

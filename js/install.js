@@ -44,11 +44,35 @@ function slotMemory() {
   }
 }
 
-function rememberSlot(planId, transport, slot) {
+function rememberSlot(planId, transport, slot, { name = null, waypoints = null } = {}) {
   if (!planId) return;
   const all = slotMemory();
-  all[planId] = { transport, slot };
+  // The name and the moment are for the OTHER direction: a mission on the
+  // controller cannot be named from here -- DJI Fly keeps its titles in its own
+  // database, and a slot folder holds nothing but the KMZ and Fly's own
+  // thumbnails (checked over MTP) -- so the slot list borrows the name of
+  // whatever we last wrote into it. The waypoint count comes too, because it
+  // is what tells a good alias from a stale one: if the slot no longer holds
+  // that many, somebody has edited it in DJI Fly and the name is a guess.
+  all[planId] = { transport, slot, name, waypoints, at: new Date().toISOString() };
   try { localStorage.setItem(SLOT_KEY, JSON.stringify(all)); } catch { /* full or private */ }
+}
+
+// What we last wrote into this slot, if anything: the live plan's name where
+// the plan still exists, the remembered one where it has been deleted.
+function slotAlias(transport, slotId) {
+  const all = slotMemory();
+  const planId = Object.keys(all).find((id) => all[id]?.transport === transport && all[id]?.slot === slotId);
+  if (!planId) return null;
+  const mem = all[planId];
+  const live = savedPlans().find((p) => p.id === planId);
+  return {
+    planId,
+    name: live?.name ?? mem.name ?? null,
+    at: mem.at ?? null,
+    waypoints: mem.waypoints ?? null,
+    gone: !live,
+  };
 }
 
 let savedPlans = () => [];
@@ -257,11 +281,17 @@ function renderSlots() {
   for (const s of state.slots) {
     const meta = { text: s.exists ? `${s.waypoints ?? '?'} wp` : 'empty', bad: !s.exists };
     if (s.exists && s.valid === false) { meta.text += ' · invalid'; meta.bad = true; }
+    // A UUID is not a name. This is the closest thing to one that exists on
+    // this side of the cable: what we put in that slot last time.
+    const mine = s.exists ? slotAlias(state.transport, s.id) : null;
+    const stale = mine && s.exists && mine.waypoints !== null && s.waypoints !== mine.waypoints;
     box.append(pickRow({
       key: `slot:${s.id}`,
       group: 'instSlotPick',
-      title: shortId(s.id),
-      sub: when(s.mtime),
+      title: mine?.name ? `${mine.name}${mine.gone ? ' (plan deleted)' : ''}` : shortId(s.id),
+      sub: mine
+        ? `${shortId(s.id)} · installed ${when(mine.at)}${stale ? ' · changed since' : ''}`
+        : when(s.mtime),
       meta,
       selected: state.selected === s.id,
       disabled: !s.exists,
@@ -424,7 +454,11 @@ async function go() {
     const backups = installed.map((r) => r.backup).filter(Boolean);
     // A plan now has a home on this controller, which is what lets Save
     // overwrite it later. A KMZ from disk does not -- there is no plan behind it.
-    if (state.planId && !state.file) rememberSlot(state.planId, state.transport, targets[0].id);
+    if (state.planId && !state.file) {
+      const plan = savedPlans().find((p) => p.id === state.planId);
+      rememberSlot(state.planId, state.transport, targets[0].id,
+        { name: plan?.name ?? null, waypoints: installed[0]?.waypoints ?? null });
+    }
     state.busy = false;
     await loadSlots({ quiet: true });
     setStatus(`Installed ${installed.length} mission${installed.length === 1 ? '' : 's'}. `
@@ -532,6 +566,10 @@ export function initInstall(opts) {
       const parts = partsForPlan(plan);
       if (!parts) throw new Error('this plan will not build — it may be from an older format');
       const { installed, targets } = await writeParts(parts, known.slot);
+      // Same slot, but the name may have changed since -- and the waypoint
+      // count almost certainly has, which is the whole point of overwriting.
+      rememberSlot(planId, state.transport, targets[0]?.id ?? known.slot,
+        { name: plan.name ?? null, waypoints: installed[0]?.waypoints ?? null });
       await loadSlots({ quiet: true });
       const backup = installed.map((r) => r.backup).filter(Boolean).pop();
       return `Saved, and written to ${targets.map((t) => shortId(t.id)).join(', ')}. `

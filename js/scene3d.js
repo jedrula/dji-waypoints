@@ -135,8 +135,10 @@ export function createScene3D(canvas) {
   let onMesh = () => {};
   let meshHazard = null;
   let framedMesh = false;
+  let collisionMode = false;
   let onLevel = () => {};
   let onLevelDone = () => {};
+  let onRadius = () => {};
   let chipBox = null;
   const chips = [];
   let running = false;
@@ -174,6 +176,11 @@ export function createScene3D(canvas) {
     globalThis.addEventListener('pointermove', moveChip);
     globalThis.addEventListener('pointerup', endChip);
     globalThis.addEventListener('pointercancel', endChip);
+    // Ring drags end wherever the pointer happens to be, which is regularly
+    // outside the canvas -- the same reason the chip handlers are global.
+    globalThis.addEventListener('pointermove', moveRing);
+    globalThis.addEventListener('pointerup', endRing);
+    globalThis.addEventListener('pointercancel', endRing);
 
     canvas.addEventListener('pointerdown', meshDown);
     canvas.addEventListener('pointermove', meshMove);
@@ -1057,6 +1064,9 @@ export function createScene3D(canvas) {
     };
 
     const legs = [];
+    // Every leg's verdict, not only the bad ones: collision mode paints the
+    // clear ones green, and "clear" and "never checked" are different answers.
+    const verdict = new Uint8Array(path.length);
     let tallest = -Infinity;      // the highest thing under any waypoint
     let lowestGap = Infinity;     // the least air under any waypoint
     let over = 0;                 // waypoints with mesh under them at all
@@ -1083,11 +1093,20 @@ export function createScene3D(canvas) {
       const len = Math.hypot(dx, dz);
       const steps = Math.max(1, Math.ceil(len / (HCELL / 2)));
       let through = false;
+      let anyGround = false;
       for (let k = 0; k <= steps && !through; k++) {
         const f = k / steps;
         const g2 = groundUnder(a.x + dx * f, a.z + dz * f);
-        if (g2 !== null && a.y + dy * f < g2) through = true;
+        if (g2 === null) continue;
+        anyGround = true;
+        if (a.y + dy * f < g2) through = true;
       }
+      // 1 hits, 2 clear, 0 not judged -- and a leg with no mesh anywhere under
+      // it is NOT clear, it is unjudged. This said `through ? 1 : 2` for one
+      // afternoon and collision mode painted the whole flight green over a
+      // site with a single tile fetched, which is the exact failure this
+      // repo's rule about never claiming a number it does not have is about.
+      verdict[i] = through ? 1 : (anyGround ? 2 : 0);
       if (through) {
         hits++;
         legs.push({ a: path[i - 1], b: path[i], grade: 'strike' });
@@ -1102,6 +1121,7 @@ export function createScene3D(canvas) {
       gap: Number.isFinite(lowestGap) ? +lowestGap.toFixed(1) : null,
       hits,
       legs,
+      verdict,
       ms: Math.round(performance.now() - t0),
       gridMs: heights?.ms ?? null,
     };
@@ -1189,8 +1209,22 @@ export function createScene3D(canvas) {
   // datum. On a hill that is out by the slope over the distance clicked, and
   // it only has to land in the right 100 m square.
   let dragged = false;
-  function meshDown() { dragged = false; }
-  function meshMove(ev) { if (ev.buttons) dragged = true; }
+  function meshDown(ev) {
+    dragged = false;
+    // A ring under the pointer takes the press; anything else is an orbit of
+    // the camera, or a click on a pad, exactly as before.
+    if (startRing(ev)) dragged = true;
+  }
+  function meshMove(ev) {
+    if (ev.buttons) { dragged = true; return; }
+    // Hovering says what a press would do, because a grip you cannot see is a
+    // grip nobody finds. One projection per station per move: measured 0.28 ms
+    // a move over a 104-station flight in Chrome, against a 16 ms frame. The
+    // drag itself is the expensive half -- a move replans, and a replan with
+    // the mesh loaded measured 48-93 ms -- and that is the cost of drawing the
+    // real flight while you drag rather than a preview of one.
+    canvas.style.cursor = ringUnder(ev) ? (ev.shiftKey ? 'nwse-resize' : 'ns-resize') : '';
+  }
   async function meshClick(ev) {
     // A drag is how you orbit, so only a press that never moved counts. The
     // native click event decides what a click IS -- an earlier version compared
@@ -1442,6 +1476,177 @@ export function createScene3D(canvas) {
     onLevelDone();
   }
 
+  // Dragging the RING, not only its chip.
+  //
+  // The chips came first and they are still the reliable grip -- always
+  // reachable, never behind a building. But the thing you are looking at when
+  // you decide a ring is too low is the ring, and reaching for a label at the
+  // side of the screen to move it is a translation you have to do in your head.
+  // So the ring itself takes the drag: up and down moves it, shift pulls it in.
+  //
+  // Picked in SCREEN space against the projected stations rather than by
+  // raycasting the lines. Two reasons: a THREE.Line is a one-pixel thing that a
+  // ray misses at any sane threshold, and the stations are already the handles
+  // -- 14 px of slack round a station is a grab, and everything else is an
+  // orbit of the camera as before.
+  const GRAB_PX = 14;
+  let ringDrag = null;
+
+  // Where a waypoint lands on screen, in client coordinates, or null behind
+  // the camera.
+  function onScreen(w, rect) {
+    const l = mission.frame.toLocal(w.lat, w.lon);
+    const v = new THREE.Vector3(l.x, w.alt, -l.y).project(camera);
+    if (v.z > 1) return null;
+    return {
+      x: rect.left + ((v.x + 1) / 2) * rect.width,
+      y: rect.top + ((1 - v.y) / 2) * rect.height,
+    };
+  }
+
+  // What is under the pointer: the nearest station within GRAB_PX, the chip
+  // whose height owns it, and -- for an orbit -- the contiguous run of
+  // same-height stations that make up that one dome.
+  //
+  // The run is how the centre and the radius are found without the planner
+  // telling us either: a dome's ring is emitted as consecutive waypoints, so
+  // walking outwards from the grabbed station while the pass and the height
+  // hold gives exactly that ring and not the dome next to it.
+  function ringUnder(ev) {
+    if (!camera || !mission || !chips.length) return null;
+    const path = mission.exported ?? mission.waypoints ?? [];
+    if (!path.length) return null;
+    const rect = canvas.getBoundingClientRect();
+    let best = null;
+    for (let i = 0; i < path.length; i++) {
+      if (path[i].transit) continue;         // the climb between domes is not a ring
+      const p = onScreen(path[i], rect);
+      if (!p) continue;
+      const d = Math.hypot(p.x - ev.clientX, p.y - ev.clientY);
+      if (d > GRAB_PX || (best && d >= best.d)) continue;
+      best = { d, i };
+    }
+    if (!best) return null;
+
+    const w = path[best.i];
+    // Which knob owns that height. Chips are already grouped by height and
+    // carry the handles `mission.levels` tagged, so this is the same answer a
+    // chip drag gets -- which is the point: two grips, one edit.
+    let chip = null;
+    for (const c of chips) {
+      if (!chip || Math.abs(c.z - w.alt) < Math.abs(chip.z - w.alt)) chip = c;
+    }
+    if (!chip || Math.abs(chip.z - w.alt) > 1.5) return null;
+
+    let a = best.i;
+    let b = best.i;
+    const same = (q) => q && q.pass === w.pass && !q.transit && Math.abs(q.alt - w.alt) < 0.05;
+    while (same(path[a - 1])) a--;
+    while (same(path[b + 1])) b++;
+    return { chip, pass: w.pass, ring: path.slice(a, b + 1) };
+  }
+
+  function startRing(ev) {
+    const hit = ringUnder(ev);
+    if (!hit) return false;
+    const rect = canvas.getBoundingClientRect();
+    // Metres per pixel vertically at this height, measured the same way a chip
+    // drag measures it, because it changes with every zoom.
+    const at = (z) => {
+      const p = new THREE.Vector3(controls.target.x, z, controls.target.z).project(camera);
+      return ((1 - p.y) / 2) * (canvas.clientHeight || 1);
+    };
+    const per = at(hit.chip.z) - at(hit.chip.z + 1);
+
+    // And the same thing for the radius, in the plane rather than in height:
+    // the ring's own stations give both the metres (their mean distance from
+    // their centre) and the pixels (theirs, projected), so the scale comes out
+    // of the picture on screen instead of a guess about the projection.
+    let cx = 0;
+    let cy = 0;
+    for (const q of hit.ring) {
+      const l = mission.frame.toLocal(q.lat, q.lon);
+      cx += l.x / hit.ring.length;
+      cy += l.y / hit.ring.length;
+    }
+    const centre = mission.frame.toLatLon(cx, cy);
+    const cs = onScreen({ ...centre, alt: hit.chip.z }, rect);
+    let rM = 0;
+    let rPx = 0;
+    let seen = 0;
+    for (const q of hit.ring) {
+      const l = mission.frame.toLocal(q.lat, q.lon);
+      rM += Math.hypot(l.x - cx, l.y - cy);
+      const p = cs && onScreen(q, rect);
+      if (p) { rPx += Math.hypot(p.x - cs.x, p.y - cs.y); seen++; }
+    }
+    rM /= hit.ring.length;
+    rPx = seen ? rPx / seen : 0;
+
+    ringDrag = {
+      ...hit,
+      y: ev.clientY,
+      z0: hit.chip.z,
+      per: Math.abs(per) > 0.2 ? per : 4,
+      centre: cs,
+      d0: cs ? Math.hypot(ev.clientX - cs.x, ev.clientY - cs.y) : 0,
+      // Metres of ground per pixel across the ring. Falls back to the vertical
+      // scale -- the same order of magnitude at any camera angle -- rather than
+      // to a constant, which would make one drag jump and the next crawl.
+      perR: rPx > 8 ? rM / rPx : 1 / Math.max(0.2, Math.abs(per)),
+      // Which of the two edits this drag IS, decided at the press and not
+      // re-decided per move: letting go of shift halfway would otherwise apply
+      // the vertical travel you had already made as a height change.
+      mode: ev.shiftKey ? 'radius' : 'height',
+      base: mission.params?.orbitTighten ?? 0,
+      rM,
+      told: false,
+    };
+    // The camera does not also orbit. OrbitControls checks `enabled` at the top
+    // of its own pointermove, so clearing it here is enough even though its
+    // pointerdown has already been and gone.
+    controls.enabled = false;
+    // A synthesised pointerdown carries an id no pointer ever had, and capture
+    // throws NotFoundError on it -- which is how this is driven from a browser
+    // test, so the drag must survive it.
+    try { canvas.setPointerCapture(ev.pointerId); } catch { /* not a real pointer */ }
+    canvas.style.cursor = ev.shiftKey ? 'nwse-resize' : 'ns-resize';
+    return true;
+  }
+
+  function moveRing(ev) {
+    if (!ringDrag) return;
+    const { chip, pass, centre, d0, perR, base, rM, mode } = ringDrag;
+    if (mode === 'radius') {
+      // Only the domes have a radius this can write to: it comes from framing
+      // the subject's height, and the grids and the transects are not framing
+      // anything. Say so once rather than moving something else.
+      if (pass !== 'orbit') {
+        if (!ringDrag.told) { ringDrag.told = true; onStatus('Only the orbit rings have a radius — drag up or down instead.'); }
+        return;
+      }
+      if (!centre) return;
+      const d = Math.hypot(ev.clientX - centre.x, ev.clientY - centre.y);
+      // Towards the middle is smaller, which is why this is d0 - d.
+      const want = base + (d0 - d) * perR;
+      onStatus(`Ring radius ${Math.max(0, rM - (want - base)).toFixed(0)} m`);
+      onRadius(want);
+      return;
+    }
+    const z = Math.round(Math.max(1, Math.min(500, ringDrag.z0 + (ringDrag.y - ev.clientY) / ringDrag.per)) * 10) / 10;
+    if (z === chip.z) return;
+    chip.z = z;
+    onLevel(chip.handles, z);
+  }
+
+  function endRing() {
+    if (!ringDrag) return;
+    ringDrag = null;
+    if (controls) controls.enabled = true;
+    canvas.style.cursor = '';
+    onLevelDone();
+  }
+
   function buildWires() {
     if (!scene) return;
     if (wireGroup) { scene.remove(wireGroup); wireGroup = null; }
@@ -1477,6 +1682,41 @@ export function createScene3D(canvas) {
       const l = frame.toLocal(w.lat, w.lon);
       return new THREE.Vector3(l.x, w.alt, -l.y);
     };
+
+    // Collision mode: forget which pass a leg belongs to and say only whether
+    // it can be flown. Green clear, red into something, grey never checked --
+    // because the question is no longer "what is this pass" but "which of
+    // these do I have to move", and a red ring answers it at a glance.
+    //
+    // Two buffers rather than a line per leg: a hundred and eleven draw calls
+    // to say one thing is a hundred and ten too many.
+    if (collisionMode && meshHazard?.verdict) {
+      const parts = { 1: [], 2: [], 0: [] };
+      for (let i = 1; i < path.length; i++) {
+        parts[meshHazard.verdict[i] ?? 0].push(at(path[i - 1]), at(path[i]));
+      }
+      for (const [state, colour] of [[2, 0x2fd07a], [0, 0x6b7480], [1, 0xff3b3b]]) {
+        if (!parts[state].length) continue;
+        const g = new THREE.BufferGeometry().setFromPoints(parts[state]);
+        missionGroup.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({
+          color: colour,
+          // The red is drawn last and never hidden by the ground, because a
+          // leg inside a building is BEHIND the wall it is inside.
+          depthTest: state !== 1,
+          transparent: state === 0,
+          opacity: state === 0 ? 0.5 : 1,
+        })));
+      }
+      scene.add(missionGroup);
+      if (looksOn) buildLooks(path, at);
+      // The tally, because "which ones are red" is answerable by looking and
+      // "are there any" is not -- a single red leg on the far side of a
+      // building is invisible until you orbit round to it.
+      const n = (state) => parts[state].length / 2;
+      onStatus(`${n(1)} leg${n(1) === 1 ? '' : 's'} into something, ${n(2)} clear`
+        + (n(0) ? `, ${n(0)} over ground not fetched` : ''));
+      return;
+    }
 
     // One line per RUN of same-pass waypoints, in that pass's own colour --
     // the way the map and the flat view both draw it. This was a single blue
@@ -1964,7 +2204,19 @@ export function createScene3D(canvas) {
 
     // A level dragged in this view, and the end of that gesture -- the same two
     // callbacks js/view3d.js offers, so the app wires one behaviour for both.
+    // Paint the flight by whether it can be flown rather than by what pass it
+    // is. Rebuilt rather than recoloured, because the two pictures group the
+    // legs differently: one by pass, one by verdict.
+    setCollision(on) {
+      collisionMode = !!on;
+      if (!renderer || !mission) return;
+      buildMission();
+      render();
+    },
+    collision: () => collisionMode,
+
     onLevel(fn) { onLevel = fn ?? (() => {}); },
+    onRadius(fn) { onRadius = fn ?? (() => {}); },
     onLevelDone(fn) { onLevelDone = fn ?? (() => {}); },
 
     // The lowest the rings can fly and still clear the mesh. Asked for by the

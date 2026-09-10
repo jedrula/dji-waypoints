@@ -149,7 +149,9 @@ async function lidarView() {
     // view, judgement here: it reports what is under the flight and what the
     // flight runs into, and the readout decides whether that is too close.
     lidar.onMesh((m) => { state.mesh = m; renderAlert(false); });
+    lidar.setCollision(collideOn);
     lidar.onLevel(moveLevel);
+    lidar.onRadius(moveRadius);
     lidar.onLevelDone(() => history.commit());
     lidar.setLooks(looksOn);
     // Set here as well as in setView, because this is created lazily and the
@@ -222,6 +224,7 @@ function setView(name) {
   $('syncTo3d').hidden = !showMap;
   $('syncToMap').hidden = !show3d;
   $('looksBtn').hidden = !show3d;
+  $('collideBtn').hidden = !show3d;
   $('findplace').hidden = !showMap;
   if (!showMap) openPlace(false);
   showRecentre();
@@ -306,6 +309,7 @@ function writeUrl() {
   if (groundMode !== 'imagery') q.set('s', groundMode);
   if (wiresOn) q.set('w', '1');
   if (!looksOn) q.set('k', '0');
+  if (collideOn) q.set('x', '1');
   for (const k of MOCK_KEYS) if (opened.has(k)) q.set(k, opened.get(k));
   const code = planCode();
   window.history.replaceState(null, '', `?${q}${code ? `#plan=${code}` : ''}`);
@@ -321,6 +325,7 @@ function readUrl() {
   // with none until you turned them off and on again.
   if (q.get('w') === '1') { wiresOn = true; drawWires(); loadWires().then(drawWires); }
   if (q.get('k') === '0') setLooks(false);
+  if (q.get('x') === '1') setCollide(true);
   const [lat, lon] = (q.get('c') ?? '').split(',').map(Number);
   const zoom = Number(q.get('z'));
   if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
@@ -441,14 +446,18 @@ for (const [name, spec] of Object.entries(SHAPES)) {
   $('shape').append(o);
 }
 
-// Heights pinned by dragging a level in the 3D view.
+// What was pinned by dragging the flight itself in the 3D view.
 //
 // Not controls, because there is no slider for "the second orbit ring sits at
 // 21 m" -- so they live here and join uiValues on the way out. js/share.js has
 // carried them in the plan code all along and js/planner.js has accepted them;
 // what was missing was anything setting them, which is why the levels were not
 // draggable.
-let pinned = { orbitHeights: null, transectHeights: null };
+//
+// `orbitTighten` joined them for the same reason: the dome radius is derived
+// from the camera's framing, so there was no knob to turn, and dragging a ring
+// inwards is the only thing that ever asks for a tighter one.
+let pinned = { orbitHeights: null, transectHeights: null, orbitTighten: 0 };
 
 function uiValues() {
   const v = {};
@@ -462,6 +471,7 @@ function uiValues() {
   v.surroundRings = +$('surroundRings').value;
   if (pinned.orbitHeights) v.orbitHeights = pinned.orbitHeights;
   if (pinned.transectHeights) v.transectHeights = pinned.transectHeights;
+  if (pinned.orbitTighten) v.orbitTighten = pinned.orbitTighten;
   return v;
 }
 
@@ -469,7 +479,11 @@ function applyUiValues(v) {
   // Absent means "not pinned", which is a real state and not a missing value:
   // a restored plan whose levels were never dragged must go back to the spread
   // the ring count implies, not to whatever the last plan was dragged to.
-  pinned = { orbitHeights: v.orbitHeights ?? null, transectHeights: v.transectHeights ?? null };
+  pinned = {
+    orbitHeights: v.orbitHeights ?? null,
+    transectHeights: v.transectHeights ?? null,
+    orbitTighten: v.orbitTighten ?? 0,
+  };
   for (const k of Object.keys(controls)) if (v[k] !== undefined) controls[k].el.value = v[k];
   for (const id of PASS_IDS) if (v[id] !== undefined) $(id).checked = v[id];
   for (const id of PICK_IDS) if (v[id] !== undefined) $(id).value = String(v[id]);
@@ -489,6 +503,7 @@ function paramsFromUi(v) {
   p.surroundRings = v.surroundRings;
   p.orbitHeights = v.orbitHeights ?? null;
   p.transectHeights = v.transectHeights ?? null;
+  p.orbitTighten = v.orbitTighten ?? 0;
   return p;
 }
 
@@ -1562,6 +1577,20 @@ $('findme').addEventListener('click', () => findMe());
 // slider here already does on every tick, and what makes the flight follow your
 // finger. The undo entry is committed at the end of the gesture, not during it,
 // or one drag would leave forty steps to undo.
+// Shift-dragging a ring in or out, in metres off the framing distance. An
+// absolute value and not a delta, because the scene reads its base from
+// `mission.params.orbitTighten` and so cannot drift away from what was planned.
+//
+// One number for every dome, which is what "make the orbit smaller" can honestly
+// mean here: the radius is derived per subject from that subject's height, so
+// there is nothing per-ring to write back to. Bounded at 40 m of pull-in
+// because past that every dome is on its clearance floor and the drag is doing
+// nothing; and at 40 m out because a ring that big is the establishing pass.
+function moveRadius(m) {
+  pinned.orbitTighten = Math.max(-40, Math.min(40, Math.round(m * 2) / 2));
+  computePlan();
+}
+
 function moveLevel(handles, z) {
   for (const h of handles) {
     // The altitude level is the altitude knob, not a pinned list. Dragging the
@@ -1740,6 +1769,17 @@ function setLooks(on) {
   $('looksBtn').classList.toggle('on', looksOn);
 }
 $('looksBtn').addEventListener('click', () => { setLooks(!looksOn); writeUrl(); });
+
+// Green where the flight can be flown, red where it goes into something. Off by
+// default: it replaces the pass colours, which are what you want while you are
+// building a flight and not while you are fixing one.
+let collideOn = false;
+function setCollide(on) {
+  collideOn = on;
+  lidar?.setCollision(collideOn);
+  $('collideBtn').classList.toggle('on', collideOn);
+}
+$('collideBtn').addEventListener('click', () => { setCollide(!collideOn); writeUrl(); });
 
 $('wiresBtn').addEventListener('click', async () => {
   wiresOn = !wiresOn;

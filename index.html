@@ -123,6 +123,19 @@
       </svg>
     </button>
 
+    <!-- Paint the flight by whether it can be flown. Its own control because it
+         answers a different question from every other layer here: not "what is
+         this" but "which of these do I have to move". -->
+    <button id="collideBtn" type="button" class="maptoggle" hidden
+            title="Colour the flight by where it collides with the mesh">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3 2.5 20h19z"/>
+        <path d="M12 9v5"/>
+        <circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none"/>
+      </svg>
+    </button>
+
     <!-- What each camera is pointed at, as the pyramid it sees. Belongs to the
          3D pane, because it is the one view that can show a direction in the
          space the direction is in. A switch rather than always-on: seventy

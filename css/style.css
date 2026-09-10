@@ -259,6 +259,10 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 /* Under the two sync buttons on the 3D pane's own right-hand stack, because it
    acts on the 3D and nothing else. */
 #looksBtn { top: 118px; left: auto; right: 10px; }
+/* Under the wedge switch, in the 3D pane's own right-hand stack. */
+#collideBtn { top: 154px; left: auto; right: 10px; }
+/* On, this one is a warning and not a preference. */
+#collideBtn.on { color: #ff6b6b; border-color: #6a3a3a; }
 /* Wires belong to both views at once -- they are a hazard, not a backdrop --
    so this is the one .maptoggle that stays put when the 3D comes up. */
 #wiresBtn { top: 180px; }

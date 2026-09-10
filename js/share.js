@@ -31,6 +31,9 @@ const FIELDS = [
   // and usually absent -- a code only carries them once you have dragged.
   ['orbitHeights', 'H'],
   ['transectHeights', 'L'],
+  // And the radius pulled in by shift-dragging a ring. Same story: absent
+  // until you drag, because zero and "never touched" are the same flight.
+  ['orbitTighten', 'T'],
 ];
 // Append only: the mask is positional, so a code written before a pass existed
 // decodes with that pass OFF. That is the right answer -- a restored plan has to

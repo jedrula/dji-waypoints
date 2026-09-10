@@ -320,6 +320,32 @@ const rings2 = planMission({ points: [{ lat: 50.061, lon: 19.931, height: 12 }] 
 ok('2 rings fly at two distinct heights',
    new Set(rings2.waypoints.filter(w => !w.transit).map(w => w.alt)).size === 2);
 
+// Shift-dragging a ring in the 3D view pulls the domes in, and the pull stops
+// at the clearance floor rather than at whatever was dragged. The subject is
+// 20 m tall and 6 m of span, so framing puts the ring at 25.0 m and the floor
+// -- span/2 + clearance + 2 -- at 7.0 m.
+{
+  const at = (tighten) => {
+    const mm = planMission({ points: [{ lat: 50.061, lon: 19.931, height: 20 }] },
+      { altitude: 40, orbitRings: 1, nadir: false, oblique: false, surround: false,
+        establish: false, orbitTighten: tighten }, cam);
+    const ring = mm.waypoints.filter((w) => w.pass === 'orbit' && !w.transit);
+    const r = ring.map((w) => {
+      const l = mm.frame.toLocal(w.lat, w.lon);
+      return Math.hypot(l.x, l.y);
+    });
+    return Math.min(...r);
+  };
+  const wide = at(0);
+  const tight = at(10);
+  const absurd = at(400);
+  ok(`a 10 m pull-in tightens the dome (${wide.toFixed(1)} -> ${tight.toFixed(1)} m)`,
+     tight < wide - 9 && tight > wide - 11, `${wide} ${tight}`);
+  ok(`pulling in 400 m stops at the clearance floor (${absurd.toFixed(1)} m)`,
+     absurd > 6.9 && absurd < 7.1, String(absurd));
+  ok(`dragging outwards widens it (${at(-10).toFixed(1)} m)`, at(-10) > wide + 9);
+}
+
 
 // Coverage: every point of the box interior must fall inside at least one
 // photo footprint (not merely near a shot centre -- the footprint is 57x43 m

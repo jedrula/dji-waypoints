@@ -1,6 +1,6 @@
 import { fov, orientation } from './camera.js';
 import { GRADE_COLOR } from './coverage.js';
-import { PASS_COLOR, LEG_COLOR } from './palette.js';
+import { PASS_COLOR, LEG_COLOR, VERDICT_COLOR } from './palette.js';
 import { createTileCache, pickZoom, tileRange, tileBounds, TILE_PX } from './tiles.js';
 
 // A small hand-rolled 3D view. The scene is a few thousand line segments, so a
@@ -39,6 +39,9 @@ export function createView3D(canvas) {
   let showCoverage = true;
   let obstacles = [];      // boxes already in the mission's local metres
   let conflicts = [];      // legs the collision check flagged, in lat/lon
+  let checked = 0;         // how many solid things the check tested against
+  let collisionOn = false; // paint the flight by verdict, not by pass
+  let verdict = null;      // the mesh's per-leg answer, when the survey has one
   let ground = null;       // { on, url, attribution } -- imagery under the plan
   let tiles = null;        // the cache for whichever basemap `ground` names
   let redrawTimer = null;
@@ -169,6 +172,15 @@ export function createView3D(canvas) {
       }))
       .sort((a, b) => a.z - b.z);
 
+    // What actually flies, which is also what every collision check judges:
+    // js/collide.js and js/scene3d.js both walk `exported`, and in interval
+    // photo mode that skips the intermediate grid points -- so a verdict
+    // indexed by it cannot be drawn over `pts`, which is every waypoint.
+    const flown = (mission.exported ?? mission.waypoints ?? []).map((w) => {
+      const l = f.toLocal(w.lat, w.lon);
+      return { x: l.x, y: l.y, z: w.alt };
+    });
+
     // Flagged legs arrive as geography, like everything else that crosses a
     // module boundary here; the frame turns them into the metres this view draws.
     const legs = conflicts.map((c) => ({
@@ -194,7 +206,7 @@ export function createView3D(canvas) {
     area.x0 -= margin; area.x1 += margin;
     area.y0 -= margin; area.y1 += margin;
 
-    scene = { pts, box, span, maxAlt, frustumLen, step, levels, legs, area };
+    scene = { pts, flown, box, span, maxAlt, frustumLen, step, levels, legs, area };
 
     // Re-frame only when the ground box itself changed. Replanning -- which
     // happens on every slider tick and on every pixel of a level drag -- must
@@ -506,21 +518,52 @@ export function createView3D(canvas) {
     // no depth buffer, so far faces have to be laid down before near ones.
     drawObstacles(b, w, h, f);
 
-    // flight path, one stroke per pass so colours stay separate
-    let i = 0;
-    while (i < pts.length) {
-      const pass = pts[i].pass;
-      ctx.strokeStyle = PASS_COLOR[pass];
-      ctx.globalAlpha = 0.85;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      let j = i;
-      while (j + 1 < pts.length && pts[j + 1].pass === pass) {
-        line(pts[j], pts[j + 1], b, w, h, f);
-        j++;
+    // The flight. Normally one stroke per pass, so the colours say which pass
+    // a line belongs to; in collision mode, one colour per VERDICT, because
+    // then the question is not "what is this pass" but "which of these can I
+    // fly".
+    //
+    // Two sources of verdict, and the better one wins. If the survey view has
+    // loaded the mesh, its per-leg answer is used here as well -- it survives
+    // leaving that view, because the tiles stay in memory and every replan
+    // re-checks them -- so switching to imagery keeps the colours instead of
+    // throwing them away. With no mesh the obstacle check answers instead, and
+    // that one is all-or-nothing: an obstacle list covers the whole flight or
+    // none of it, so `checked` of zero paints everything grey rather than
+    // green. Grey means nobody judged it, and green would be a promise this
+    // view cannot keep.
+    const useVerdict = collisionOn && verdict?.length === scene.flown.length ? verdict : null;
+    if (collisionOn) {
+      const fallback = checked ? 2 : 0;
+      for (const [state, name, width] of [[2, 'clear', 3], [0, 'none', 2.5], [1, 'hit', 4.5]]) {
+        ctx.strokeStyle = VERDICT_COLOR[name];
+        ctx.globalAlpha = state === 0 ? 0.5 : 0.9;
+        ctx.lineWidth = width;
+        ctx.beginPath();
+        let drawn = 0;
+        for (let k = 1; k < scene.flown.length; k++) {
+          if ((useVerdict ? useVerdict[k] ?? 0 : fallback) !== state) continue;
+          line(scene.flown[k - 1], scene.flown[k], b, w, h, f);
+          drawn++;
+        }
+        if (drawn) ctx.stroke();
       }
-      ctx.stroke();
-      i = j + 1;
+    } else {
+      let i = 0;
+      while (i < pts.length) {
+        const pass = pts[i].pass;
+        ctx.strokeStyle = PASS_COLOR[pass];
+        ctx.globalAlpha = 0.85;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        let j = i;
+        while (j + 1 < pts.length && pts[j + 1].pass === pass) {
+          line(pts[j], pts[j + 1], b, w, h, f);
+          j++;
+        }
+        ctx.stroke();
+        i = j + 1;
+      }
     }
     ctx.globalAlpha = 1;
 
@@ -530,7 +573,7 @@ export function createView3D(canvas) {
       const set = scene.legs.filter((l) => l.grade === grade);
       if (!set.length) continue;
       ctx.strokeStyle = CONFLICT_COLOR[grade];
-      ctx.lineWidth = grade === 'strike' ? 3.5 : 2.5;
+      ctx.lineWidth = grade === 'strike' ? 4.5 : 3.5;
       ctx.beginPath();
       for (const l of set) line(l.a, l.b, b, w, h, f);
       ctx.stroke();
@@ -984,12 +1027,25 @@ export function createView3D(canvas) {
       draw();
     },
 
-    setObstacles(boxes, legs) {
+    // `checked` is how many solid things the collision check ran against. It
+    // is not decoration: collision mode has to know the difference between
+    // "clear of everything mapped" and "nothing was mapped".
+    setObstacles(boxes, legs, n = 0) {
       obstacles = boxes ?? [];
       conflicts = legs ?? [];
+      checked = n;
       build();
       draw();
     },
+    // Paint the flight by whether it can be flown rather than by pass. The
+    // same switch drives the survey view -- see js/scene3d.js -- so the two
+    // pictures cannot disagree about which legs are the problem.
+    setCollision(on) { collisionOn = !!on; draw(); },
+    // The survey view's per-leg verdict, so this view can paint from the mesh
+    // when there is one. Indexed like `mission.exported`; a length that no
+    // longer matches is a verdict for a flight that no longer exists, and is
+    // ignored rather than drawn against the wrong legs.
+    setVerdict(v) { verdict = v ?? null; if (collisionOn) draw(); },
     // Called with the planner handles owning the dragged level and its new
     // height; setting it is what makes the levels draggable at all.
     onLevelChange(fn) { onLevelChange = fn; },

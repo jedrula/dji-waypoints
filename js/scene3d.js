@@ -23,12 +23,22 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+// Wide lines, which WebGL cannot draw: `linewidth` on a LineBasicMaterial is
+// ignored -- the spec lets a driver support only 1.0 and every desktop one
+// does -- so the flight was a hairline however close you got to it. These draw
+// each segment as a screen-space quad instead, which is why the material has
+// to be told the size of the canvas, and re-told whenever it changes.
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { toPuwg92, toWgs84 } from './puwg92.js';
 import { tileRange, tileCount, tileBounds, mPerPx, TILE_PX } from './tiles.js';
 import { groundAt, puwgToLocal, localToTile, drapeWire, stitch } from './surface.js';
 import { toWgs84 as puwgToWgs84 } from './puwg92.js';
 import { serviceUrl, serviceHeaders } from './service.js';
-import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, asHex } from './palette.js';
+import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, VERDICT_COLOR, asHex } from './palette.js';
 import { fov, orientation } from './camera.js';
 
 // How much ground round the flight, and how fine. The tile is 500 m of
@@ -119,6 +129,11 @@ export function createScene3D(canvas) {
   let meshGroup = null;
   // Tile name -> Mesh, so a neighbour asked for twice is fetched once.
   const meshTiles = new Map();
+  // And the 100 m cells those tiles were asked for by, which is the cheaper
+  // question: the name only arrives with the response, so without this a tile
+  // already in the scene still costs a request -- twelve of them on every
+  // return to the view once tiles are remembered across a refresh.
+  const meshCells = new Set();
   // The mesh is the picture wherever there is one, and the LiDAR heightfield is
   // the fallback where there is not -- which is most of the country. There is
   // no switch: coverage decides, and an option nobody can answer better than
@@ -587,6 +602,8 @@ export function createScene3D(canvas) {
     const dpr = Math.min(globalThis.devicePixelRatio || 1, 2);
     renderer.setPixelRatio(dpr);
     renderer.setSize(w, h, false);
+    // In CSS pixels, which is the unit `linewidth` is then in.
+    for (const m of fatMats) m.resolution.set(w, h);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   }
@@ -851,6 +868,7 @@ export function createScene3D(canvas) {
   // and over 100 m the convergence is about 1.7 m of sideways error.
   async function loadMeshTile(lat, lon, { signal } = {}) {
     const { lat0, lon0 } = mission.frame;
+    if (meshCells.has(tileKey(lat, lon))) return { ok: true, already: true };
     const res = await ask(`/v1/mesh?lat=${lat}&lon=${lon}`, { signal });
     if (!res.ok) return { ok: false, why: 'no mesh model covers that' };
     const name = (res.headers.get('X-Mesh-Tile') ?? `${lat.toFixed(5)},${lon.toFixed(5)}`);
@@ -941,10 +959,68 @@ export function createScene3D(canvas) {
     if (!meshGroup.parent) scene.add(meshGroup);
     meshGroup.add(tile);
     meshTiles.set(name, tile);
+    meshCells.add(tileKey(lat, lon));
     // Rebuilt here because this is where the set of tiles changes, and both
     // the wires and the flight check read it.
     buildHeights();
     return { ok: true, name, triangles: nt, bytes: raw.byteLength };
+  }
+
+  // The tiles you fetched here before, so a refresh does not put you back to
+  // one square of mesh over a site you spent eight clicks covering.
+  //
+  // What is stored is the point that was clicked, snapped to the 100 m grid the
+  // tiles come on, and nothing else: the geometry is not worth keeping in a
+  // browser (77 MB open, per tile) and it does not have to be, because the
+  // service keeps the zip on disk. So coming back costs the transfer and the
+  // parse again -- about 7 MB and a moment a tile -- and no download from
+  // GUGiK. That is the reason for the cap: twelve tiles is ~90 MB of transfer
+  // on a page load, and this asks before it goes past that only in the sense
+  // that it stops.
+  const TILE_STORE = 'dji.meshTiles';
+  const TILE_CAP = 12;
+  const TILE_REACH = 700;                // metres from home, so another city's tiles stay there
+
+  const tileKey = (lat, lon) => {
+    const p = toPuwg92(lat, lon);
+    return `${Math.round(p.east / PAD)},${Math.round(p.north / PAD)}`;
+  };
+
+  function readTiles() {
+    try {
+      const v = JSON.parse(globalThis.localStorage?.getItem(TILE_STORE) ?? '[]');
+      return Array.isArray(v) ? v.filter((t) => t && Number.isFinite(t.lat) && Number.isFinite(t.lon)) : [];
+    } catch { return []; }             // private window, or something else wrote the key
+  }
+
+  function rememberTile(lat, lon) {
+    const key = tileKey(lat, lon);
+    const kept = readTiles().filter((t) => t.key !== key);
+    kept.push({ key, lat, lon });
+    // Forty entries is a few kilobytes and covers every site anybody has
+    // opened; the cap that matters is TILE_CAP, on what is fetched again.
+    try { globalThis.localStorage?.setItem(TILE_STORE, JSON.stringify(kept.slice(-40))); } catch { /* private window */ }
+  }
+
+  // Fetched one at a time on purpose: eight parallel 7 MB requests is a way to
+  // make the first tile arrive later than it has to.
+  async function restoreTiles({ signal } = {}) {
+    const home = toPuwg92(mission.frame.lat0, mission.frame.lon0);
+    const near = readTiles()
+      .map((t) => {
+        const p = toPuwg92(t.lat, t.lon);
+        return { ...t, d: Math.hypot(p.east - home.east, p.north - home.north) };
+      })
+      .filter((t) => t.d <= TILE_REACH && !meshCells.has(t.key))
+      .sort((a, b) => a.d - b.d)
+      .slice(0, TILE_CAP);
+    let got = 0;
+    for (let i = 0; i < near.length; i++) {
+      onStatus(`Bringing back the mesh you fetched here before — tile ${i + 1} of ${near.length}…`);
+      const r = await loadMeshTile(near[i].lat, near[i].lon, { signal }).catch(() => ({ ok: false }));
+      if (r.ok && !r.already) got++;
+    }
+    return got;
   }
 
   // Where the ground is under the takeoff point, from the mesh itself.
@@ -981,7 +1057,8 @@ export function createScene3D(canvas) {
   const PAD = 100;                       // a mesh tile is 100 m of ground
 
   function buildPads() {
-    if (padGroup) { scene.remove(padGroup); padGroup = null; }
+    if (padGroup) { scene.remove(padGroup); dropFat(padGroup); padGroup = null; }
+    hoverPad = null;
     if (!meshMode || !meshTiles.size || !mission) return;
     const { lat0, lon0 } = mission.frame;
     const home = toPuwg92(lat0, lon0);
@@ -1001,6 +1078,17 @@ export function createScene3D(canvas) {
       centres.push(c);
     }
 
+    // Which cells the flight actually crosses. A neighbour you might want and
+    // ground the aircraft flies over are not the same offer, and the second
+    // one is the one worth making loudly: those are the waypoints the check
+    // has to report as unjudged.
+    const flown = new Set();
+    for (const w of mission.exported ?? mission.waypoints ?? []) {
+      const l = mission.frame.toLocal(w.lat, w.lon);
+      const q = back(l.x, l.y);
+      flown.add(cell(q.e, q.n));
+    }
+
     padGroup = new THREE.Group();
     const seen = new Set();
     for (const c of centres) {
@@ -1011,11 +1099,12 @@ export function createScene3D(canvas) {
         if (taken.has(key) || seen.has(key)) continue;
         seen.add(key);
         const p = toLocal(home.east + e, home.north + n);
+        const under = flown.has(key);
         // Slightly under the datum so it never fights the mesh for a pixel.
         const pad = new THREE.Mesh(
           new THREE.PlaneGeometry(PAD - 4, PAD - 4),
           new THREE.MeshBasicMaterial({
-            color: 0x7ec8ff, transparent: true, opacity: 0.16,
+            color: 0x7ec8ff, transparent: true, opacity: under ? 0.3 : 0.12,
             side: THREE.DoubleSide, depthWrite: false,
           }),
         );
@@ -1026,11 +1115,31 @@ export function createScene3D(canvas) {
 
         const edge = new THREE.LineSegments(
           new THREE.EdgesGeometry(new THREE.PlaneGeometry(PAD - 4, PAD - 4)),
-          new THREE.LineBasicMaterial({ color: 0x9fd8ff, transparent: true, opacity: 0.55 }),
+          new THREE.LineBasicMaterial({
+            color: 0x9fd8ff, transparent: true, opacity: under ? 0.95 : 0.45,
+          }),
         );
         edge.rotation.x = -Math.PI / 2;
         edge.position.copy(pad.position);
         padGroup.add(edge);
+
+        // A plus in the middle, because a faint blue square is a square and a
+        // plus is an invitation. It was already said in words in the status
+        // line and in the finding, and neither of those is where you are
+        // looking when you are orbiting a building.
+        const arm = 9;
+        const plus = fatSegments([
+          { x: p.x - arm, y: -0.15, z: -p.y }, { x: p.x + arm, y: -0.15, z: -p.y },
+          { x: p.x, y: -0.15, z: -p.y - arm }, { x: p.x, y: -0.15, z: -p.y + arm },
+        ], {
+          color: 0xdff0ff, linewidth: under ? 4 : 3,
+          transparent: true, opacity: under ? 0.95 : 0.5,
+        });
+        padGroup.add(plus);
+        // What the hover has to brighten, so pointing at a square lights the
+        // whole square and not a third of it.
+        pad.userData.mates = [edge, plus];
+        pad.userData.rest = [pad.material.opacity, edge.material.opacity, plus.material.opacity];
       }
     }
     scene.add(padGroup);
@@ -1215,6 +1324,30 @@ export function createScene3D(canvas) {
     // the camera, or a click on a pad, exactly as before.
     if (startRing(ev)) dragged = true;
   }
+  // Which square is under the pointer, from the same ray the click uses -- so
+  // what lights up is what a click would fetch.
+  let hoverPad = null;
+  function padUnder(ev) {
+    if (!meshMode || !camera || !padGroup) return null;
+    const rect = canvas.getBoundingClientRect();
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2(
+      ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+      -((ev.clientY - rect.top) / rect.height) * 2 + 1,
+    ), camera);
+    return ray.intersectObjects(padGroup.children, false)
+      .find((h) => h.object.userData.at)?.object ?? null;
+  }
+
+  function litPad(pad, on) {
+    if (!pad?.userData.rest) return;
+    const [a, b, c] = pad.userData.rest;
+    const [edge, plus] = pad.userData.mates;
+    pad.material.opacity = on ? Math.min(0.5, a * 2.2) : a;
+    edge.material.opacity = on ? 1 : b;
+    plus.material.opacity = on ? 1 : c;
+  }
+
   function meshMove(ev) {
     if (ev.buttons) { dragged = true; return; }
     // Hovering says what a press would do, because a grip you cannot see is a
@@ -1223,7 +1356,17 @@ export function createScene3D(canvas) {
     // drag itself is the expensive half -- a move replans, and a replan with
     // the mesh loaded measured 48-93 ms -- and that is the cost of drawing the
     // real flight while you drag rather than a preview of one.
-    canvas.style.cursor = ringUnder(ev) ? (ev.shiftKey ? 'nwse-resize' : 'ns-resize') : '';
+    const grip = ringUnder(ev);
+    // A ring wins: it is the thing you came to adjust, and a pad is 100 m wide
+    // and always findable.
+    const pad = grip ? null : padUnder(ev);
+    if (pad !== hoverPad) {
+      litPad(hoverPad, false);
+      litPad(pad, true);
+      hoverPad = pad;
+      render();
+    }
+    canvas.style.cursor = grip ? (ev.shiftKey ? 'nwse-resize' : 'ns-resize') : (pad ? 'pointer' : '');
   }
   async function meshClick(ev) {
     // A drag is how you orbit, so only a press that never moved counts. The
@@ -1263,6 +1406,9 @@ export function createScene3D(canvas) {
         render();
         return;
       }
+      // Remembered only once it is known to exist, so a click on ground with
+      // no mesh is not something a refresh tries again.
+      rememberTile(g.lat, g.lon);
       buildPads();
       // A wire vertex over ground that was not loaded is dropped, so new ground
       // means the run can reach further than it did.
@@ -1672,9 +1818,52 @@ export function createScene3D(canvas) {
     scene.add(wireGroup);
   }
 
+  // Every wide line alive in the scene, so size() can keep their resolution
+  // current: a LineMaterial whose resolution is stale draws at the wrong width,
+  // and this view is resized by a drag of the splitter rather than by anything
+  // that fires a load event.
+  const fatMats = new Set();
+
+  function fatMaterial(opts) {
+    const m = new LineMaterial(opts);
+    m.resolution.set(canvas.clientWidth || 1, canvas.clientHeight || 1);
+    fatMats.add(m);
+    return m;
+  }
+
+  const xyz = (pts) => {
+    const a = new Float32Array(pts.length * 3);
+    pts.forEach((p, i) => { a[i * 3] = p.x; a[i * 3 + 1] = p.y; a[i * 3 + 2] = p.z; });
+    return a;
+  };
+
+  // One polyline, and one pile of independent segments. Same material either
+  // way; the geometries differ because a run of waypoints shares its corners
+  // and a set of flagged legs does not.
+  function fatLine(pts, opts) {
+    const g = new LineGeometry();
+    g.setPositions(xyz(pts));
+    return new Line2(g, fatMaterial(opts));
+  }
+  function fatSegments(pts, opts) {
+    const g = new LineSegmentsGeometry();
+    g.setPositions(xyz(pts));
+    return new LineSegments2(g, fatMaterial(opts));
+  }
+
+  // Materials outlive the group that used them unless something says otherwise,
+  // and buildMission runs on every replan -- which is every slider tick.
+  function dropFat(group) {
+    group?.traverse((o) => {
+      if (!(o.material instanceof LineMaterial)) return;
+      fatMats.delete(o.material);
+      o.material.dispose();
+    });
+  }
+
   function buildMission() {
     if (!scene || !mission) return;
-    if (missionGroup) scene.remove(missionGroup);
+    if (missionGroup) { scene.remove(missionGroup); dropFat(missionGroup); }
     missionGroup = new THREE.Group();
     const frame = mission.frame;
     const path = mission.exported ?? mission.waypoints ?? [];
@@ -1695,17 +1884,17 @@ export function createScene3D(canvas) {
       for (let i = 1; i < path.length; i++) {
         parts[meshHazard.verdict[i] ?? 0].push(at(path[i - 1]), at(path[i]));
       }
-      for (const [state, colour] of [[2, 0x2fd07a], [0, 0x6b7480], [1, 0xff3b3b]]) {
+      for (const [state, name, width] of [[2, 'clear', 3], [0, 'none', 2.5], [1, 'hit', 5]]) {
         if (!parts[state].length) continue;
-        const g = new THREE.BufferGeometry().setFromPoints(parts[state]);
-        missionGroup.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({
-          color: colour,
+        missionGroup.add(fatSegments(parts[state], {
+          color: asHex(VERDICT_COLOR[name]),
+          linewidth: width,
           // The red is drawn last and never hidden by the ground, because a
           // leg inside a building is BEHIND the wall it is inside.
           depthTest: state !== 1,
           transparent: state === 0,
           opacity: state === 0 ? 0.5 : 1,
-        })));
+        }));
       }
       scene.add(missionGroup);
       if (looksOn) buildLooks(path, at);
@@ -1727,10 +1916,10 @@ export function createScene3D(canvas) {
     let runPass = path[0]?.pass;
     const flushRun = () => {
       if (run.length > 1) {
-        const g = new THREE.BufferGeometry().setFromPoints(run);
-        missionGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({
+        missionGroup.add(fatLine(run, {
           color: asHex(PASS_COLOR[runPass] ?? PASS_FALLBACK),
-        })));
+          linewidth: 3,
+        }));
       }
       run = run.length ? [run[run.length - 1]] : [];
     };
@@ -1760,10 +1949,12 @@ export function createScene3D(canvas) {
     // A strike and a near miss are not the same news, so they are not the same
     // colour here either.
     for (const leg of [...(hazard?.legs ?? []), ...(meshHazard?.legs ?? [])]) {
-      const g = new THREE.BufferGeometry().setFromPoints([at(leg.a), at(leg.b)]);
-      missionGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({
+      missionGroup.add(fatSegments([at(leg.a), at(leg.b)], {
         color: asHex(LEG_COLOR[leg.grade] ?? LEG_COLOR.near),
-      })));
+        // Thicker than the flight it is drawn over, because it is the part of
+        // it you must not miss.
+        linewidth: leg.grade === 'strike' ? 5 : 4,
+      }));
     }
     scene.add(missionGroup);
   }
@@ -2228,6 +2419,7 @@ export function createScene3D(canvas) {
     async open() {
       boot();
       running = true;
+      if (chipBox) chipBox.hidden = false;
       if (!mission) { onStatus('Tap out a site first — this draws the ground under a flight.'); return; }
       // setMission fires on every replan, and a replan lands on every slider
       // tick, so without this a slow first load would be started a hundred
@@ -2259,6 +2451,16 @@ export function createScene3D(canvas) {
           if (first) { frameCamera(); framedMesh = true; }
           render();
           sayMesh();
+          // And then the neighbours you had last time, on top of the picture
+          // that is already up rather than instead of it -- the first tile is
+          // the one you are waiting for.
+          if (await restoreTiles({ signal: ctl.signal })) {
+            reportMesh();
+            buildPads();
+            buildWires();
+            render();
+            sayMesh();
+          }
           return;
         }
         // No mesh over this ground, which is most of the country: the LiDAR
@@ -2271,6 +2473,7 @@ export function createScene3D(canvas) {
         framedMesh = false;
         for (const t of meshTiles.values()) { meshGroup?.remove(t); t.geometry.dispose(); }
         meshTiles.clear();
+        meshCells.clear();
         heights = null;
         meshHazard = null;
         if (padGroup) { scene.remove(padGroup); padGroup = null; }
@@ -2343,7 +2546,15 @@ export function createScene3D(canvas) {
       render();
     },
 
-    close() { running = false; inFlight?.abort?.(); inFlight = null; },
+    // The chips are DOM over the canvas, so hiding the canvas does not hide
+    // them: they hung over the flat view as a second, stale stack of heights
+    // beside its own altitude scale.
+    close() {
+      running = false;
+      if (chipBox) chipBox.hidden = true;
+      inFlight?.abort?.();
+      inFlight = null;
+    },
     resize() { render(); },
     ready: () => Boolean(loaded),
   };

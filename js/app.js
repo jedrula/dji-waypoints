@@ -148,7 +148,13 @@ async function lidarView() {
     // What the photogrammetric mesh says about the flight. Geometry from the
     // view, judgement here: it reports what is under the flight and what the
     // flight runs into, and the readout decides whether that is too close.
-    lidar.onMesh((m) => { state.mesh = m; renderAlert(false); });
+    lidar.onMesh((m) => {
+      state.mesh = m;
+      // The flat view paints from this too, so imagery and bare grid show the
+      // same verdicts as the survey does instead of losing them at the switch.
+      view3d.setVerdict(m?.verdict ?? null);
+      renderAlert(false);
+    });
     lidar.setCollision(collideOn);
     lidar.onLevel(moveLevel);
     lidar.onRadius(moveRadius);
@@ -1010,10 +1016,15 @@ function computePlan() {
   view3d.setMission(state.mission, state.coverage);
   // Nothing solid to draw here any more, but the legs the check flagged are
   // still worth seeing over the flight.
-  view3d.setObstacles([], state.hazard.legs);
+  // The count is what collision mode needs to tell "clear of everything
+  // mapped" from "nothing was mapped" -- see setObstacles.
+  view3d.setObstacles([], state.hazard.legs, hazards.length);
   // Whichever surface is up gets the same flight. The survey view rebuilds the
   // path on every replan and the ground only when the frame moves.
   lidar?.setMission(state.mission, state.hazard);
+  // setMission is what re-checks the mesh, so the verdict is fresh only after
+  // it; with no survey open there is nothing to carry and this clears it.
+  view3d.setVerdict(state.mesh?.verdict ?? null);
   writeUrl();
   settleSoon();
 }
@@ -1776,7 +1787,11 @@ $('looksBtn').addEventListener('click', () => { setLooks(!looksOn); writeUrl(); 
 let collideOn = false;
 function setCollide(on) {
   collideOn = on;
+  // Both 3D views, because the button sits over whichever one is up: the
+  // survey paints from the mesh's per-leg verdict, the flat one from the
+  // obstacle check. Same colours, different evidence, and each says which.
   lidar?.setCollision(collideOn);
+  view3d.setCollision(collideOn);
   $('collideBtn').classList.toggle('on', collideOn);
 }
 $('collideBtn').addEventListener('click', () => { setCollide(!collideOn); writeUrl(); });

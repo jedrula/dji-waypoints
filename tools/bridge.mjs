@@ -294,6 +294,16 @@ export function detect() {
 
   const notes = [];
   if (!mtpTool()) notes.push('no MTP helper — `brew install libmtp pkg-config` to talk to a DJI RC');
+  // Said BEFORE you press install, not after it fails. ptpcamerad, Android File
+  // Transfer and an adb server are all shooed away by mtp() itself and are not
+  // worth mentioning; a browser tab holding the device over WebUSB is, because
+  // only you can close it.
+  if (transports.some((t) => t.kind === 'mtp')) {
+    const stuck = usbHolders().filter((h) => !KILLABLE.includes(h.name) && h.name !== 'adb');
+    for (const h of stuck) {
+      notes.push(`${h.name} (pid ${h.pid}) has the controller open — if installing fails, close it`);
+    }
+  }
   const bin = adbBin();
   if (!bin) {
     notes.push('adb not found — install Android platform-tools, or set ADB=/path/to/adb');

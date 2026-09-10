@@ -320,15 +320,39 @@ const rings2 = planMission({ points: [{ lat: 50.061, lon: 19.931, height: 12 }] 
 ok('2 rings fly at two distinct heights',
    new Set(rings2.waypoints.filter(w => !w.transit).map(w => w.alt)).size === 2);
 
-// Shift-dragging a ring in the 3D view pulls the domes in, and the pull stops
-// at the clearance floor rather than at whatever was dragged. The subject is
-// 20 m tall and 6 m of span, so framing puts the ring at 25.0 m and the floor
-// -- span/2 + clearance + 2 -- at 7.0 m.
+// Dragging ONE ring up must not make the others enormous. The dome's slant is
+// what keeps its rings at an even range, and it is measured off the lowest ring
+// -- over a 3 m subject with a ring pinned at 74 m it used to be measured off
+// the first entry in the list, which after a drag is whichever ring was
+// dragged, and the low rings ended up 70 m out.
+{
+  const rings = (heights) => {
+    const mm = planMission({ points: [{ lat: 50.061, lon: 19.931, height: 3 }] },
+      { altitude: 30, orbitRings: 3, nadir: false, oblique: false, surround: false,
+        establish: false, subjectClearance: 16, orbitHeights: heights }, cam);
+    const by = new Map();
+    for (const w of mm.exported.filter((q) => q.pass === 'orbit' && !q.transit)) {
+      const l = mm.frame.toLocal(w.lat, w.lon);
+      const k = Math.round(w.alt);
+      by.set(k, Math.max(by.get(k) ?? 0, Math.hypot(l.x, l.y)));
+    }
+    return [...by].sort((a, b) => a[0] - b[0]).map(([z, r]) => [z, Math.round(r)]);
+  };
+  const pinnedHigh = rings([74.2, 13.7, 28.2]);
+  const widest = Math.max(...pinnedHigh.map(([, r]) => r));
+  ok(`a ring pinned at 74 m does not inflate the others (widest ${widest} m, not 70+)`,
+     widest <= 25, JSON.stringify(pinnedHigh));
+}
+
+// The orbit standoff -- the slider, and the shift-drag on the ring itself --
+// pulls the domes in, and the pull stops at the clearance floor rather than at
+// whatever was asked for. The subject is 20 m tall and 6 m of span, so framing
+// puts the ring at 25.0 m and the floor -- span/2 + clearance + 2 -- at 7.0 m.
 {
   const at = (tighten) => {
     const mm = planMission({ points: [{ lat: 50.061, lon: 19.931, height: 20 }] },
       { altitude: 40, orbitRings: 1, nadir: false, oblique: false, surround: false,
-        establish: false, orbitTighten: tighten }, cam);
+        establish: false, orbitStandoff: -tighten }, cam);
     const ring = mm.waypoints.filter((w) => w.pass === 'orbit' && !w.transit);
     const r = ring.map((w) => {
       const l = mm.frame.toLocal(w.lat, w.lon);

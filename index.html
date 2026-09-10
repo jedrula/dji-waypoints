@@ -293,6 +293,15 @@
         <span>Surround offset</span>
         <span class="ctl"><input id="orbitPad" type="range" min="-30" max="40" step="1"><output id="orbitPadOut"></output></span>
       </label>
+      <!-- How close the rings fly to the thing they orbit. Zero is the camera's
+           own framing distance -- far enough back to fit the whole subject in
+           one frame -- so this is the knob for "closer than a photogrammetry
+           textbook wants, because the detail is worth more". The same number
+           moves when you shift-drag a ring in the 3D view. -->
+      <label class="row">
+        <span>Orbit standoff</span>
+        <span class="ctl"><input id="orbitStandoff" type="range" min="-40" max="40" step="1"><output id="orbitStandoffOut"></output></span>
+      </label>
       <label class="row">
         <span>Rings per thing</span>
         <select id="orbitRings">

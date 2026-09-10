@@ -441,6 +441,14 @@ const controls = {
   sideOverlap: { el: $('sideOverlap'), val: (v) => v / 100, fmt: (v) => `${v}%` },
   speed: { el: $('speed'), val: (v) => +v, fmt: (v) => `${(+v).toFixed(1)} m/s` },
   orbitPad: { el: $('orbitPad'), val: (v) => +v, fmt: (v) => `${v > 0 ? '+' : ''}${v} m` },
+  // Zero is the framing distance the camera itself asks for, so that is what
+  // zero says rather than "0 m" -- which would read as "no standoff", i.e. a
+  // ring flown into the wall.
+  orbitStandoff: {
+    el: $('orbitStandoff'),
+    val: (v) => +v,
+    fmt: (v) => (+v === 0 ? 'framing distance' : `${v > 0 ? '+' : ''}${v} m`),
+  },
 };
 const PASS_IDS = ['nadir', 'oblique', 'orbit', 'transect', 'surround', 'establish'];
 const PICK_IDS = ['photoMode', 'profile', 'shotsPerStop', 'orbitRings', 'surroundRings', 'shape'];
@@ -460,10 +468,7 @@ for (const [name, spec] of Object.entries(SHAPES)) {
 // what was missing was anything setting them, which is why the levels were not
 // draggable.
 //
-// `orbitTighten` joined them for the same reason: the dome radius is derived
-// from the camera's framing, so there was no knob to turn, and dragging a ring
-// inwards is the only thing that ever asks for a tighter one.
-let pinned = { orbitHeights: null, transectHeights: null, orbitTighten: 0 };
+let pinned = { orbitHeights: null, transectHeights: null };
 
 function uiValues() {
   const v = {};
@@ -477,7 +482,6 @@ function uiValues() {
   v.surroundRings = +$('surroundRings').value;
   if (pinned.orbitHeights) v.orbitHeights = pinned.orbitHeights;
   if (pinned.transectHeights) v.transectHeights = pinned.transectHeights;
-  if (pinned.orbitTighten) v.orbitTighten = pinned.orbitTighten;
   return v;
 }
 
@@ -485,11 +489,7 @@ function applyUiValues(v) {
   // Absent means "not pinned", which is a real state and not a missing value:
   // a restored plan whose levels were never dragged must go back to the spread
   // the ring count implies, not to whatever the last plan was dragged to.
-  pinned = {
-    orbitHeights: v.orbitHeights ?? null,
-    transectHeights: v.transectHeights ?? null,
-    orbitTighten: v.orbitTighten ?? 0,
-  };
+  pinned = { orbitHeights: v.orbitHeights ?? null, transectHeights: v.transectHeights ?? null };
   for (const k of Object.keys(controls)) if (v[k] !== undefined) controls[k].el.value = v[k];
   for (const id of PASS_IDS) if (v[id] !== undefined) $(id).checked = v[id];
   for (const id of PICK_IDS) if (v[id] !== undefined) $(id).value = String(v[id]);
@@ -509,7 +509,6 @@ function paramsFromUi(v) {
   p.surroundRings = v.surroundRings;
   p.orbitHeights = v.orbitHeights ?? null;
   p.transectHeights = v.transectHeights ?? null;
-  p.orbitTighten = v.orbitTighten ?? 0;
   return p;
 }
 
@@ -1588,17 +1587,19 @@ $('findme').addEventListener('click', () => findMe());
 // slider here already does on every tick, and what makes the flight follow your
 // finger. The undo entry is committed at the end of the gesture, not during it,
 // or one drag would leave forty steps to undo.
-// Shift-dragging a ring in or out, in metres off the framing distance. An
-// absolute value and not a delta, because the scene reads its base from
-// `mission.params.orbitTighten` and so cannot drift away from what was planned.
+// Shift-dragging a ring in or out, in metres off the framing distance. It
+// writes the slider, the way dragging the grid height writes the altitude
+// slider: two grips on one knob, and no third place for the number to live.
 //
-// One number for every dome, which is what "make the orbit smaller" can honestly
-// mean here: the radius is derived per subject from that subject's height, so
-// there is nothing per-ring to write back to. Bounded at 40 m of pull-in
-// because past that every dome is on its clearance floor and the drag is doing
-// nothing; and at 40 m out because a ring that big is the establishing pass.
+// An absolute value and not a delta, because the scene reads its base from
+// `mission.params.orbitStandoff` and so cannot drift away from what was
+// planned. One number for every dome, which is what "make the orbit smaller"
+// can honestly mean here -- the radius is derived per subject from that
+// subject's height, so there is nothing per-ring to write back to.
 function moveRadius(m) {
-  pinned.orbitTighten = Math.max(-40, Math.min(40, Math.round(m * 2) / 2));
+  const el = $('orbitStandoff');
+  el.value = String(Math.max(+el.min, Math.min(+el.max, Math.round(m))));
+  readOuts();
   computePlan();
 }
 
@@ -1981,6 +1982,7 @@ applyUiValues({
   sideOverlap: DEFAULTS.sideOverlap * 100,
   speed: DEFAULTS.speed,
   orbitPad: DEFAULTS.orbitPad,
+  orbitStandoff: DEFAULTS.orbitStandoff,
   photoMode: DEFAULTS.photoMode,
   profile: 'fly',
   shape: DEFAULT_SHAPE,

@@ -1357,6 +1357,13 @@ export function createScene3D(canvas) {
     // the mesh loaded measured 48-93 ms -- and that is the cost of drawing the
     // real flight while you drag rather than a preview of one.
     const grip = ringUnder(ev);
+    // Said once, the first time a ring is under the pointer: a modifier nobody
+    // is told about is a feature nobody has. The cursor already changes, and
+    // that says "this drags" without saying which way or what shift does.
+    if (grip && !toldGrip) {
+      toldGrip = true;
+      onStatus('That ring drags: up and down to move it, shift-drag to pull it in or out.');
+    }
     // A ring wins: it is the thing you came to adjust, and a pad is 100 m wide
     // and always findable.
     const pad = grip ? null : padUnder(ev);
@@ -1637,6 +1644,7 @@ export function createScene3D(canvas) {
   // orbit of the camera as before.
   const GRAB_PX = 14;
   let ringDrag = null;
+  let toldGrip = false;
 
   // Where a waypoint lands on screen, in client coordinates, or null behind
   // the camera.
@@ -1744,7 +1752,7 @@ export function createScene3D(canvas) {
       // re-decided per move: letting go of shift halfway would otherwise apply
       // the vertical travel you had already made as a height change.
       mode: ev.shiftKey ? 'radius' : 'height',
-      base: mission.params?.orbitTighten ?? 0,
+      base: mission.params?.orbitStandoff ?? 0,
       rM,
       told: false,
     };
@@ -1773,9 +1781,10 @@ export function createScene3D(canvas) {
       }
       if (!centre) return;
       const d = Math.hypot(ev.clientX - centre.x, ev.clientY - centre.y);
-      // Towards the middle is smaller, which is why this is d0 - d.
-      const want = base + (d0 - d) * perR;
-      onStatus(`Ring radius ${Math.max(0, rM - (want - base)).toFixed(0)} m`);
+      // Away from the middle is wider, and the standoff is measured the same
+      // way round, so this is a plain difference.
+      const want = base + (d - d0) * perR;
+      onStatus(`Ring radius ${Math.max(0, rM + (want - base)).toFixed(0)} m`);
       onRadius(want);
       return;
     }

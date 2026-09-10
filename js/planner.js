@@ -55,12 +55,15 @@ export const DEFAULTS = {
   // altitude slider, quietly discards heights that no longer mean anything.
   orbitHeights: null,
   transectHeights: null,
-  // How much tighter than the framing distance the domes fly, in metres,
-  // written by shift-dragging a ring in the 3D view. Positive pulls in.
+  // How far the domes stand off what they orbit, in metres, MEASURED FROM THE
+  // CAMERA'S OWN FRAMING DISTANCE -- so zero is "far enough back to fit the
+  // thing in the frame", negative is tighter and positive is wider. There is a
+  // slider for it and a shift-drag on the ring itself in the 3D view.
+  //
   // It cannot pull a ring inside `span / 2 + clearance + 2` -- see objectPass,
   // where that floor is a Math.max and this term is only one of its arguments
-  // -- so a drag can crop the framing but never the clearance.
-  orbitTighten: 0,
+  // -- so it can crop the framing margin but never the clearance.
+  orbitStandoff: 0,
   // Height of what you are capturing; the orbit aims at its middle, not at the
   // ground under it. Defaults to 3 m because almost everything worth splatting
   // has height -- play equipment, cars, walls, hedges, people-sized things --
@@ -313,7 +316,7 @@ const MAX_PER_RING_OBJ = 32;    // every 11 deg, past which frames stop earning
 
 function objectPass(g) {
   const { subject, others = [], f, cam, frontOverlap, rings, clearance, pitchOverride,
-    pinned = null, tighten = 0 } = g;
+    pinned = null, standoff = 0 } = g;
   const { x: cx, y: cy, height: H, span } = subject;
   const aimZ = H / 2;
 
@@ -327,15 +330,15 @@ function objectPass(g) {
   // and the span term already keeps the ring outside the thing.
   const view = fov(cam);
   const framing = (H / 2) / Math.tan(view.v / 2) * FILL;
-  // `tighten` is the ring dragged in or out by hand, and it is subtracted from
+  // `standoff` is the ring pulled in or pushed out by hand, and it applies to
   // the FRAMING term only. The footprint-plus-clearance floor and the 3 m floor
   // are the other two arguments of the same Math.max, so pulling in gives up
   // framing margin first and stops dead at the clearance: over a 20 m subject
   // of 6 m span with 2 m clearance, framing is 25.0 m and the floor is 7.0 m,
-  // so a drag can take 18.0 m and not the nineteenth. Losing framing margin
-  // costs a subject that no longer fits the frame, which is a worse photograph;
-  // losing clearance costs the aircraft.
-  const r = Math.max(span / 2 + clearance + 2, framing - tighten, 3);
+  // so it can take 18.0 m of margin and not the nineteenth. Losing framing
+  // margin costs a subject that no longer fits one frame, which is a worse
+  // photograph; losing clearance costs the aircraft.
+  const r = Math.max(span / 2 + clearance + 2, framing + standoff, 3);
 
   // Heights from just above the ground to over the top, so the thing is seen
   // looking up, level and down. One ring means the level one.
@@ -429,7 +432,16 @@ function objectPass(g) {
 
   // A dome rather than a cylinder: each ring pulls in as it rises so the slant
   // range stays constant, which keeps framing and ground resolution even.
-  const slant = Math.hypot(r, Math.max(0.5, heights[0] - aimZ));
+  //
+  // Measured from the LOWEST ring, not from heights[0]. The derived spread is
+  // ascending so the two were the same thing -- until a ring was dragged, and
+  // a pinned list is in whatever order the chips wrote it. Over a 3 m subject
+  // with one ring pinned at 74 m, heights[0] made the slant 75 m and the other
+  // two rings ballooned to 70 and 74 m of radius: a 150 m circle round a bush,
+  // which is what Andrzej was looking at when he asked whether these were sane
+  // defaults. They were not defaults at all. Off the lowest ring, the same
+  // three heights give 21, 20 and 20 m.
+  const slant = Math.hypot(r, Math.max(0.5, Math.min(...heights) - aimZ));
   const centre = f.toLatLon(cx, cy);
   const pts = [];
 
@@ -841,7 +853,7 @@ export function planMission(site, opts, cam) {
           && !(Math.abs(o.x - subject.x) < 0.01 && Math.abs(o.y - subject.y) < 0.01)),
         f, cam, frontOverlap: p.frontOverlap, rings,
         clearance: p.subjectClearance ?? 2, pitchOverride: p.orbitPitch,
-        tighten: p.orbitTighten ?? 0,
+        standoff: p.orbitStandoff ?? 0,
         // Only the tallest subject's rings drive the altitude scale, and only
         // its heights are the ones the 3D view can pin -- see orbitHeightsUsed.
         pinned: p.orbitHeights,
@@ -877,8 +889,13 @@ export function planMission(site, opts, cam) {
     passes.push({
       name: `Orbit ${visited.length} thing${visited.length === 1 ? '' : 's'}`,
       count,
+      // The radius is in here because it is the number the standoff slider
+      // moves, and until it was shown there was no way to tell whether a drag
+      // had done anything: the rings are 50 m off a 40 m tower by default, and
+      // that reads as "enormous" rather than as "the framing distance".
       detail: `${sameEverywhere ? `${flownRings[0]} ring${flownRings[0] === 1 ? '' : 's'} each`
         : `rings ${ringTally}`} · tallest ${tallest.subject.height.toFixed(0)} m`
+        + ` · r = ${tallest.r.r.toFixed(0)} m`
         + `${nObs ? ` · ${nCap} tapped, ${nObs} obstacles` : ''}`,
     });
   }

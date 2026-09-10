@@ -134,6 +134,7 @@ export function createScene3D(canvas) {
   let onStatus = () => {};
   let onMesh = () => {};
   let meshHazard = null;
+  let framedMesh = false;
   let running = false;
   let opening = false;
   let inFlight = null;
@@ -1768,7 +1769,11 @@ export function createScene3D(canvas) {
       // acting on it makes it go away, and a stale "25 legs fly into
       // buildings" after you raised the flight is worse than no finding: it
       // says the fix did not work when it did.
-      if (meshTiles.size) { buildMission(); reportMesh(); render(); return; }
+      // Everything the mesh view draws from the mission, on every replan, in
+      // whatever view is up. reportMesh builds the mission itself, so calling
+      // buildMission first was drawing it twice; and buildWires was not called
+      // at all, so wires kept the heights of the plan before last.
+      if (meshTiles.size) { reportMesh(); buildWires(); render(); return; }
       if (moved) buildSurface(); else { buildMission(); render(); }
     },
 
@@ -1855,18 +1860,33 @@ export function createScene3D(canvas) {
         const mesh = await loadMeshTile(c.lat0, c.lon0, { signal: ctl.signal })
           .catch(() => ({ ok: false, why: 'the mesh service did not answer' }));
         if (mesh.ok) {
+          const first = !framedMesh;
           meshMode = true;
-          buildMission();
-          frameCamera();
+          reportMesh();
           buildPads();
           buildWires();
-          reportMesh();
+          // Only the first time. Leaving the view and coming back used to
+          // reset the camera, so any trip to the map to click something cost
+          // you the angle you had lined up.
+          if (first) { frameCamera(); framedMesh = true; }
           render();
           sayMesh();
           return;
         }
         // No mesh over this ground, which is most of the country: the LiDAR
         // heightfield, exactly as before.
+        // A site with no mesh must not inherit the last one's. meshMode used to
+        // stay true, so the survey view kept drawing the previous city's tiles,
+        // buildWires measured heights off its grid, and buildSurface was never
+        // reached at all.
+        meshMode = false;
+        framedMesh = false;
+        for (const t of meshTiles.values()) { meshGroup?.remove(t); t.geometry.dispose(); }
+        meshTiles.clear();
+        heights = null;
+        meshHazard = null;
+        if (padGroup) { scene.remove(padGroup); padGroup = null; }
+        onMesh(null);
         onStatus('No mesh here — building the LiDAR surface instead…');
         await loadFor(c.lat0, c.lon0, { signal: ctl.signal });
         buildSurface();

@@ -1135,9 +1135,18 @@ function renderAlert(over) {
   }
   if (mesh?.tallest !== null && mesh?.tallest !== undefined) {
     const need = mesh.tallest + clearance();
-    if (need > alt) {
-      say('unseen', `The mesh measures something ${mesh.tallest.toFixed(0)} m tall under this `
-        + `flight — ${(need - alt).toFixed(0)} m above your altitude.`);
+    // Two different sentences, because "24 m tall, 13 m above your altitude"
+    // was neither: 13 was how far short of the CLEARANCE the flight was, and
+    // attaching it to the thing said it stood 13 m over an aircraft it was
+    // actually 3 m under. Say the gap, and say what it is short of.
+    const spare = alt - mesh.tallest;
+    if (spare < 0) {
+      say('ground', `At ${alt} m the flight is ${(-spare).toFixed(0)} m BELOW something the `
+        + `mesh measures at ${mesh.tallest.toFixed(0)} m.`);
+    } else if (need > alt) {
+      say('clearance', `The tallest thing the mesh measured under this flight is `
+        + `${mesh.tallest.toFixed(0)} m. At ${alt} m you pass ${spare.toFixed(0)} m over it, `
+        + `which is less than your ${clearance()} m clearance.`);
     }
     raiseTo(need);
   }
@@ -1178,8 +1187,18 @@ function renderAlert(over) {
       ? ` ${sv.missing} of ${sv.tiles} tiles are not built, so this is not the whole picture.`
       : '';
     if (need > alt) {
-      say('unseen', `The survey sees something ${sv.height} m tall under this flight — `
-        + `${(need - alt).toFixed(0)} m above your altitude, mapped or not.${caveat}`);
+      // Same correction as the mesh finding above: the number was the shortfall
+      // against the clearance, and the sentence claimed it was the height of
+      // the thing over the aircraft.
+      const spare = alt - sv.height;
+      if (spare < 0) {
+        say('ground', `At ${alt} m the flight is ${(-spare).toFixed(0)} m BELOW something the `
+          + `survey sees at ${sv.height} m, mapped or not.${caveat}`);
+      } else {
+        say('unseen', `The survey sees something ${sv.height} m tall under this flight, mapped `
+          + `or not. At ${alt} m you pass ${spare.toFixed(0)} m over it, which is less than `
+          + `your ${clearance()} m clearance.${caveat}`);
+      }
       raiseTo(need);
     } else {
       say('incomplete', `The survey's tallest thing under this flight is ${sv.height} m; `

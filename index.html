@@ -258,7 +258,13 @@
       <p class="hint gsd" id="gsdHint"></p>
       <label class="row">
         <span>Clearance</span>
-        <span class="ctl"><input id="clearance" type="range" min="0" max="30" step="0.5"><output id="clearanceOut"></output></span>
+        <!-- Three metres. It was the middle of the slider, which is 15, and 15 m
+             off a hedge is a photograph of a field: the clearance is what the
+             rings stand off the thing they orbit, so it is the difference
+             between flying round a building and flying round a postcode. Three
+             is a rotor-span-and-then-some, and the number you raise when the
+             wind picks up. Kept per browser once you touch it. -->
+        <span class="ctl"><input id="clearance" type="range" min="0" max="30" step="0.5" value="3"><output id="clearanceOut"></output></span>
       </label>
       <label class="row">
         <span>Footprint</span>

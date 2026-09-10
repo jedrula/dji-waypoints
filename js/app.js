@@ -611,8 +611,61 @@ function placeAt(latlng) {
     return;
   }
   const added = site.addCapture({ lat: latlng.lat, lon: latlng.lng });
-  if (added) state.selected = { id: added.id };
+  if (added) {
+    state.selected = { id: added.id };
+    probeHeight(added);
+  }
   renderPointBar();
+}
+
+// What is standing where you tapped, from the survey rather than from a guess.
+//
+// A tap says where and how tall, and the "how tall" was 3 m until you fixed it
+// by hand -- see DEFAULT_HEIGHT in js/site.js, "a hedge, a van, a garden wall".
+// The survey already holds the number and holds it in exactly the units a
+// capture point wants: one byte per square metre of height ABOVE THE GROUND,
+// rounded up because it is used to decide how high to fly (see
+// server/src/ndsm.js). So the tap asks, and a roof comes back as a roof.
+//
+// A 3 m square rather than the point itself, because the raster is 1 m and a
+// point can fall between lattice points -- sampleMax re-samples at quarter
+// steps for exactly that reason, and a small square catches the roof rather
+// than the gutter beside it. It takes the MAXIMUM in the square, which is the
+// conservative direction: the flight then stands its clearance above the
+// tallest thing there rather than above the average of a roof and a yard.
+//
+// It never blocks the tap, because cold ground is minutes -- the service
+// downloads a couple of hundred megabytes of LiDAR and builds a 500 m tile. So
+// the point keeps the default until an answer lands, and keeps it for good if
+// none does. An answer that arrives after you have set the height YOURSELF is
+// discarded: nobody wants a number they typed overwritten a minute later.
+const PROBE_HALF_M = 1.5;
+async function probeHeight(point) {
+  const dLat = PROBE_HALF_M / mPerDegLat(point.lat);
+  const dLon = PROBE_HALF_M / mPerDegLon(point.lat);
+  try {
+    const { measure } = await import('./heights.js');
+    const got = await measure([{
+      north: point.lat + dLat, south: point.lat - dLat,
+      east: point.lon + dLon, west: point.lon - dLon,
+      height: point.height, assumed: true,
+    }], {
+      onWait: () => toast('First look at this ground — the survey is building it. A few minutes.',
+        { sticky: true }),
+    });
+    const one = got.obstacles[0];
+    if (!one?.measured) return;
+    const now = site.capture().find((q) => q.id === point.id);
+    if (!now || Math.abs(now.height - point.height) > 0.01) return;
+    site.setCaptureHeight(point.id, one.height);
+    // The bar is what shows the height, and it does not redraw itself off a
+    // site change -- so without this the plan flew at the measured roof and the
+    // number under your thumb still said 3.
+    renderPointBar();
+    toast(one.height > 0
+      ? `${one.height} m tall there, measured by the survey.`
+      : 'Flat ground there, by the survey.');
+  } catch { /* no survey, no answer, no change: the default stands */ }
 }
 
 // A double-click zooms, and Leaflet reports BOTH of its clicks as clicks -- so

@@ -278,6 +278,21 @@
         </select>
       </label>
 
+      <!-- The recipe, before the ingredients. Each of these is nothing but a
+           set of the checkboxes below it -- there is no hidden logic and no
+           fourth state -- so picking one is a starting point you then edit, and
+           the moment you edit it the picker says Custom. It also re-runs the
+           auto-fit, because "give me the known-good flight for this" includes
+           the altitude. -->
+      <label class="row">
+        <span>Start from</span>
+        <select id="preset">
+          <option value="ortho">Orthophoto — the grid, straight down</option>
+          <option value="building">One building — grid + a ring over each thing</option>
+          <option value="map">Neighbourhood map — grid, obliques, rings, context</option>
+          <option value="custom">Custom</option>
+        </select>
+      </label>
       <fieldset class="passes">
         <legend>Passes</legend>
         <label class="chk"><input type="checkbox" id="nadir" checked>

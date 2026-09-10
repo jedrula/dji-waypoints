@@ -456,6 +456,42 @@ const controls = {
   },
 };
 const PASS_IDS = ['nadir', 'oblique', 'orbit', 'transect', 'surround', 'establish'];
+
+// Three recipes, and each one IS its set of passes -- nothing else. Andrzej
+// asked "what should I fly" twice in one afternoon, and both answers were a
+// list of checkboxes, which is a thing the app should hold rather than the
+// chat.
+//
+// Measured on a 95 x 65 m block of 21 m roofs, each preset auto-fitted, so the
+// picker is choosing between known costs rather than adjectives:
+//
+//     ortho      32 m   88 wp   6.2 min   0.56 cm/px    8% covered
+//     building   32 m  109 wp   8.8 min   0.56 cm/px   36%
+//     map        41 m  187 wp  18.0 min   0.72 cm/px   74%, walls 49%
+//
+// and over a single 23 m tap: 2 wp, 18 wp and 46 wp -- six seconds, 1.3 minutes
+// and 2.9.
+//
+// The establishing ring is in `map` because it is the best value in the list:
+// 17 waypoints took walls from 13% to 49%, being the one pass that sees the
+// whole site in every frame and ties it together.
+const PRESETS = {
+  ortho: { nadir: true, oblique: false, orbit: false, transect: false, surround: false, establish: false },
+  building: { nadir: true, oblique: false, orbit: true, transect: false, surround: false, establish: false },
+  map: { nadir: true, oblique: true, orbit: true, transect: false, surround: true, establish: true },
+};
+
+// Which preset the checkboxes currently spell, or 'custom'. The picker reads
+// the passes rather than remembering what was picked: a preset you have edited
+// is not that preset any more, and saying so is the whole honesty of it.
+function presetNow() {
+  const on = Object.fromEntries(PASS_IDS.map((id) => [id, $(id).checked]));
+  return Object.keys(PRESETS).find((k) => PASS_IDS.every((id) => PRESETS[k][id] === on[id])) ?? 'custom';
+}
+
+function showPreset() {
+  $('preset').value = presetNow();
+}
 const PICK_IDS = ['photoMode', 'profile', 'shotsPerStop', 'orbitRings', 'surroundRings', 'shape'];
 
 for (const [name, spec] of Object.entries(SHAPES)) {
@@ -498,6 +534,7 @@ function applyUiValues(v) {
   for (const k of Object.keys(controls)) if (v[k] !== undefined) controls[k].el.value = v[k];
   for (const id of PASS_IDS) if (v[id] !== undefined) $(id).checked = v[id];
   for (const id of PICK_IDS) if (v[id] !== undefined) $(id).value = String(v[id]);
+  showPreset();
   readOuts();
 }
 
@@ -1829,11 +1866,25 @@ for (const [name, c] of Object.entries(controls)) {
 for (const id of [...PASS_IDS, ...PICK_IDS]) {
   $(id).addEventListener('change', () => {
     if (TUNABLE.has(id)) tuned = true;
+    showPreset();
     computePlan();
     renderIdentity();
     history.commit();
   });
 }
+
+$('preset').addEventListener('change', () => {
+  const want = PRESETS[$('preset').value];
+  // 'Custom' is a readout, not a choice: picking it changes nothing, because
+  // there is nothing it could mean.
+  if (!want) { showPreset(); return; }
+  for (const id of PASS_IDS) $(id).checked = want[id];
+  // The altitude is part of the recipe, so the fit runs again.
+  tuned = false;
+  computePlan();
+  renderIdentity();
+  history.commit();
+});
 $('clearance').addEventListener('input', () => { computePlan(); });
 $('clearance').addEventListener('change', () => {
   try { localStorage.setItem(CLEARANCE_KEY, $('clearance').value); } catch { /* private window */ }

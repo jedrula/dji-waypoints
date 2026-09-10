@@ -26,11 +26,27 @@ export const DEFAULTS = {
   oblique: true,
   orbit: true,
   orbitPad: 15,          // metres outside the box corners
-  // Rings per THING, not per site -- so three is affordable, and three is what
-  // a reconstruction wants: one looking up, one level, one looking down. A
-  // subject only ever seen from one elevation has no data for the others.
   subjectClearance: 2,   // how far a dome stands off a thing, and off its neighbours
-  orbitRings: 3,
+  // Rings per THING, not per site. TWO of them: one below the top of the
+  // subject and one above it, which is what buys a facade its vertical
+  // parallax -- a subject seen from one elevation only has no depth on its
+  // walls at all.
+  //
+  // It was three, on the reasoning "one looking up, one level, one looking
+  // down", and the measurement does not support the middle one. Re-measured
+  // 2026-09-10 with 3 m of clearance, coverage as the scorer reports it:
+  //
+  //     one tap, 23 m tall      1 ring 93.9%   2 rings 100%   3 rings +0.0
+  //     a 40 x 20 m block       1 ring 98.3%   2 rings 100%   3 rings +0.0
+  //
+  // and the third ring costs 21 waypoints and 1.6 minutes on the tap, 42 and
+  // 3.1 on the block. The scorer saturates -- it asks whether every surface is
+  // seen from three directions with enough spread, not whether a splat comes
+  // out prettier -- so this is not "three cannot help". It is that nothing
+  // here can show that it does, and this app does not spend a third of a
+  // battery on a number it cannot measure. Raise it in Advanced for a facade
+  // you care about.
+  orbitRings: 2,
   // Where the LOWEST ring sits, in metres AGL. null spreads from half the set
   // altitude, which is an arbitrary anchor that happens to look reasonable. A
   // number here is the honest version: the height of the tallest thing under
@@ -1124,13 +1140,15 @@ export function proposePlan(site, base, cam, budget = {}) {
   // there is no vertical subject to see from several elevations. The moment
   // something has height, elevation diversity is the biggest single win
   // available: measured, one ring to two is +7.1 points of coverage, where two
-  // to three is +0.5 and three to four is +0.8.
+  // to three is +0.5 and three to four is +0.8. Re-measured 2026-09-10 on a
+  // 23 m subject at 3 m clearance: +6.1 and then +0.0. Which is why the search
+  // prefers TWO and steps down to one, rather than starting at three.
   // Height comes from the taps now, so ask the planner rather than the caller:
   // one cheap plan settles whether there is anything vertical here at all.
   const probe = planMission(site, { ...base, altitude: 40 }, cam);
   const subjectHeight = probe.params.subjectHeight;
   const hasHeight = subjectHeight > 0.5;
-  const ringChoices = hasHeight ? [3, 2, 1] : [1];
+  const ringChoices = hasHeight ? [2, 1] : [1];
 
   // How low the search may go. Over flat ground 20 m is a sensible floor. With
   // a subject that has height, the useful altitudes are just above it -- an

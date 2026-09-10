@@ -1499,22 +1499,38 @@ function mapSpanM() {
   return Math.max(20, (b.getEast() - b.getWest()) * mPerDegLon(mid));
 }
 
+// The two panes are not the same width -- the splitter is wherever you left it
+// -- so "show the same span of ground" is NOT "show it at the same size".
+// Handing the map's own span straight over made the survey draw it across a
+// narrower canvas, and the pictures came out at different scales: measured at a
+// 60/40 split, the map at 0.0934 m/px against the survey at 0.1271, and it
+// reads as everything off-centre being in the wrong place.
+//
+// So what crosses the boundary is metres per pixel, converted at each end into
+// the span that pane has to show. Comparing two pictures means comparing them
+// at one scale.
+const mapMPerPx = () => mapSpanM() / Math.max(200, map.getSize().x || 800);
+const view3dWidth = () => {
+  const el = groundMode === 'survey' ? $('lidar') : $('scene');
+  return Math.max(200, el.clientWidth || 800);
+};
+
 $('syncTo3d').addEventListener('click', () => {
   const v = active3d();
   if (!v?.lookAt) { toast('Nothing in the 3D view to point yet.'); return; }
   const c = map.getCenter();
-  v.lookAt({ lat: c.lat, lon: c.lng, spanM: mapSpanM() });
+  v.lookAt({ lat: c.lat, lon: c.lng, spanM: mapMPerPx() * view3dWidth() });
   toast('The 3D view is looking where the map is.');
 });
 
 $('syncToMap').addEventListener('click', () => {
   const at = active3d()?.where?.();
   if (!at) { toast('Tap out a site first — there is nothing to line up on.'); return; }
-  // A span back to a zoom: the level whose ground-per-pixel fills the pane
-  // with that much ground. Never past 21, which is as far as the imagery goes.
-  const px = Math.max(200, $('map').clientWidth || 800);
+  // A scale back to a zoom: the level whose ground-per-pixel is nearest the
+  // 3D view's own. Never past 21, which is as far as the imagery goes.
+  const want = at.spanM / view3dWidth();
   let z = 21;
-  while (z > 3 && mPerPx(at.lat, z) * px < at.spanM) z -= 1;
+  while (z > 3 && mPerPx(at.lat, z) < want) z -= 1;
   map.setView([at.lat, at.lon], z, { animate: false });
   toast('The map is looking where the 3D view is.');
 });

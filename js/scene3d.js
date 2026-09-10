@@ -1114,6 +1114,25 @@ export function createScene3D(canvas) {
     return got;
   }
 
+  // Half the field of view ACROSS the canvas, as a tangent.
+  //
+  // three.js `fov` is the VERTICAL angle, and js/app.js measures the map's span
+  // east to west -- so fitting one to the other put the map's WIDTH across the
+  // canvas's HEIGHT. Measured in a split view 867 x 435 px, from the tap
+  // spacing in each pane: the map at 0.0934 m/px against the survey at 0.1809,
+  // a factor of 1.94 -- almost exactly the panes' 2:1 aspect. That is the
+  // "shift" you see comparing the two: at twice the scale, everything
+  // off-centre lands somewhere else.
+  const tanAcross = () => Math.tan((camera.fov * Math.PI) / 360) * (camera.aspect || 1);
+
+  // The height of the surface a top-down view is really looking at: the
+  // tallest thing tapped, which is what the map's imagery is showing the roof
+  // of. Zero with nothing tapped, which is the old behaviour exactly.
+  function lookHeight() {
+    const taps = mission?.points ?? [];
+    return taps.length ? Math.max(0, ...taps.map((q) => q.height ?? 0)) : 0;
+  }
+
   // Everything the mesh owns, forgotten. One function because it is five
   // things and the day one of them is missed -- the covered-ground list was,
   // once -- a site with no mesh inherits the last one's tiles and answers
@@ -2969,9 +2988,10 @@ export function createScene3D(canvas) {
       if (!frameOf() || !controls) return null;
       const t = controls.target;
       const g = frameOf().toLatLon(t.x, -t.z);
-      const dist = camera.position.distanceTo(t);
-      return { lat: g.lat, lon: g.lon,
-               spanM: Math.max(20, 2 * dist * Math.tan((camera.fov * Math.PI) / 360)) };
+      // Measured to the height the map is drawing, not to the ground, and
+      // ACROSS rather than down: see lookAt, which is this in reverse.
+      const dist = Math.max(1, camera.position.distanceTo(t) - lookHeight());
+      return { lat: g.lat, lon: g.lon, spanM: Math.max(20, 2 * dist * tanAcross()) };
     },
 
     // Reproduce the map: straight down, north up, the same width of ground.
@@ -2992,8 +3012,23 @@ export function createScene3D(canvas) {
       if (!frameOf() || !controls) return;
       const l = frameOf().toLocal(lat, lon);
       // Half the span subtends half the field of view, so this is the height
-      // at which exactly spanM of ground is in shot.
-      const dist = Math.max(20, (spanM / 2) / Math.tan((camera.fov * Math.PI) / 360));
+      // at which exactly spanM of ground is in shot -- PLUS the height of the
+      // surface the map is actually showing.
+      //
+      // Without that term the two pictures cannot be compared, which is the
+      // one thing this button is for. A map is orthographic and its scale is
+      // the same everywhere; this camera is perspective, so a roof 23 m up is
+      // magnified by dist / (dist - 23) against the ground beside it. At the
+      // 81 m span Andrzej was comparing at, that is 1.42x -- and a tap 10 m
+      // off-centre lands 4 m away from where the map puts it, which reads as
+      // the marker being in the wrong place. Measured 1.4x off the screenshots
+      // before this, against 1.42 predicted.
+      //
+      // Lifting the camera by the site's own height puts the SUBJECT's plane
+      // at the requested span instead of the ground's. Roofs then line up and
+      // the ground beside them is the thing that is slightly off, which is the
+      // right way round: what you tapped is what you are comparing.
+      const dist = Math.max(20, (spanM / 2) / tanAcross()) + lookHeight();
       controls.target.set(l.x, 0, -l.y);
       camera.position.set(l.x, dist, -l.y + dist * 0.001);
       controls.update();

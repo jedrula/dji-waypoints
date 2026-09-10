@@ -240,6 +240,46 @@ The outward-facing pass. On by default, and the first thing auto-fit drops.
       an over-sized box to enclose it, which then reports strikes that are not
       real. A rotation handle would fix it; so would drawing a polygon.
 
+## Getting a mission onto the controller
+
+Both of these come from the same fact, learned the hard way on 2026-09-10: the
+page cannot touch USB. Everything that talks to a controller lives in
+`tools/bridge.mjs`, and it runs because `tools/serve.mjs` -- a Node process on
+the machine -- imports it and serves `/api/controller`, `/api/slots`,
+`/api/slot` and `/api/install`. That is what kills ptpcamerad, compiles
+mtptool and drives libmtp. On GitHub Pages those routes 404 and the Fly panel
+correctly treats itself as absent, which means **installing only ever works on
+the machine running the dev server**. Nothing in the browser can change that:
+WebUSB cannot claim a still-image interface macOS has already handed to
+ptpcamerad, and DJI's own app owns the folder we write into.
+
+- [ ] **An export somebody can carry.** The Export button hands you a KMZ and
+      nothing else, and a KMZ on its own is not enough: DJI Fly only lists
+      mission folders it created itself, so the file has to land at
+      `Android/data/dji.go.v5/files/waypoint/<UUID>/<UUID>.kmz` where `<UUID>`
+      is an existing folder -- named after itself, inside itself. Get the name
+      wrong and Fly shows nothing and says nothing.
+
+      So: export a zip carrying the KMZ already named for a slot the panel can
+      see, plus a plain-text note saying which slot it is, where it goes, and
+      that a throwaway mission made in DJI Fly is what creates a folder to
+      overwrite. When no controller is plugged in, name it for a placeholder
+      and say so. The instructions are the deliverable as much as the file is.
+
+- [ ] **An Electron build, same repo, same source of truth.** The app is
+      already two halves that meet over `/api/*`: static files, and a Node
+      process with a USB cable. Electron is exactly that pair in one window,
+      so the port is packaging rather than a rewrite -- main process imports
+      `tools/bridge.mjs` as it stands, renderer loads the same `js/`, and
+      `js/service.js` keeps pointing at the hosted heights service.
+
+      What it buys is the thing that hurt today: portable, downloadable, and
+      able to write to the controller without anybody starting a server from a
+      terminal. What to keep honest: ONE source of truth. The moment the
+      Electron build has its own copy of the planner, this repo has the bug it
+      has spent a year avoiding -- see the note in CLAUDE.md about the
+      Cloudflare Worker owning rules for a service that was not Cloudflare.
+
 ## Ideas, unprioritised
 
 - [ ] Vertical-face mode for crags and facades (see flat-ground note above).

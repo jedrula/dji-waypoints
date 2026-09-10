@@ -132,6 +132,8 @@ export function createScene3D(canvas) {
   let mission = null;
   let hazard = null;
   let onStatus = () => {};
+  let onMesh = () => {};
+  let meshHazard = null;
   let running = false;
   let opening = false;
   let inFlight = null;
@@ -918,6 +920,9 @@ export function createScene3D(canvas) {
     if (!meshGroup.parent) scene.add(meshGroup);
     meshGroup.add(tile);
     meshTiles.set(name, tile);
+    // Rebuilt here because this is where the set of tiles changes, and both
+    // the wires and the flight check read it.
+    buildHeights();
     return { ok: true, name, triangles: nt, bytes: raw.byteLength };
   }
 
@@ -1010,6 +1015,93 @@ export function createScene3D(canvas) {
     scene.add(padGroup);
   }
 
+  // Does the flight clear the mesh?
+  //
+  // This is the point of having real geometry: not "is it above the tallest
+  // measured cell", which the raster already answered, but "does this line pass
+  // through that building". Two questions, two kinds of ray.
+  //
+  // DOWN from each waypoint says how much air is under it -- catching a pass
+  // too low over a roof, which is the common mistake.
+  //
+  // ALONG each leg says whether the aircraft flies INTO something between one
+  // waypoint and the next. A heightfield cannot answer that at all: a wall is
+  // between two of its cells, so a leg threading a gap and a leg going through
+  // a facade look identical to it.
+  //
+  // Geometry only. What counts as too close is a clearance the user chose, and
+  // that belongs to the readout in js/app.js, not here.
+  function checkMesh() {
+    if (!meshMode || !meshGroup?.children.length || !mission) return null;
+    const path = mission.exported ?? mission.waypoints ?? [];
+    if (!path.length) return null;
+    const t0 = performance.now();
+    const frame = mission.frame;
+    const at = (w) => {
+      const l = frame.toLocal(w.lat, w.lon);
+      return new THREE.Vector3(l.x, w.alt, -l.y);
+    };
+
+    const legs = [];
+    let tallest = -Infinity;      // the highest thing under any waypoint
+    let lowestGap = Infinity;     // the least air under any waypoint
+    let over = 0;                 // waypoints with mesh under them at all
+    let hits = 0;                 // legs that fly into something
+
+    const pts = path.map(at);
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const g = groundUnder(p.x, p.z);
+      if (g !== null) {
+        over++;
+        if (g > tallest) tallest = g;
+        if (p.y - g < lowestGap) lowestGap = p.y - g;
+      }
+      if (i === 0) continue;
+      // Walked in half-metre steps along the leg, comparing its height at each
+      // step against the tallest thing in that square metre. Stepping rather
+      // than ray-tracing is what makes this fast, and half a metre is finer
+      // than the grid it reads, so no cell is stepped over.
+      const a = pts[i - 1];
+      const dx = p.x - a.x;
+      const dy = p.y - a.y;
+      const dz = p.z - a.z;
+      const len = Math.hypot(dx, dz);
+      const steps = Math.max(1, Math.ceil(len / (HCELL / 2)));
+      let through = false;
+      for (let k = 0; k <= steps && !through; k++) {
+        const f = k / steps;
+        const g2 = groundUnder(a.x + dx * f, a.z + dz * f);
+        if (g2 !== null && a.y + dy * f < g2) through = true;
+      }
+      if (through) {
+        hits++;
+        legs.push({ a: path[i - 1], b: path[i], grade: 'strike' });
+      }
+    }
+
+    return {
+      tiles: meshTiles.size,
+      over,
+      of: pts.length,
+      tallest: Number.isFinite(tallest) ? +tallest.toFixed(1) : null,
+      gap: Number.isFinite(lowestGap) ? +lowestGap.toFixed(1) : null,
+      hits,
+      legs,
+      ms: Math.round(performance.now() - t0),
+      gridMs: heights?.ms ?? null,
+    };
+  }
+
+  // The check, plus the legs it flagged drawn over the flight in the collision
+  // colours the map and the flat view already use for a strike.
+  function reportMesh() {
+    const found = checkMesh();
+    meshHazard = found;
+    buildMission();
+    onMesh(found);
+  }
+
   const sayMesh = () => onStatus(
     `Photogrammetric mesh, ${meshTiles.size} tile${meshTiles.size === 1 ? '' : 's'} `
     + 'of 100 m, 0.09 m in position. '
@@ -1072,6 +1164,8 @@ export function createScene3D(canvas) {
       // A wire vertex over ground that was not loaded is dropped, so new ground
       // means the run can reach further than it did.
       buildWires();
+      // And new ground can hold a conflict the flight did not know about.
+      reportMesh();
       render();
       sayMesh();
     } catch (err) {
@@ -1079,23 +1173,87 @@ export function createScene3D(canvas) {
     }
   }
 
-  // The ground under a point, by dropping a ray onto the mesh.
+  // The tallest thing in each square metre of the mesh.
   //
-  // A wire hangs at the height its voltage implies ABOVE THE GROUND UNDER IT,
-  // and in mesh mode there is no height raster to read that from -- so it is
-  // measured off the geometry instead. Straight down from well above anything,
-  // and the first thing hit is the ground, a roof or a tree, which is exactly
-  // what the wire clears in reality.
+  // Everything that asks the mesh a question -- how high is the ground under
+  // this wire, does this leg clear that roof -- was asking it with a raycast,
+  // and three.js tests every triangle because nothing here builds a bounding
+  // hierarchy. Measured: the flight check took **20.5 seconds** for 223 rays
+  // against 417k triangles. So the questions are answered off a grid built once
+  // per set of tiles instead, which is one pass over the triangles.
   //
-  // Null when nothing is hit, which is ground no tile has been fetched for.
-  // The vertex is then dropped rather than guessed, the same rule drapeWire
+  // The MAXIMUM in each cell, which makes every answer conservative: a leg is
+  // flagged against the tallest thing in the metre it crosses, so the error is
+  // always towards saying something is in the way. That is the direction this
+  // app is allowed to be wrong in.
+  //
+  // It does cost the one thing true 3D gave us -- you cannot fly under an arch
+  // in a max-height grid -- and that is the trade, taken deliberately. The
+  // walls still do the work that matters: a cell holding a facade is as tall as
+  // its roof, so a leg at six metres crossing it is caught, which is exactly
+  // what a heightfield could never see.
+  let heights = null;                      // { x0, z0, nx, nz, cell, max: Float32Array }
+  const HCELL = 1;
+
+  function buildHeights() {
+    heights = null;
+    if (!meshGroup?.children.length) return;
+    const t0 = performance.now();
+    const box = new THREE.Box3();
+    for (const t of meshGroup.children) {
+      t.geometry.computeBoundingBox();
+      box.union(t.geometry.boundingBox);
+    }
+    const x0 = Math.floor(box.min.x) - 1;
+    const z0 = Math.floor(box.min.z) - 1;
+    const nx = Math.ceil(box.max.x - x0) + 2;
+    const nz = Math.ceil(box.max.z - z0) + 2;
+    const max = new Float32Array(nx * nz).fill(-Infinity);
+
+    for (const t of meshGroup.children) {
+      const pos = t.geometry.getAttribute('position').array;
+      const idx = t.geometry.getIndex().array;
+      for (let i = 0; i < idx.length; i += 3) {
+        // One triangle: write its highest corner into every cell its footprint
+        // touches. Corner rather than interpolated, again because high is safe.
+        let xa = Infinity; let xb = -Infinity; let za = Infinity; let zb = -Infinity; let top = -Infinity;
+        for (let k = 0; k < 3; k++) {
+          const o = idx[i + k] * 3;
+          const x = pos[o];
+          const y = pos[o + 1];
+          const z = pos[o + 2];
+          if (x < xa) xa = x;
+          if (x > xb) xb = x;
+          if (z < za) za = z;
+          if (z > zb) zb = z;
+          if (y > top) top = y;
+        }
+        const ca = Math.max(Math.floor(xa - x0), 0);
+        const cb = Math.min(Math.ceil(xb - x0), nx - 1);
+        const ra = Math.max(Math.floor(za - z0), 0);
+        const rb = Math.min(Math.ceil(zb - z0), nz - 1);
+        for (let r = ra; r <= rb; r++) {
+          for (let c = ca; c <= cb; c++) {
+            const at = r * nx + c;
+            if (top > max[at]) max[at] = top;
+          }
+        }
+      }
+    }
+    heights = { x0, z0, nx, nz, cell: HCELL, max, ms: Math.round(performance.now() - t0) };
+  }
+
+  // The tallest thing under a point, or null where no tile has been fetched.
+  // The caller drops the point rather than guessing, the same rule drapeWire
   // uses off the edge of a tile: a wire drawn at an invented height is worse
   // than a wire that stops.
   const groundUnder = (x, z) => {
-    if (!meshGroup) return null;
-    const ray = new THREE.Raycaster(new THREE.Vector3(x, 4000, z), new THREE.Vector3(0, -1, 0));
-    const hit = ray.intersectObjects(meshGroup.children, false)[0];
-    return hit ? hit.point.y : null;
+    if (!heights) return null;
+    const c = Math.floor(x - heights.x0);
+    const r = Math.floor(z - heights.z0);
+    if (c < 0 || c >= heights.nx || r < 0 || r >= heights.nz) return null;
+    const v = heights.max[r * heights.nx + c];
+    return Number.isFinite(v) ? v : null;
   };
 
   function buildWires() {
@@ -1175,7 +1333,7 @@ export function createScene3D(canvas) {
     // The legs the collision check flagged, drawn over the top in its colours.
     // A strike and a near miss are not the same news, so they are not the same
     // colour here either.
-    for (const leg of hazard?.legs ?? []) {
+    for (const leg of [...(hazard?.legs ?? []), ...(meshHazard?.legs ?? [])]) {
       const g = new THREE.BufferGeometry().setFromPoints([at(leg.a), at(leg.b)]);
       missionGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({
         color: asHex(LEG_COLOR[leg.grade] ?? LEG_COLOR.near),
@@ -1584,6 +1742,11 @@ export function createScene3D(canvas) {
 
     onStatus(fn) { onStatus = fn ?? (() => {}); },
 
+    // What the mesh says about the flight, for the readout to judge. Reported
+    // rather than returned, because it is answered when a tile arrives and not
+    // when anybody asks.
+    onMesh(fn) { onMesh = fn ?? (() => {}); },
+
     // Opening the view is what fetches three.js, the surface and the photo. The
     // first time over new ground that is minutes, and the status says so.
     async open() {
@@ -1614,6 +1777,7 @@ export function createScene3D(canvas) {
           frameCamera();
           buildPads();
           buildWires();
+          reportMesh();
           render();
           sayMesh();
           return;

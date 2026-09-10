@@ -71,6 +71,9 @@ const state = {
   mission: null,
   coverage: null,
   hazard: null,
+  // What the photogrammetric mesh says about the flight, when the survey view
+  // has one. Null until it reports, and null is "not checked", not "clear".
+  mesh: null,
   clearAlt: null,
   terrain: null,              // what the ground under the site does
   onDevice: null,             // a route being looked at next to yours
@@ -142,6 +145,10 @@ async function lidarView() {
   if (!lidar) {
     const { createScene3D } = await import('./scene3d.js');
     lidar = createScene3D($('lidar'));
+    // What the photogrammetric mesh says about the flight. Geometry from the
+    // view, judgement here: it reports what is under the flight and what the
+    // flight runs into, and the readout decides whether that is too close.
+    lidar.onMesh((m) => { state.mesh = m; renderAlert(false); });
     lidar.setLooks(looksOn);
     // Set here as well as in setView, because this is created lazily and the
     // first tile can load before the view is switched to.
@@ -905,6 +912,7 @@ function computePlan() {
   if (!points.length) {
     state.mission = null;
     state.hazard = null;
+  state.mesh = null;
     state.clearAlt = null;
     state.coverage = null;
     for (const g of [layers.path, layers.dots, layers.poses, layers.conflicts]) g.clearLayers();
@@ -1092,6 +1100,31 @@ function renderAlert(over) {
     })
     : null;
   const alt = state.mission?.params.altitude;
+
+  // The mesh, when there is one: real geometry, so a leg that flies INTO a
+  // building is a fact rather than an inference. Ranked above everything except
+  // an overhead line, because a facade is not a guess.
+  const mesh = state.mesh;
+  if (mesh?.hits) {
+    say('strike', mesh.hits === 1
+      ? 'One leg flies into a building the mesh has measured.'
+      : `${mesh.hits} legs fly into buildings the mesh has measured.`);
+  }
+  if (mesh?.tallest !== null && mesh?.tallest !== undefined) {
+    const need = mesh.tallest + clearance();
+    if (need > alt) {
+      say('unseen', `The mesh measures something ${mesh.tallest.toFixed(0)} m tall under this `
+        + `flight — ${(need - alt).toFixed(0)} m above your altitude.`);
+    }
+    raiseTo(need);
+  }
+  // Only part of the flight is over ground that has been fetched, and the rest
+  // is unchecked -- which is not the same as clear.
+  if (mesh && mesh.over < mesh.of) {
+    say('incomplete', `The mesh covers ${mesh.over} of ${mesh.of} waypoints; `
+      + 'click the blue squares in the 3D view to check the rest.');
+  }
+
   if (t && t.shortfall > 0) {
     const above = t.aboveHighestGround;
     const relief = t.relief >= 1 ? `The ground rises ${t.relief.toFixed(0)} m across this site, and ` : '';

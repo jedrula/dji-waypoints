@@ -306,7 +306,8 @@ const MIN_PER_RING_OBJ = 12;    // every 30 deg, the floor for a small thing
 const MAX_PER_RING_OBJ = 32;    // every 11 deg, past which frames stop earning
 
 function objectPass(g) {
-  const { subject, others = [], f, cam, frontOverlap, rings, clearance, pitchOverride } = g;
+  const { subject, others = [], f, cam, frontOverlap, rings, clearance, pitchOverride,
+    pinned = null } = g;
   const { x: cx, y: cy, height: H, span } = subject;
   const aimZ = H / 2;
 
@@ -392,9 +393,25 @@ function objectPass(g) {
   // it is honestly one ring.
   const spread = highZ - lowZ;
   const useRings = rings <= 1 || spread < 2 ? 1 : rings;
-  const heights = useRings === 1
+  const derived = useRings === 1
     ? [Math.max(lowZ, Math.min(highZ, aimZ > lowZ ? aimZ : lowZ))]
     : Array.from({ length: useRings }, (_, k) => lowZ + (spread * k) / (useRings - 1));
+
+  // Heights dragged in the 3D view win over the derived spread, the same way
+  // p.transectHeights already wins for the cross levels.
+  //
+  // `p.orbitHeights` existed as a parameter, was carried in the plan code, and
+  // was never read here -- so dragging a ring pinned a number the planner then
+  // ignored. Only when the count still matches: change the ring count and the
+  // old list means nothing, which is what the note on DEFAULTS already said.
+  //
+  // Floored at lowZ, because that is the height at which the ring already
+  // stands clear of the thing it orbits and its neighbours; a ring dragged
+  // below it would be dragged into a building. Nothing caps it -- moving a ring
+  // UP is the whole point, and it is how you climb out of a street.
+  const heights = pinned?.length === derived.length
+    ? pinned.map((z) => Math.max(lowZ, z))
+    : derived;
 
   // A dome rather than a cylinder: each ring pulls in as it rises so the slant
   // range stays constant, which keeps framing and ground resolution even.
@@ -810,6 +827,9 @@ export function planMission(site, opts, cam) {
           && !(Math.abs(o.x - subject.x) < 0.01 && Math.abs(o.y - subject.y) < 0.01)),
         f, cam, frontOverlap: p.frontOverlap, rings,
         clearance: p.subjectClearance ?? 2, pitchOverride: p.orbitPitch,
+        // Only the tallest subject's rings drive the altitude scale, and only
+        // its heights are the ones the 3D view can pin -- see orbitHeightsUsed.
+        pinned: p.orbitHeights,
       });
       if (r.pts.length) {
         // Only worth the two waypoints when the ring is actually below the

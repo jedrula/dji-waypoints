@@ -47,6 +47,7 @@ export function createView3D(canvas) {
   const VFOV = 28 * DEG;
 
   let onLevelChange = null;   // set by the app; enables dragging the levels
+  let onLevelDone = null;     // end of a level drag, so one gesture is one undo
   let onBoxHeight = null;     // ditto, for dragging the top of an obstacle
   let onBoxSelect = null;     // ditto, for clicking one
   let hits = [];              // every projected obstacle face, nearest first
@@ -913,6 +914,9 @@ export function createView3D(canvas) {
     if (drag.handles) {
       const z = dragZ(local(e));
       if (z === null) return;
+      // Only reached from pointermove, so this IS the drag having moved -- and
+      // it is what tells stop() to commit one undo step rather than none.
+      drag.moved = true;
       const target = Math.round(Math.max(1, Math.min(500, z - drag.grab)) * 10) / 10;
       hoverZ = target;
       onLevelChange(drag.handles, target);   // the app replans, which redraws
@@ -927,6 +931,10 @@ export function createView3D(canvas) {
   // when it becomes an edit worth storing and sending. A box let go of without
   // being dragged was never an edit at all -- it was a click.
   const stop = () => {
+    // A level dragged in the air is a draft while the mouse is down -- the
+    // flight follows your finger -- and one edit when it comes up. Without the
+    // distinction a single drag leaves forty steps to undo.
+    if (drag?.handles && drag.moved) onLevelDone?.();
     if (drag?.box) {
       if (!drag.moved) onBoxSelect?.(drag.box);
       else if (drag.roof) {
@@ -985,6 +993,9 @@ export function createView3D(canvas) {
     // Called with the planner handles owning the dragged level and its new
     // height; setting it is what makes the levels draggable at all.
     onLevelChange(fn) { onLevelChange = fn; },
+    // Called once when a level drag ends, so the app can commit one undo step
+    // for the whole gesture rather than one per frame of it.
+    onLevelDone(fn) { onLevelDone = fn; },
     // Called with an obstacle id and the height its roof was dragged to;
     // setting it is what makes the boxes resizable at all. `done` marks the
     // end of the gesture, which is the only part worth storing.

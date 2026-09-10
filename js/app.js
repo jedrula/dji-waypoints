@@ -426,6 +426,15 @@ for (const [name, spec] of Object.entries(SHAPES)) {
   $('shape').append(o);
 }
 
+// Heights pinned by dragging a level in the 3D view.
+//
+// Not controls, because there is no slider for "the second orbit ring sits at
+// 21 m" -- so they live here and join uiValues on the way out. js/share.js has
+// carried them in the plan code all along and js/planner.js has accepted them;
+// what was missing was anything setting them, which is why the levels were not
+// draggable.
+let pinned = { orbitHeights: null, transectHeights: null };
+
 function uiValues() {
   const v = {};
   for (const k of Object.keys(controls)) v[k] = +controls[k].el.value;
@@ -436,10 +445,16 @@ function uiValues() {
   v.shotsPerStop = +$('shotsPerStop').value;
   v.orbitRings = +$('orbitRings').value;
   v.surroundRings = +$('surroundRings').value;
+  if (pinned.orbitHeights) v.orbitHeights = pinned.orbitHeights;
+  if (pinned.transectHeights) v.transectHeights = pinned.transectHeights;
   return v;
 }
 
 function applyUiValues(v) {
+  // Absent means "not pinned", which is a real state and not a missing value:
+  // a restored plan whose levels were never dragged must go back to the spread
+  // the ring count implies, not to whatever the last plan was dragged to.
+  pinned = { orbitHeights: v.orbitHeights ?? null, transectHeights: v.transectHeights ?? null };
   for (const k of Object.keys(controls)) if (v[k] !== undefined) controls[k].el.value = v[k];
   for (const id of PASS_IDS) if (v[id] !== undefined) $(id).checked = v[id];
   for (const id of PICK_IDS) if (v[id] !== undefined) $(id).value = String(v[id]);
@@ -457,6 +472,8 @@ function paramsFromUi(v) {
   p.shotsPerStop = v.shotsPerStop;
   p.orbitRings = v.orbitRings;
   p.surroundRings = v.surroundRings;
+  p.orbitHeights = v.orbitHeights ?? null;
+  p.transectHeights = v.transectHeights ?? null;
   return p;
 }
 
@@ -1113,8 +1130,8 @@ function renderAlert(over) {
     // clearing 24 m of building that way needs about 165 m, past the 120 m the
     // readout will ever offer. The lever is the ring height, not the altitude.
     say('strike', `${mesh.hits === 1 ? 'One leg flies' : `${mesh.hits} legs fly`} into `
-      + 'buildings the mesh has measured. Raising the altitude will not clear this — '
-      + 'the low rings scale with it. Fewer rings, or a smaller site, will.');
+      + 'buildings the mesh has measured. Raising the altitude will not clear it — the low '
+      + 'rings scale with it. Drag a low ring up in the flat 3D view instead.');
   }
   if (mesh?.tallest !== null && mesh?.tallest !== undefined) {
     const need = mesh.tallest + clearance();
@@ -1457,6 +1474,39 @@ async function findMe({ quiet = false } = {}) {
   }
 }
 $('findme').addEventListener('click', () => findMe());
+
+// Drag a level in the 3D view to move that ring up or down.
+//
+// This is the answer to "how do I stop the flight going through that building",
+// and altitude is not: ring heights are FRACTIONS of the altitude, so raising
+// it lifts the low rings proportionally and they never overtake a roof.
+// Measured over Cybulskiego, 27 m and 40 m both leave 25 legs through
+// buildings. The height of one ring is the lever, and this is the handle on it.
+//
+// Every part of this existed and none of it was connected: js/view3d.js draws
+// the grips and reports the drag, js/share.js carries the result in the plan
+// code, js/planner.js accepts pinned heights and reports the ones it used.
+// `onLevelChange` was simply never called, so the grips were never drawn.
+//
+// A drag fires this continuously, and each call replans -- which is what every
+// slider here already does on every tick, and what makes the flight follow your
+// finger. The undo entry is committed at the end of the gesture, not during it,
+// or one drag would leave forty steps to undo.
+view3d.onLevelChange((handles, z) => {
+  for (const h of handles) {
+    const key = h.kind === 'orbit' ? 'orbitHeights' : 'transectHeights';
+    // What the plan actually flew is the base to edit: the spread comes from
+    // the ring count until somebody pins one, and after that the pinned list
+    // is the truth.
+    const base = pinned[key] ?? state.mission?.heights?.[h.kind];
+    if (!base?.length || h.index >= base.length) continue;
+    const list = [...base];
+    list[h.index] = z;
+    pinned[key] = list;
+  }
+  computePlan();
+});
+view3d.onLevelDone(() => history.commit());
 
 // Nothing, a photograph, or the survey. Same kind of choice as the basemap
 // picker it sits under, so it is the same kind of control.

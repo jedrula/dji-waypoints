@@ -79,20 +79,6 @@ body {
 .readout b.ok { color: var(--ok); }
 .readout b.dim { color: var(--dim); }
 
-.alert { border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.4;
-         background: rgba(43,26,26,0.6); border: 1px solid #6d3535; color: #ffcdbd; }
-.alert[hidden] { display: none; }
-.alert.note { background: var(--panel2); border-color: var(--line); color: var(--dim); }
-.alert.warn { background: rgba(43,38,26,0.6); border-color: #6d5a35; color: #ffe4bd; }
-/* A finding a line, worst first. They used to be fragments appended into one
-   run of text, which is how a button ended up glued to the next sentence. */
-.alert > div + div { margin-top: 3px; }
-/* What auto-fit chose is not a problem, so it does not read like one even when
-   it is sitting under things that are. */
-.alert .fitnote { opacity: 0.72; }
-.alert button { margin-top: 5px; background: none; border: 0; padding: 0;
-                color: inherit; text-decoration: underline; font-size: 12px;
-                display: block; }
 
 /* ---------- buttons and fields, everywhere ---------- */
 button {
@@ -263,6 +249,10 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 #collideBtn { top: 154px; left: auto; right: 10px; }
 /* On, this one is a warning and not a preference. */
 #collideBtn.on { color: #ff6b6b; border-color: #6a3a3a; }
+/* The lift-the-rings fix, under the collision switch. It is only ever on
+   screen when there is something wrong, so it is coloured like the news. */
+#liftBtn { top: 190px; left: auto; right: 10px; }
+.maptoggle.danger { color: #ff6b6b; border-color: #6a3a3a; }
 /* Wires belong to both views at once -- they are a hazard, not a backdrop --
    so this is the one .maptoggle that stays put when the 3D comes up. */
 #wiresBtn { top: 180px; }

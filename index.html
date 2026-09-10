@@ -34,7 +34,6 @@
     <p class="tip" id="tip">Tap the map on what you want captured.</p>
 
     <div id="readout" class="readout"></div>
-    <div id="alert" class="alert" hidden></div>
 
     <div class="barrow foot">
       <button id="openAdv" type="button">Advanced</button>
@@ -120,6 +119,18 @@
            stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <rect x="13.5" y="6" width="8" height="12" rx="1.5"/>
         <path d="M10.5 12h-7M6.5 9l-3 3 3 3"/>
+      </svg>
+    </button>
+
+    <!-- The one fix that is still a button rather than a colour: when the mesh
+         says the rings fly into something, this lifts them clear of it. Hidden
+         until there is something to lift, so its presence IS the finding. -->
+    <button id="liftBtn" type="button" class="maptoggle danger" hidden
+            title="Lift the rings clear of the mesh">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3v9"/><path d="M8.5 6.5 12 3l3.5 3.5"/>
+        <ellipse cx="12" cy="17" rx="8" ry="3.5"/>
       </svg>
     </button>
 

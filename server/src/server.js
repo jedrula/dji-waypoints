@@ -54,7 +54,6 @@ const buildingStore = createBuildingStore({ dir: path.join(ROOT, 'budynki3d') })
 const meshStore = createMeshStore({ dir: path.join(ROOT, 'mesh') });
 // One parsed mesh, kept. Parsing is a second and 14 MB, and a session looks at
 // one place; a second entry would double the memory to save nothing.
-let meshHot = null;
 const LINES_DIR = path.join(ROOT, 'lines');
 const BUILDINGS_DIR = path.join(ROOT, 'buildings');
 
@@ -533,32 +532,17 @@ const server = http.createServer(async (req, res) => {
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) return send(res, 400, { error: 'lat and lon required' }, origin);
       if (!inPoland(lat, lon)) return send(res, 404, { error: 'outside Poland' }, origin);
       try {
-        const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
-        if (meshHot?.key !== key) {
-          const got = await throttle(() => meshStore.meshAt(lat, lon));
-          if (!got) return send(res, 404, { error: 'no mesh model covers this' }, origin);
-          meshHot = { key, ...got };
-        }
-        const { geom, texture, info } = meshHot;
+        const got = await throttle(() => meshStore.packedAt(lat, lon));
+        if (!got) return send(res, 404, { error: 'no mesh model covers this' }, origin);
+        const { body, texture, meta } = got;
         if (url.pathname === '/v1/mesh.jpg') {
           if (!texture) return send(res, 404, { error: 'the package holds no texture' }, origin);
           res.writeHead(200, headers(origin, {
             'Content-Type': 'image/jpeg',
             'Cache-Control': 'public, max-age=31536000, immutable',
           }));
-          return res.end(Buffer.from(texture));
+          return res.end(texture);
         }
-        // Two counts, then position, then uv, then index. The counts are IN THE
-        // BODY rather than only in the header because a custom response header
-        // needs Access-Control-Expose-Headers to be readable cross-origin, and
-        // a buffer that describes itself cannot be half-configured.
-        const head = new Uint32Array([geom.vertices, geom.triangles]);
-        const body = gzipSync(Buffer.concat([
-          Buffer.from(head.buffer),
-          Buffer.from(geom.position.buffer, geom.position.byteOffset, geom.position.byteLength),
-          Buffer.from(geom.uv.buffer, geom.uv.byteOffset, geom.uv.byteLength),
-          Buffer.from(geom.index.buffer, geom.index.byteOffset, geom.index.byteLength),
-        ]), { level: 6 });
         res.writeHead(200, headers(origin, {
           'Content-Type': 'application/octet-stream',
           'Content-Encoding': 'gzip',
@@ -566,11 +550,12 @@ const server = http.createServer(async (req, res) => {
           // Named so the client can tell one tile from another and not fetch
           // the same neighbour twice. Exposed, because a cross-origin reader
           // sees no custom header without being told it may.
-          'X-Mesh-Tile': String(info.tile ?? ''),
+          'X-Mesh-Tile': String(meta.tile ?? ''),
           'Access-Control-Expose-Headers': 'X-Mesh-Tile, X-Mesh-Meta',
-          'X-Mesh-Meta': JSON.stringify({
-            vertices: geom.vertices, triangles: geom.triangles, ...info,
-          }).slice(0, 3900),
+          // The ORIGIN is the part of this the client cannot do without: the
+          // pack is cached per tile, so the point it was built around is not
+          // the point this request asked about.
+          'X-Mesh-Meta': JSON.stringify(meta).slice(0, 3900),
         }));
         return res.end(body);
       } catch (err) {

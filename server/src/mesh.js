@@ -25,7 +25,10 @@
 // kilometre, half again the LAZ's ~424. It is the heaviest thing here per unit
 // ground, which is why nothing fetches it speculatively.
 
-import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
+import { gzipSync } from 'node:zlib';
+import path from 'node:path';
 import { unzip } from '../../js/kmzread.js';
 import { createDownloadCache } from './download.js';
 import { pl2000ToWgs84, toPuwg92 } from '../../js/puwg92.js';
@@ -177,10 +180,13 @@ export function createMeshStore({ dir, fetchImpl = fetch }) {
   // The origin is passed in rather than baked so the numbers stay small: raw
   // PL-2000 eastings are seven digits, and a float32 holding 6432022.5 has
   // about half a metre of precision left, which would quantise a facade
-  // measured to nine centimetres.
-  async function meshAt(lat, lon, { signal } = {}) {
+  // measured to nine centimetres. It travels in the response, so a cached
+  // pack can be served to a request from somewhere else in the same tile --
+  // see packedAt, and the client honours it rather than assuming its own
+  // request point.
+  async function meshAt(lat, lon, { signal, found: already = null } = {}) {
     const { east, north } = toPuwg92(lat, lon);
-    const found = await findMesh(east, north, { fetchImpl, signal });
+    const found = already ?? await findMesh(east, north, { fetchImpl, signal });
     if (!found) return null;
 
     const { file, bytes } = await cache.get(found.url, { signal });
@@ -205,5 +211,74 @@ export function createMeshStore({ dir, fetchImpl = fetch }) {
     };
   }
 
-  return { meshAt };
+  // The same tile, packed the way the browser wants it, kept on disk.
+  //
+  // This is the difference between a click that works and one that looks
+  // broken. Measured against the local service over Cybulskiego 22:
+  //
+  //     first request     9.38 s to the first byte   unzip 25 MB, parse 68 MB OBJ
+  //     same tile again   0.24 s                     but only while it was the
+  //                                                  ONE tile held in memory
+  //     from this cache   0.27 s                     a file read, plus the WMS
+  //                                                  index lookup that is most
+  //                                                  of what is left
+  //
+  // Anything that asked for a second tile evicted the first, so revisiting a
+  // site paid the ten seconds again for every square -- and the client, which
+  // now restores the tiles you had last time, paid it per tile in a row. The
+  // pack is what the route sends: gzipped body, texture, and the meta that
+  // goes in the headers, keyed by the package URL because that is what the
+  // national index calls this tile.
+  //
+  // Weight on disk: 7.6 MB of gzipped geometry plus 8.8 of JPEG per tile, on
+  // top of the 25.5 MB zip we already keep. No eviction here either -- see the
+  // note on var/ in docs/2026-09-08-hosting-the-service.md.
+  async function packedAt(lat, lon, { signal } = {}) {
+    const { east, north } = toPuwg92(lat, lon);
+    const found = await findMesh(east, north, { fetchImpl, signal });
+    if (!found) return null;
+    const stem = path.join(dir, `pack-${createHash('sha1').update(found.url).digest('hex')}`);
+
+    try {
+      const [body, meta] = await Promise.all([
+        readFile(`${stem}.bin`),
+        readFile(`${stem}.json`, 'utf8').then(JSON.parse),
+      ]);
+      const texture = meta.texture ? await readFile(`${stem}.jpg`).catch(() => null) : null;
+      return { body, texture, meta, cached: true };
+    } catch { /* not packed yet */ }
+
+    const got = await meshAt(lat, lon, { signal, found });
+    if (!got) return null;
+    const { geom, texture, info } = got;
+    // Two counts, then position, then uv, then index -- a buffer that
+    // describes itself, so nothing about it lives only in a header.
+    const head = new Uint32Array([geom.vertices, geom.triangles]);
+    const body = gzipSync(Buffer.concat([
+      Buffer.from(head.buffer),
+      Buffer.from(geom.position.buffer, geom.position.byteOffset, geom.position.byteLength),
+      Buffer.from(geom.uv.buffer, geom.uv.byteOffset, geom.uv.byteLength),
+      Buffer.from(geom.index.buffer, geom.index.byteOffset, geom.index.byteLength),
+    ]), { level: 6 });
+    const meta = {
+      vertices: geom.vertices, triangles: geom.triangles, texture: Boolean(texture), ...info,
+    };
+
+    // Written through a .part and renamed, the same rule src/download.js
+    // follows: a half-written pack that looks complete is a cache poisoned
+    // until somebody deletes it by hand.
+    await mkdir(dir, { recursive: true });
+    await writeFile(`${stem}.bin.part`, body);
+    await rename(`${stem}.bin.part`, `${stem}.bin`);
+    if (texture) {
+      await writeFile(`${stem}.jpg.part`, Buffer.from(texture));
+      await rename(`${stem}.jpg.part`, `${stem}.jpg`);
+    }
+    await writeFile(`${stem}.json.part`, JSON.stringify(meta));
+    await rename(`${stem}.json.part`, `${stem}.json`);
+
+    return { body, texture: texture ? Buffer.from(texture) : null, meta, cached: false };
+  }
+
+  return { meshAt, packedAt };
 }

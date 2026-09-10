@@ -40,6 +40,8 @@ import { toWgs84 as puwgToWgs84 } from './puwg92.js';
 import { serviceUrl, serviceHeaders } from './service.js';
 import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, VERDICT_COLOR, asHex } from './palette.js';
 import { fov, orientation } from './camera.js';
+// A local tangent frame, for when there is no mission to borrow one from.
+import { frame } from './geo.js';
 
 // How much ground round the flight, and how fine. The tile is 500 m of
 // half-metre cells -- a million of them -- and a site is a couple of hundred
@@ -129,11 +131,27 @@ export function createScene3D(canvas) {
   let meshGroup = null;
   // Tile name -> Mesh, so a neighbour asked for twice is fetched once.
   const meshTiles = new Map();
-  // And the 100 m cells those tiles were asked for by, which is the cheaper
-  // question: the name only arrives with the response, so without this a tile
-  // already in the scene still costs a request -- twelve of them on every
-  // return to the view once tiles are remembered across a refresh.
-  const meshCells = new Set();
+  // The GROUND each loaded tile covers, in PUWG92 metres.
+  //
+  // The question this answers -- "do we already have the mesh over this point"
+  // -- has to be asked BEFORE the request, because the tile's name only
+  // arrives with the response and a pointless request for a tile already in
+  // the scene costs the service ten seconds of unzipping.
+  //
+  // It was a set of 100 m cell keys, snapped from the point the tile was asked
+  // for, and that was wrong in a way that looked exactly like the service
+  // failing: the PADS are snapped to a grid measured from the takeoff point,
+  // this was snapped to absolute PUWG eastings, and the two grids are offset
+  // by whatever home is modulo 100 m. So clicking a square could snap into a
+  // cell some other tile had claimed, the fetch was skipped as "already
+  // loaded", and nothing happened -- no tile, no error, no message. Extents
+  // cannot disagree with themselves.
+  const meshCovers = [];    // { eMin, eMax, nMin, nMax }
+  const covered = (lat, lon) => {
+    const p = toPuwg92(lat, lon);
+    return meshCovers.some((b) => p.east >= b.eMin && p.east <= b.eMax
+      && p.north >= b.nMin && p.north <= b.nMax);
+  };
   // The mesh is the picture wherever there is one, and the LiDAR heightfield is
   // the fallback where there is not -- which is most of the country. There is
   // no switch: coverage decides, and an option nobody can answer better than
@@ -145,6 +163,16 @@ export function createScene3D(canvas) {
   let surfaceMesh = null;
   let loaded = null;       // { tn, te, meta, height, kind, base }
   let mission = null;
+  // The frame everything in this view is expressed in.
+  //
+  // Normally the mission's, because the flight is the point of the view. But
+  // the ground is worth looking at BEFORE there is a flight -- "show me the
+  // mesh where the map is looking" -- so with no mission an anchor frame
+  // stands in, built by the app from wherever the map is pointed. Tile
+  // vertices are baked into whichever frame was current when they loaded, so a
+  // change of origin drops them; see setAnchor.
+  let anchor = null;
+  const frameOf = () => mission?.frame ?? anchor;
   let hazard = null;
   let onStatus = () => {};
   let onMesh = () => {};
@@ -619,16 +647,19 @@ export function createScene3D(canvas) {
   // this app already means. So the surface is shifted down by its own height at
   // the home point and nothing else has to be converted at all.
   function buildSurface() {
-    if (!loaded || !mission) return;
+    if (!loaded || !frameOf()) return;
     const { meta, height, kind } = loaded;
     const N = meta.grid;
     const cell = meta.cellMetres;
     const { east: e0, north: n0 } = meta.origin;
-    const frame = mission.frame;
+    const frame = frameOf();
     const toLocal = puwgToLocal(frame, e0, n0);
 
-    // Where the flight is, in this tile's own grid.
-    const path = mission.exported ?? mission.waypoints ?? [];
+    // Where the flight is, in this tile's own grid -- or, with no flight, the
+    // point the view was anchored at, which the margin then grows into a
+    // square of ground round it.
+    const path = mission?.exported ?? mission?.waypoints
+      ?? [{ lat: frame.lat0, lon: frame.lon0 }];
     let eMin = Infinity; let eMax = -Infinity; let nMin = Infinity; let nMax = -Infinity;
     for (const w of path) {
       const p = toPuwg92(w.lat, w.lon);
@@ -866,14 +897,56 @@ export function createScene3D(canvas) {
   // request chose -- the mission's own frame origin -- so the conversion left
   // here is the affine the surface uses: PUWG92 grid north is not true north,
   // and over 100 m the convergence is about 1.7 m of sideways error.
-  async function loadMeshTile(lat, lon, { signal } = {}) {
-    const { lat0, lon0 } = mission.frame;
-    if (meshCells.has(tileKey(lat, lon))) return { ok: true, already: true };
+  // Read a response body with the bytes counted as they land.
+  //
+  // `Content-Length` is no use for the geometry: it is served gzipped, fetch
+  // decompresses it for us, and the header is the COMPRESSED length -- so a
+  // progress bar against it runs to 250% and stops. The expected size comes
+  // out of X-Mesh-Meta instead, which describes the buffer exactly: two counts,
+  // then 20 bytes a vertex and 12 a triangle.
+  async function readAll(res, total, onProgress) {
+    if (!res.body?.getReader || !onProgress) return res.arrayBuffer();
+    const reader = res.body.getReader();
+    const chunks = [];
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      got += value.byteLength;
+      onProgress(got, total);
+    }
+    const out = new Uint8Array(got);
+    let at = 0;
+    for (const c of chunks) { out.set(c, at); at += c.byteLength; }
+    return out.buffer;
+  }
+
+  // `kind` separates the two failures that look the same from here and are not
+  // the same news: 'none' means the index says there is no mesh over that
+  // ground, ever, and 'error' means this attempt did not work -- the service
+  // was busy, GUGiK timed out, the parse threw. The first retires the square;
+  // the second has to leave it clickable, and did not, which is most of "it
+  // doesn't always work".
+  async function loadMeshTile(lat, lon, { signal, onProgress } = {}) {
+    const { lat0, lon0 } = frameOf();
+    if (covered(lat, lon)) return { ok: true, already: true };
+    const say = (phase, got, total) => onProgress?.({ phase, got, total });
+    say('ask', 0, 0);
     const res = await ask(`/v1/mesh?lat=${lat}&lon=${lon}`, { signal });
-    if (!res.ok) return { ok: false, why: 'no mesh model covers that' };
+    if (!res.ok) {
+      const why = await res.json().then((j) => j.error).catch(() => null);
+      const none = res.status === 404;
+      return { ok: false, kind: none ? 'none' : 'error', status: res.status,
+               why: why ?? `the service answered ${res.status}` };
+    }
     const name = (res.headers.get('X-Mesh-Tile') ?? `${lat.toFixed(5)},${lon.toFixed(5)}`);
     if (meshTiles.has(name)) return { ok: true, already: true, name };
-    const raw = await res.arrayBuffer();
+    const meta = (() => {
+      try { return JSON.parse(res.headers.get('X-Mesh-Meta') ?? 'null'); } catch { return null; }
+    })();
+    const expect = meta ? 8 + meta.vertices * 20 + meta.triangles * 12 : 0;
+    const raw = await readAll(res, expect, (got, total) => say('mesh', got, total));
 
     const head = new Uint32Array(raw, 0, 2);
     const nv = head[0];
@@ -885,16 +958,26 @@ export function createScene3D(canvas) {
     at += nv * 8;
     const index = new Uint32Array(raw.slice(at, at + nt * 3 * 4));
 
-    // The offsets are from the tile's OWN request point, so they are shifted to
-    // the mission frame's origin before projecting -- otherwise every neighbour
-    // would stack on top of the first.
-    const here = toPuwg92(lat, lon);
+    // The offsets are from the point the pack was BUILT around, which the
+    // service names in X-Mesh-Meta and which is not necessarily the point this
+    // request asked about: the service caches one pack per tile, so a click
+    // anywhere in a tile it has already packed gets that tile's origin back.
+    // Assuming our own request point put the whole tile 40 m sideways the first
+    // time two different points in one tile were clicked.
+    const here = Number.isFinite(meta?.origin?.east) && Number.isFinite(meta?.origin?.north)
+      ? { east: meta.origin.east, north: meta.origin.north }
+      : toPuwg92(lat, lon);
     const home = toPuwg92(lat0, lon0);
-    const toLocal = puwgToLocal(mission.frame, home.east, home.north);
+    const toLocal = puwgToLocal(frameOf(), home.east, home.north);
     const datum = meshDatum(position, nv);
+    const box = { eMin: Infinity, eMax: -Infinity, nMin: Infinity, nMax: -Infinity };
     for (let i = 0; i < nv; i++) {
       const e = here.east + position[i * 3];
       const n = here.north - position[i * 3 + 2];        // z is south
+      if (e < box.eMin) box.eMin = e;
+      if (e > box.eMax) box.eMax = e;
+      if (n < box.nMin) box.nMin = n;
+      if (n > box.nMax) box.nMax = n;
       const l = toLocal(e, n);
       position[i * 3] = l.x;
       position[i * 3 + 1] -= datum;                      // metres above takeoff
@@ -907,7 +990,12 @@ export function createScene3D(canvas) {
     geom.setIndex(new THREE.BufferAttribute(index, 1));
 
     const tex = await ask(`/v1/mesh.jpg?lat=${lat}&lon=${lon}`, { signal })
-      .then((r) => (r.ok ? r.blob() : null))
+      .then(async (r) => {
+        if (!r.ok) return null;
+        const total = Number(r.headers.get('Content-Length')) || 0;
+        const buf = await readAll(r, total, (got, t) => say('texture', got, t));
+        return new Blob([buf], { type: 'image/jpeg' });
+      })
       // FLIPPED HERE, not on the texture. Texture.flipY is IGNORED for an
       // ImageBitmap -- three.js can only flip a source it uploads itself -- so
       // setting it did nothing, twice, and the mesh came up with black patches
@@ -959,7 +1047,7 @@ export function createScene3D(canvas) {
     if (!meshGroup.parent) scene.add(meshGroup);
     meshGroup.add(tile);
     meshTiles.set(name, tile);
-    meshCells.add(tileKey(lat, lon));
+    meshCovers.push(box);
     // Rebuilt here because this is where the set of tiles changes, and both
     // the wires and the flight check read it.
     buildHeights();
@@ -1005,13 +1093,13 @@ export function createScene3D(canvas) {
   // Fetched one at a time on purpose: eight parallel 7 MB requests is a way to
   // make the first tile arrive later than it has to.
   async function restoreTiles({ signal } = {}) {
-    const home = toPuwg92(mission.frame.lat0, mission.frame.lon0);
+    const home = toPuwg92(frameOf().lat0, frameOf().lon0);
     const near = readTiles()
       .map((t) => {
         const p = toPuwg92(t.lat, t.lon);
         return { ...t, d: Math.hypot(p.east - home.east, p.north - home.north) };
       })
-      .filter((t) => t.d <= TILE_REACH && !meshCells.has(t.key))
+      .filter((t) => t.d <= TILE_REACH && !covered(t.lat, t.lon))
       .sort((a, b) => a.d - b.d)
       .slice(0, TILE_CAP);
     let got = 0;
@@ -1021,6 +1109,77 @@ export function createScene3D(canvas) {
       if (r.ok && !r.already) got++;
     }
     return got;
+  }
+
+  // Everything the mesh owns, forgotten. One function because it is five
+  // things and the day one of them is missed -- the covered-ground list was,
+  // once -- a site with no mesh inherits the last one's tiles and answers
+  // questions about ground it is not over.
+  function dropMesh() {
+    for (const t of meshTiles.values()) { meshGroup?.remove(t); t.geometry.dispose(); }
+    meshTiles.clear();
+    meshCovers.length = 0;
+    heights = null;
+    meshHazard = null;
+    if (padGroup) { scene.remove(padGroup); dropFat(padGroup); padGroup = null; }
+  }
+
+  // Move ground that was loaded without a flight into the flight's own frame.
+  //
+  // This is the price of opening the view before there is a mission: tiles are
+  // baked into whichever frame was current, and the mission arrives with its
+  // own origin and its own takeoff point. Both differences are measurable, so
+  // both are corrected rather than re-downloading 19 MB a tile:
+  //
+  //   HORIZONTALLY, the two frames are tangent planes a few hundred metres
+  //   apart and PUWG92 metres are the same in both, so it is a translation.
+  //   What that leaves is the difference in meridian convergence, which over
+  //   the 700 m these tiles are allowed to spread is under a centimetre.
+  //
+  //   VERTICALLY, every height is metres above the ground at the point the
+  //   tile was ASKED for, and it now has to be metres above the ground at the
+  //   takeoff point -- which the shifted geometry itself can answer, being the
+  //   lowest thing within ten metres of the new origin. The same rule
+  //   meshDatum uses, for the same reason: a footpath beside the house is
+  //   ground and the roof twelve metres away is not.
+  //
+  // Baked into the vertices and not into the group's position, because
+  // buildHeights and buildPads both read geometry and would otherwise be a
+  // frame behind.
+  function rebaseMesh(from, to) {
+    if (!meshTiles.size) return;
+    const a = toPuwg92(from.lat0, from.lon0);
+    const b = toPuwg92(to.lat0, to.lon0);
+    const de = a.east - b.east;
+    const dn = a.north - b.north;
+    if (Math.hypot(de, dn) < 0.01) return;
+
+    let dz = Infinity;
+    for (const t of meshTiles.values()) {
+      const attr = t.geometry.getAttribute('position');
+      const arr = attr.array;
+      for (let i = 0; i < arr.length; i += 3) {
+        arr[i] += de;
+        arr[i + 2] -= dn;
+        const x = arr[i];
+        const z = arr[i + 2];
+        if (x * x + z * z <= 100 && arr[i + 1] < dz) dz = arr[i + 1];
+      }
+      attr.needsUpdate = true;
+    }
+    // Nothing within ten metres of the new home means no tile covers it, and a
+    // datum guessed from ground 200 m away is worse than the one we have.
+    if (Number.isFinite(dz) && Math.abs(dz) > 0.01) {
+      for (const t of meshTiles.values()) {
+        const attr = t.geometry.getAttribute('position');
+        const arr = attr.array;
+        for (let i = 1; i < arr.length; i += 3) arr[i] -= dz;
+        attr.needsUpdate = true;
+      }
+    }
+    for (const t of meshTiles.values()) t.geometry.computeBoundingBox();
+    buildHeights();
+    buildPads();
   }
 
   // Where the ground is under the takeoff point, from the mesh itself.
@@ -1059,11 +1218,11 @@ export function createScene3D(canvas) {
   function buildPads() {
     if (padGroup) { scene.remove(padGroup); dropFat(padGroup); padGroup = null; }
     hoverPad = null;
-    if (!meshMode || !meshTiles.size || !mission) return;
-    const { lat0, lon0 } = mission.frame;
+    if (!meshMode || !meshTiles.size || !frameOf()) return;
+    const { lat0, lon0 } = frameOf();
     const home = toPuwg92(lat0, lon0);
-    const toLocal = puwgToLocal(mission.frame, home.east, home.north);
-    const back = localToTile(mission.frame, home.east, home.north);
+    const toLocal = puwgToLocal(frameOf(), home.east, home.north);
+    const back = localToTile(frameOf(), home.east, home.north);
 
     // Where each loaded tile sits, in PUWG metres from home, snapped to the
     // 100 m grid the tiles come on.
@@ -1083,8 +1242,8 @@ export function createScene3D(canvas) {
     // one is the one worth making loudly: those are the waypoints the check
     // has to report as unjudged.
     const flown = new Set();
-    for (const w of mission.exported ?? mission.waypoints ?? []) {
-      const l = mission.frame.toLocal(w.lat, w.lon);
+    for (const w of mission?.exported ?? mission?.waypoints ?? []) {
+      const l = frameOf().toLocal(w.lat, w.lon);
       const q = back(l.x, l.y);
       flown.add(cell(q.e, q.n));
     }
@@ -1111,7 +1270,25 @@ export function createScene3D(canvas) {
         pad.rotation.x = -Math.PI / 2;
         pad.position.set(p.x, -0.2, -p.y);
         pad.userData.at = { e, n };
+        pad.userData.key = key;
         padGroup.add(pad);
+
+        // The square fills up as the bytes land. A tile is 10.6 MB of geometry
+        // and 8.8 of texture and takes seconds even from a warm cache, and
+        // without this the only sign a click did anything was a line of text
+        // in the corner -- so a slow fetch and a failed one looked identical.
+        const bar = new THREE.Mesh(
+          new THREE.PlaneGeometry(PAD - 8, PAD - 8),
+          new THREE.MeshBasicMaterial({
+            color: 0xffb84d, transparent: true, opacity: 0.55,
+            side: THREE.DoubleSide, depthWrite: false,
+          }),
+        );
+        bar.rotation.x = -Math.PI / 2;
+        bar.position.set(p.x, -0.1, -p.y);
+        bar.visible = false;
+        padGroup.add(bar);
+        pad.userData.bar = bar;
 
         const edge = new THREE.LineSegments(
           new THREE.EdgesGeometry(new THREE.PlaneGeometry(PAD - 4, PAD - 4)),
@@ -1140,6 +1317,10 @@ export function createScene3D(canvas) {
         // whole square and not a third of it.
         pad.userData.mates = [edge, plus];
         pad.userData.rest = [pad.material.opacity, edge.material.opacity, plus.material.opacity];
+        // A square whose fetch failed keeps saying so until it is tried again.
+        if (failed.has(key)) padFailed(pad);
+        // And one that is mid-flight when the pads are rebuilt keeps its bar.
+        if (loading.has(key)) { loading.get(key).pad = pad; padLoading(pad, loading.get(key).frac); }
       }
     }
     scene.add(padGroup);
@@ -1339,6 +1520,80 @@ export function createScene3D(canvas) {
       .find((h) => h.object.userData.at)?.object ?? null;
   }
 
+  // Which squares are being fetched right now, and which have failed. Both
+  // are keyed by cell rather than by pad object, because buildPads throws the
+  // objects away and rebuilds them whenever a tile lands.
+  const loading = new Map();     // cell key -> { pad, frac }
+  const failed = new Map();      // cell key -> why
+
+  const HALF = (100 - 8) / 2;    // the bar's own half-width, for growing it
+
+  // The square breathes while the fetch is out.
+  //
+  // A byte bar alone is not enough, because the bytes are not what you are
+  // waiting for. Measured against the local service: 9.38 s to the FIRST byte
+  // of a cold tile -- it unzips 25 MB and parses a 68 MB OBJ before it answers
+  // -- then 7.6 MB of transfer in about 7 ms, and 0.24 s to the first byte for
+  // the same tile again. So a bar sits at zero for nine seconds and looks
+  // exactly like a click that did nothing. The pulse says the click landed;
+  // the bar says how far the transfer has got, which is the part that matters
+  // over the tunnel rather than over localhost.
+  let pulseTimer = null;
+  function pulse() {
+    if (pulseTimer) return;
+    pulseTimer = setInterval(() => {
+      if (!loading.size || !running) {
+        clearInterval(pulseTimer);
+        pulseTimer = null;
+        return;
+      }
+      const a = 0.34 + 0.26 * Math.sin(performance.now() / 260);
+      for (const { pad } of loading.values()) {
+        if (pad?.userData.bar) pad.userData.bar.material.opacity = a;
+      }
+      render();
+    }, 90);
+  }
+
+  function padLoading(pad, frac) {
+    const bar = pad?.userData.bar;
+    if (!bar) return;
+    bar.visible = true;
+    // Grows from the near edge rather than the middle, so a glance says how
+    // far along it is and not just that something is happening.
+    const f = Math.max(0.02, Math.min(1, frac));
+    bar.scale.set(1, f, 1);
+    bar.position.z = -pad.position.z * 0 + pad.position.z + HALF * (1 - f);
+    bar.material.color.setHex(0xffb84d);
+    pad.material.color.setHex(0xffb84d);
+    pad.material.opacity = 0.22;
+    pulse();
+  }
+
+  function padFailed(pad) {
+    if (!pad) return;
+    const bar = pad.userData.bar;
+    if (bar) bar.visible = false;
+    pad.material.color.setHex(0xff5d5d);
+    pad.material.opacity = 0.3;
+    const [edge, plus] = pad.userData.mates ?? [];
+    if (edge) edge.material.color.setHex(0xff9c9c);
+    if (plus) plus.material.color.setHex(0xffdada);
+  }
+
+  function padIdle(pad) {
+    if (!pad?.userData.rest) return;
+    const [a, b, c] = pad.userData.rest;
+    const [edge, plus] = pad.userData.mates;
+    if (pad.userData.bar) pad.userData.bar.visible = false;
+    pad.material.color.setHex(0x7ec8ff);
+    pad.material.opacity = a;
+    edge.material.color.setHex(0x9fd8ff);
+    edge.material.opacity = b;
+    plus.material.color.setHex(0xdff0ff);
+    plus.material.opacity = c;
+  }
+
   function litPad(pad, on) {
     if (!pad?.userData.rest) return;
     const [a, b, c] = pad.userData.rest;
@@ -1380,7 +1635,7 @@ export function createScene3D(canvas) {
     // native click event decides what a click IS -- an earlier version compared
     // pointerdown and pointerup coordinates by hand and silently rejected every
     // one of them, which cost an evening.
-    if (dragged || !meshMode || !mission || !camera || !padGroup) return;
+    if (dragged || !meshMode || !frameOf() || !camera || !padGroup) return;
     try {
       const rect = canvas.getBoundingClientRect();
       const ndc = new THREE.Vector2(
@@ -1396,20 +1651,72 @@ export function createScene3D(canvas) {
       const pad = hits.find((h) => h.object.userData.at);
       if (!pad) return;
 
-      const { lat0, lon0 } = mission.frame;
+      const { lat0, lon0 } = frameOf();
       const home = toPuwg92(lat0, lon0);
       const { e, n } = pad.object.userData.at;
+      const key = pad.object.userData.key;
       const g = puwgToWgs84(home.east + e, home.north + n);
 
-      onStatus('Fetching that tile — about 7 MB…');
-      const got = await loadMeshTile(g.lat, g.lon);
+      // One fetch per square. A second click started a second download of the
+      // same 19 MB, and whichever finished last won -- which on a slow day is
+      // how you end up with two in flight and no idea why it is taking twice
+      // as long.
+      if (loading.has(key)) {
+        onStatus('That one is already on its way.');
+        return;
+      }
+      failed.delete(key);
+      loading.set(key, { pad: pad.object, frac: 0 });
+      padLoading(pad.object, 0);
+      render();
+
+      // Painted as the bytes land, throttled: a chunk arrives every few
+      // milliseconds and a frame every sixteen is plenty.
+      let painted = 0;
+      const mb = (b) => (b / 1_048_576).toFixed(1);
+      const onProgress = ({ phase, got: bytes, total }) => {
+        const entry = loading.get(key);
+        if (!entry) return;
+        // Two phases, and the geometry is the bigger half -- 10.6 MB against
+        // 8.8 for the texture over Cybulskiego 22 -- so the bar gives it 60%.
+        const share = phase === 'texture' ? 0.6 + 0.4 * (total ? bytes / total : 0)
+          : phase === 'mesh' ? 0.6 * (total ? bytes / total : 0)
+            : 0.01;
+        entry.frac = share;
+        if (performance.now() - painted < 16) return;
+        painted = performance.now();
+        padLoading(entry.pad, share);
+        onStatus(total
+          ? `Fetching that tile — ${phase === 'texture' ? 'texture' : 'geometry'} `
+            + `${mb(bytes)} of ${mb(total)} MB…`
+          // Before the first byte, and that is where the time goes: the service
+          // unzips and parses the package before it answers at all, measured at
+          // 9.4 s for a tile it has not seen and 0.2 s for one it has.
+          : 'Fetching that tile — the service is unpacking it, about 10 s the first time…');
+        render();
+      };
+
+      const got = await loadMeshTile(g.lat, g.lon, { onProgress })
+        .catch((err) => ({ ok: false, kind: 'error', why: err.message }));
+      loading.delete(key);
       if (!got.ok) {
-        onStatus(`Nothing there — ${got.why}.`);
-        // Take the plate away: there is no tile to fetch and offering it again
-        // is a promise the data cannot keep.
-        pad.object.userData.at = null;
-        pad.object.material.color.set(0x6b7480);
-        pad.object.material.opacity = 0.08;
+        if (got.kind === 'none') {
+          onStatus(`Nothing there — ${got.why}.`);
+          // Take the plate away: there is no tile to fetch and offering it
+          // again is a promise the data cannot keep.
+          pad.object.userData.at = null;
+          pad.object.material.color.set(0x6b7480);
+          pad.object.material.opacity = 0.08;
+          if (pad.object.userData.bar) pad.object.userData.bar.visible = false;
+        } else {
+          // This attempt failed, not the ground. The square goes red and stays
+          // clickable, because a retry is usually all it needs -- it used to be
+          // retired for any failure at all, which is most of "fetching doesn't
+          // always work": one bad response and the offer was gone.
+          failed.set(key, got.why);
+          padFailed(pad.object);
+          onStatus(`That tile would not load — ${got.why}. Click it again to retry.`);
+        }
         render();
         return;
       }
@@ -1805,9 +2112,9 @@ export function createScene3D(canvas) {
   function buildWires() {
     if (!scene) return;
     if (wireGroup) { scene.remove(wireGroup); wireGroup = null; }
-    if (!wirePaths.length || !mission) return;
+    if (!wirePaths.length || !frameOf()) return;
     if (!meshMode && (!loaded?.meta || loaded.datum === undefined)) return;
-    const frame = mission.frame;
+    const frame = frameOf();
     wireGroup = new THREE.Group();
     for (const w of wirePaths) {
       const pts = (meshMode
@@ -2070,13 +2377,23 @@ export function createScene3D(canvas) {
   // flight's own middle, and set low: looking ACROSS a place is what shows a
   // tower standing beside your orbit. Looking down on it is a map.
   function frameCamera() {
+    if (!surfaceMesh && !meshGroup) return;
     const path = mission?.exported ?? mission?.waypoints ?? [];
-    if (!path.length || (!surfaceMesh && !meshGroup)) return;
-    const frame = mission.frame;
+    const frame = frameOf();
     const box = new THREE.Box3();
     for (const w of path) {
       const l = frame.toLocal(w.lat, w.lon);
       box.expandByPoint(new THREE.Vector3(l.x, w.alt, -l.y));
+    }
+    // No flight to frame: frame the ground instead, which is the whole reason
+    // the view opens without one.
+    if (!path.length) {
+      for (const t of meshGroup?.children ?? []) {
+        t.geometry.computeBoundingBox();
+        box.union(t.geometry.boundingBox);
+      }
+      if (surfaceMesh) box.expandByPoint(new THREE.Vector3(0, 0, 0));
+      if (box.isEmpty()) return;
     }
     const centre = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
@@ -2122,8 +2439,10 @@ export function createScene3D(canvas) {
     if (!here.ok) throw new Error('outside the survey');
     const { tile } = await here.json();
 
-    // The ground to cover: the flight, plus the margin, squared off.
-    const path = mission?.exported ?? mission?.waypoints ?? [];
+    // The ground to cover: the flight, plus the margin, squared off -- or, with
+    // no flight yet, the point the view was anchored at and nothing more.
+    const path = mission?.exported ?? mission?.waypoints
+      ?? [{ lat: frameOf().lat0, lon: frameOf().lon0 }];
     let eMin = Infinity; let eMax = -Infinity; let nMin = Infinity; let nMax = -Infinity;
     for (const w of path) {
       const q = toPuwg92(w.lat, w.lon);
@@ -2322,9 +2641,23 @@ export function createScene3D(canvas) {
     // flight is cheap; the surface is not, so it is only rebuilt when the frame
     // it is expressed in has actually moved.
     setMission(m, h) {
-      const moved = !mission || !m
-        || mission.frame.lat0 !== m.frame.lat0 || mission.frame.lon0 !== m.frame.lon0;
+      const was = frameOf();
+      const moved = !was || !m
+        || was.lat0 !== m.frame.lat0 || was.lon0 !== m.frame.lon0;
+      // A flight arriving over ground that was loaded without one brings its
+      // own origin, and every tile vertex is already baked into the old one.
+      // Metres are metres, so the fix is a translation of the whole group
+      // rather than 19 MB a tile again: the two frames are tangent planes a
+      // few hundred metres apart, and what that leaves is the difference in
+      // meridian convergence -- under a centimetre over the 700 m these tiles
+      // are allowed to spread.
+      if (m && was && anchor && !mission && moved) rebaseMesh(was, m.frame);
       mission = m;
+      // Only a real flight replaces the anchor. setMission(null) arrives on
+      // every replan of an empty site -- the app clears the plan when the last
+      // point goes -- and clearing the anchor there threw away the frame the
+      // view was standing on before it had drawn a single tile.
+      if (m) anchor = null;
       hazard = h;
       if (!renderer || !mission) return;
       // The view can be open before there is anything to look at -- picked
@@ -2355,6 +2688,25 @@ export function createScene3D(canvas) {
       if (!renderer) return;
       buildWires();
       render();
+    },
+
+    // Where to stand when there is no flight yet.
+    //
+    // The survey view used to answer "tap out a site first", which makes the
+    // ground -- the thing it exists to show -- conditional on the thing you
+    // want the ground in order to plan. So the app hands it wherever the map
+    // is looking and it loads the mesh there; a mission arriving later brings
+    // its own frame and the tiles are moved into it, see rebaseMesh.
+    //
+    // Moving the anchor itself is the one case that cannot be salvaged: it is
+    // a different neighbourhood, and the tiles are 100 m squares baked into
+    // the old origin. They go.
+    setAnchor({ lat, lon } = {}) {
+      if (mission || !Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+      if (anchor && Math.abs(anchor.lat0 - lat) < 1e-7 && Math.abs(anchor.lon0 - lon) < 1e-7) return false;
+      if (anchor) { dropMesh(); meshMode = false; framedMesh = false; onMesh(null); }
+      anchor = frame(lat, lon);
+      return true;
     },
 
     // Whether to draw what each camera is pointed at.
@@ -2429,13 +2781,13 @@ export function createScene3D(canvas) {
       boot();
       running = true;
       if (chipBox) chipBox.hidden = false;
-      if (!mission) { onStatus('Tap out a site first — this draws the ground under a flight.'); return; }
+      if (!frameOf()) { onStatus('Point the map at somewhere in Poland first.'); return; }
       // setMission fires on every replan, and a replan lands on every slider
       // tick, so without this a slow first load would be started a hundred
       // times over.
       if (opening) return;
       opening = true;
-      const c = mission.frame;
+      const c = frameOf();
       inFlight?.abort?.();
       const ctl = new AbortController();
       inFlight = ctl;
@@ -2480,12 +2832,7 @@ export function createScene3D(canvas) {
         // reached at all.
         meshMode = false;
         framedMesh = false;
-        for (const t of meshTiles.values()) { meshGroup?.remove(t); t.geometry.dispose(); }
-        meshTiles.clear();
-        meshCells.clear();
-        heights = null;
-        meshHazard = null;
-        if (padGroup) { scene.remove(padGroup); padGroup = null; }
+        dropMesh();
         onMesh(null);
         onStatus('No mesh here — building the LiDAR surface instead…');
         await loadFor(c.lat0, c.lon0, { signal: ctl.signal });
@@ -2521,9 +2868,9 @@ export function createScene3D(canvas) {
     // of it is in shot; the camera's height above the target is its own
     // business and is left alone.
     where() {
-      if (!mission || !controls) return null;
+      if (!frameOf() || !controls) return null;
       const t = controls.target;
-      const g = mission.frame.toLatLon(t.x, -t.z);
+      const g = frameOf().toLatLon(t.x, -t.z);
       const dist = camera.position.distanceTo(t);
       return { lat: g.lat, lon: g.lon,
                spanM: Math.max(20, 2 * dist * Math.tan((camera.fov * Math.PI) / 360)) };
@@ -2544,8 +2891,8 @@ export function createScene3D(canvas) {
     // distance to the south puts OrbitControls at azimuth 0, where screen-up
     // works out as north, and tilts the camera by 0.06 of a degree.
     lookAt({ lat, lon, spanM }) {
-      if (!mission || !controls) return;
-      const l = mission.frame.toLocal(lat, lon);
+      if (!frameOf() || !controls) return;
+      const l = frameOf().toLocal(lat, lon);
       // Half the span subtends half the field of view, so this is the height
       // at which exactly spanM of ground is in shot.
       const dist = Math.max(20, (spanM / 2) / Math.tan((camera.fov * Math.PI) / 360));

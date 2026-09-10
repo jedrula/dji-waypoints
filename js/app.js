@@ -36,11 +36,10 @@ import { createBasemaps } from './basemap.js';
 import { createSite, parseHeight, DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS } from './site.js';
 import { localPrisms, overlaps } from './prism.js';
 import { spanQuads, LINE_SPAN } from './lines.js';
-import { checkObstacles, clearingAltitude } from './collide.js';
+import { checkObstacles } from './collide.js';
 import { createHistory } from './history.js';
 
 import { bestFix, GPS_ERRORS, STALE_MS } from './gps.js';
-import { sampleTerrain, verdict as terrainVerdict } from './terrain.js';
 import { serviceUrl, serviceHeaders } from './service.js';
 
 const cam = CAMERAS.mini5pro;
@@ -74,8 +73,6 @@ const state = {
   // What the photogrammetric mesh says about the flight, when the survey view
   // has one. Null until it reports, and null is "not checked", not "clear".
   mesh: null,
-  clearAlt: null,
-  terrain: null,              // what the ground under the site does
   onDevice: null,             // a route being looked at next to yours
 };
 
@@ -153,7 +150,7 @@ async function lidarView() {
       // The flat view paints from this too, so imagery and bare grid show the
       // same verdicts as the survey does instead of losing them at the switch.
       view3d.setVerdict(m?.verdict ?? null);
-      renderAlert(false);
+      renderFix();
     });
     lidar.setCollision(collideOn);
     lidar.onLevel(moveLevel);
@@ -189,6 +186,13 @@ async function setGround(name) {
     return;
   }
   const view = await lidarView();
+  // With nothing tapped yet, the ground the MAP is looking at is the ground
+  // worth drawing: browsing the mesh is a reason to open this view, not only a
+  // consequence of having planned something.
+  if (!state.mission) {
+    const c = map.getCenter();
+    view.setAnchor({ lat: c.lat, lon: c.lng });
+  }
   view.setMission(state.mission, state.hazard);
   await view.open();
 }
@@ -231,6 +235,7 @@ function setView(name) {
   $('syncToMap').hidden = !show3d;
   $('looksBtn').hidden = !show3d;
   $('collideBtn').hidden = !show3d;
+  $('liftBtn').hidden = !show3d || !pendingFit;
   $('findplace').hidden = !showMap;
   if (!showMap) openPlace(false);
   showRecentre();
@@ -878,7 +883,6 @@ function settleSoon() {
     if (!state.mission) return;
     if (!tuned) autoFit();
     if (!state.mission) return;
-    readTerrain();
     // Convex pieces, not whole solids: what blocks a camera is worked out by
     // clipping a ray against a convex thing, and an L is not one.
     const boxes = wireHazards().flatMap((o) => localPrisms(o, state.mission.frame));
@@ -889,35 +893,6 @@ function settleSoon() {
     renderReadout();
     view3d.setMission(state.mission, state.coverage);
   }, 260);
-}
-
-// What the ground itself does under the site.
-//
-// A DJI mission holds one height above the point it took off from -- it knows
-// nothing about the hill it is crossing. Flat ground makes that the same as
-// height above the ground, and a slope makes it a lie: take off at the bottom
-// of a Zakopane hillside, fly at "40 m", and you are ninety metres below the
-// top of your own site.
-//
-// Sampled only when the site actually moves, because the answer is about the
-// ground and the ground does not care that you changed the overlap.
-let terrainKey = null;
-async function readTerrain() {
-  const pts = site.capture();
-  if (!pts.length) { state.terrain = null; return; }
-  const b = {
-    north: Math.max(...pts.map((q) => q.lat)), south: Math.min(...pts.map((q) => q.lat)),
-    east: Math.max(...pts.map((q) => q.lon)), west: Math.min(...pts.map((q) => q.lon)),
-  };
-  const key = [b.north, b.south, b.east, b.west].map((n) => n.toFixed(4)).join();
-  if (key === terrainKey) return;
-  terrainKey = key;
-  try {
-    state.terrain = await sampleTerrain(b);
-  } catch {
-    state.terrain = null;
-  }
-  renderReadout();
 }
 
 // The lowest altitude that fits a battery and DJI Fly's 200 waypoints, with the
@@ -935,9 +910,14 @@ function autoFit() {
   if (!m) return;
   $('altitude').value = m.params.altitude;
   $('orbitRings').value = String(m.params.orbitRings);
-  $('surround').checked = m.params.surround;
+  // One direction only. proposePlan drops passes that do not fit the battery,
+  // and honouring that is the point of it -- but it must never switch one ON,
+  // because the plan opens with the nadir grid alone and the rest are yours to
+  // add. It used to write `= m.params.surround` and so re-enabled the surround
+  // ring on the first settle after the view opened, which made "start simple"
+  // last about a second.
+  if (!m.params.surround) $('surround').checked = false;
   $('photoMode').value = m.params.photoMode;
-  state.fitNote = picked.note ?? null;
   computePlan();
 }
 $('refit').addEventListener('click', () => { tuned = false; autoFit(); toast('Re-fitted to the site.'); });
@@ -964,8 +944,7 @@ function computePlan() {
   if (!points.length) {
     state.mission = null;
     state.hazard = null;
-  state.mesh = null;
-    state.clearAlt = null;
+    state.mesh = null;
     state.coverage = null;
     for (const g of [layers.path, layers.dots, layers.poses, layers.conflicts]) g.clearLayers();
     view3d.setMission(null);
@@ -1003,9 +982,6 @@ function computePlan() {
   // measured regardless. Turn it back on the day the readout wants the number.
   state.hazard = checkObstacles(state.mission, prisms,
     { clearance: clearance(), distances: false });
-  state.clearAlt = (state.hazard.strikes || state.hazard.near)
-    ? clearingAltitude(state.mission, prisms, { clearance: clearance() })
-    : null;
 
   drawRoute();
   renderPoints();
@@ -1078,10 +1054,11 @@ function renderReadout() {
   if (!m) {
     box.className = 'readout empty';
     box.innerHTML = '';
-    box.textContent = site.capture().length
-      ? 'Enable at least one pass in Advanced.'
-      : 'Tap the map on what you want captured.';
-    $('alert').hidden = true;
+    // #tip already says "tap the map" above this, so the empty readout only
+    // speaks when it has something the tip does not: a site with every pass
+    // switched off plans nothing, and that is not obvious from the map.
+    box.textContent = site.capture().length ? 'Enable at least one pass in Advanced.' : '';
+    renderFix();
     renderPasses();
     return;
   }
@@ -1100,239 +1077,45 @@ function renderReadout() {
     <div><b>${mmss(s.seconds)}</b><span>${s.batteries > 1 ? `${s.batteries} batteries` : 'flight'}</span></div>
     <div><b class="${cov === null ? 'dim' : cov < 90 ? 'bad' : 'ok'}">${covText}</b><span>coverage</span></div>`;
   renderPasses();
-  renderAlert(over);
+  renderFix();
 }
 
-// What is wrong with this plan, worst first, and the one thing to do about it.
+// The one fix worth a button, and nothing else.
 //
-// This was seven producers appending fragments into one <div>: no separators,
-// so a button ran into the next sentence; no order, so "the flight hits 2
-// obstacles" could sit below a note about waypoint counts; and up to THREE
-// buttons all saying "Raise to N m" with different Ns. What it printed for a
-// low flight over flat ground was
+// There used to be a band of prose here -- seven producers, ranked, a line
+// each, and up to three "Raise to N m" buttons -- and Andrzej's verdict on it
+// was "i will go fully visual, pictures describe problems better than text".
+// He is right about this app: every finding it wrote was a sentence about a
+// picture that is already on screen. A leg that flies into a building is drawn
+// red over the mesh that stops it, in all three views; ground nobody has
+// fetched is grey; the squares you can fetch it from carry a plus. The only
+// thing a sentence could do that a colour cannot is ACT, so that is all that
+// is left: when the mesh says the rings fly into something, the button that
+// lifts them clear appears over the 3D view.
 //
-//   ...less than your 16 m clearance. Raise to 16 mAuto-fitted: 5 m, 3 rings
-//
-// which is two answers of ours contradicting each other with no space between
-// them. So: findings are collected with a rank, sorted, and given a line each;
-// every "raise to" is collected too and becomes ONE button at the highest of
-// them, because clearing the tallest requirement clears the rest.
-const RANK = {
-  strike: 0,        // it hits something
-  ground: 1,        // it is under the hill it crosses
-  unseen: 2,        // the survey sees something above it, mapped or not
-  clearance: 3,     // above things, closer than you asked
-  near: 4,
-  assumed: 5,       // it is measured against guesses
-  incomplete: 6,    // we do not know yet
-  export: 7,        // it will not fit DJI Fly in one piece
-  fit: 8,           // what auto-fit chose, which is not a problem
-};
+// What went with the prose, so it is on the record: the terrain probe
+// (js/terrain.js, and the "the ground rises N m across this site" line it
+// existed for), `clearingAltitude`'s raise button, and the auto-fit note. The
+// survey view draws the ground the terrain probe was describing, with the
+// flight inside it, which is the picture that line was trying to be.
+// The fit the button would apply, kept so the click does not have to compute
+// it again -- and so the button can be hidden the moment there is nothing to
+// apply.
+let pendingFit = null;
 
-function renderAlert(over) {
-  const el = $('alert');
-  const found = [];
-  const raises = [];
-  const say = (rank, text) => found.push({ rank: RANK[rank], rank_: rank, text });
-  const raiseTo = (m) => { if (Number.isFinite(m) && m > +$('altitude').value) raises.push(Math.ceil(m)); };
-
-  const h = state.hazard;
-  if (h?.strikes) {
-    say('strike', h.strikes === 1 ? 'The flight goes through an overhead line.'
-      : `The flight goes through ${h.strikes} overhead lines.`);
-  }
-  else if (h?.near) {
-    say('near', h.near === 1 ? 'One leg passes closer than your clearance.'
-      : `${h.near} legs pass closer than your clearance.`);
-  }
-  if (state.clearAlt) raiseTo(state.clearAlt);
-
-  // The ground first among the real hazards, because it is the one that puts
-  // the aircraft into a hill rather than into something standing on it.
-  const t = state.terrain && state.mission
-    ? terrainVerdict(state.terrain, {
-      takeoffAt: state.terrain.samples[0]?.h,
-      altitude: state.mission.params.altitude,
-      clearance: clearance(),
-    })
-    : null;
-  const alt = state.mission?.params.altitude;
-
-  // The mesh, when there is one: real geometry, so a leg that flies INTO a
-  // building is a fact rather than an inference. Ranked above everything except
-  // an overhead line, because a facade is not a guess.
-  const mesh = state.mesh;
-  if (mesh?.hits) {
-    // Raising the altitude does NOT clear these, and saying otherwise would be
-    // the worst kind of wrong. Measured over Cybulskiego: 27 m and 40 m both
-    // leave 25 legs through buildings, because ring heights are FRACTIONS of
-    // the altitude -- the lowest orbit ring sits near a quarter of it -- so
-    // clearing 24 m of building that way needs about 165 m, past the 120 m the
-    // readout will ever offer. The lever is the ring height, not the altitude.
-    say('strike', `${mesh.hits === 1 ? 'One leg flies' : `${mesh.hits} legs fly`} into `
-      + 'buildings the mesh has measured. Raising the altitude will not clear it — the low '
-      + 'rings scale with it, so lift the rings themselves.');
-  }
-  if (mesh?.tallest !== null && mesh?.tallest !== undefined) {
-    const need = mesh.tallest + clearance();
-    // Two different sentences, because "24 m tall, 13 m above your altitude"
-    // was neither: 13 was how far short of the CLEARANCE the flight was, and
-    // attaching it to the thing said it stood 13 m over an aircraft it was
-    // actually 3 m under. Say the gap, and say what it is short of.
-    const spare = alt - mesh.tallest;
-    if (spare < 0) {
-      say('ground', `At ${alt} m the flight is ${(-spare).toFixed(0)} m BELOW something the `
-        + `mesh measures at ${mesh.tallest.toFixed(0)} m.`);
-    } else if (need > alt) {
-      say('clearance', `The tallest thing the mesh measured under this flight is `
-        + `${mesh.tallest.toFixed(0)} m. At ${alt} m you pass ${spare.toFixed(0)} m over it, `
-        + `which is less than your ${clearance()} m clearance.`);
-    }
-    raiseTo(need);
-  }
-  // Only part of the flight is over ground that has been fetched, and the rest
-  // is unchecked -- which is not the same as clear.
-  if (mesh && mesh.over < mesh.of) {
-    say('incomplete', `The mesh covers ${mesh.over} of ${mesh.of} waypoints; `
-      + 'click the blue squares in the 3D view to check the rest.');
-  }
-
-  if (t && t.shortfall > 0) {
-    const above = t.aboveHighestGround;
-    const relief = t.relief >= 1 ? `The ground rises ${t.relief.toFixed(0)} m across this site, and ` : '';
-    // Two different problems produce a shortfall and telling someone the wrong
-    // one is worse than saying nothing. Below the highest ground means flying
-    // into a hill; above it but inside the clearance means passing closer than
-    // you asked to.
-    if (above < 0) {
-      say('ground', `${relief}at ${alt} m the flight is ${(-above).toFixed(0)} m BELOW the highest ground.`);
-    } else {
-      say('clearance', `${relief}at ${alt} m the flight clears the highest ground by `
-        + `${above.toFixed(0)} m — less than the ${clearance()} m you asked for.`);
-    }
-    raiseTo(t.needed);
-  } else if (t && t.relief > 5) {
-    say('incomplete', `The ground rises ${t.relief.toFixed(0)} m across the site; `
-      + `${t.aboveHighestGround.toFixed(0)} m clear of the highest of it.`);
-  }
-
-  // What the survey saw, which is everything standing and not only what was
-  // mapped. Never lowers an altitude and never claims completeness: an unbuilt
-  // tile and a cell the laser missed are both unknowns, and an unknown ceiling
-  // is not a zero one.
-  const sv = state.survey;
-  if (sv && sv.height !== null) {
-    const need = sv.height + clearance();
-    const caveat = sv.missing
-      ? ` ${sv.missing} of ${sv.tiles} tiles are not built, so this is not the whole picture.`
-      : '';
-    if (need > alt) {
-      // Same correction as the mesh finding above: the number was the shortfall
-      // against the clearance, and the sentence claimed it was the height of
-      // the thing over the aircraft.
-      const spare = alt - sv.height;
-      if (spare < 0) {
-        say('ground', `At ${alt} m the flight is ${(-spare).toFixed(0)} m BELOW something the `
-          + `survey sees at ${sv.height} m, mapped or not.${caveat}`);
-      } else {
-        say('unseen', `The survey sees something ${sv.height} m tall under this flight, mapped `
-          + `or not. At ${alt} m you pass ${spare.toFixed(0)} m over it, which is less than `
-          + `your ${clearance()} m clearance.${caveat}`);
-      }
-      raiseTo(need);
-    } else {
-      say('incomplete', `The survey's tallest thing under this flight is ${sv.height} m; `
-        + `you clear it by ${(alt - sv.height).toFixed(0)} m.${caveat}`);
-    }
-  } else if (sv && sv.missing) {
-    say('incomplete', `The survey has not answered for ${sv.missing} of ${sv.tiles} tiles under `
-      + 'this flight, so nothing here is measured yet.');
-  }
-
-  if (wiresOn && wirePaths.length) {
-    say('assumed', 'Wire heights are the ones their voltage implies, never measured — '
-      + 'check anything the flight passes close to.');
-  }
-
-  if (over) {
-    say('export', `${state.mission.stats.waypoints} waypoints exports as `
-      + `${Math.ceil(state.mission.stats.waypoints / DJI_FLY_MAX_WAYPOINTS)} parts.`);
-  }
-
-  if (!tuned && state.mission) {
-    say('fit', `Auto-fitted: ${alt} m, ${state.mission.params.orbitRings} `
-      + `ring${state.mission.params.orbitRings === 1 ? '' : 's'} per thing.`);
-  }
-
-  el.hidden = !found.length;
-  el.textContent = '';
-  if (!found.length) return;
-
-  found.sort((a, b) => a.rank - b.rank);
-  // The worst finding sets the colour of the box: a strike is not a warning and
-  // a note about what auto-fit chose is not either.
-  const worst = found[0].rank_;
-  el.className = `alert ${worst === 'strike' || worst === 'ground' ? ''
-    : worst === 'fit' || worst === 'incomplete' || worst === 'export' ? 'note' : 'warn'}`;
-
-  for (const f of found) {
-    const line = document.createElement('div');
-    line.className = f.rank_ === 'fit' ? 'fitnote' : '';
-    line.textContent = f.text;
-    el.append(line);
-  }
-
-  // One action, and when the mesh has found a facade it is THIS one rather than
-  // a raise -- because raising cannot clear a facade and lifting the rings can.
-  // Offered ahead of the raise for the same reason the finding is ranked above
-  // it: it is the fix that works.
-  const fit = mesh?.hits ? lidar?.fitRings(clearance()) : null;
-  if (fit?.changed) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = 'Lift the rings clear of the mesh';
-    b.addEventListener('click', () => {
-      tuned = true;
-      pinned.orbitHeights = fit.to;
-      computePlan();
-      history.commit();
-    });
-    el.append(b);
-    const note = document.createElement('div');
-    note.className = 'fitnote';
-    // What it will do, before it does it -- and what it costs. Rings that all
-    // circle the same courtyard all have to clear the same roofline, so they
-    // land within a metre of each other and the vertical parallax that three
-    // rings exist for is gone. That is the clearance talking, not the fitter:
-    // at 15 m nothing can be tight beside a 24 m building.
-    const spread = Math.max(...fit.to) - Math.min(...fit.to);
-    note.textContent = `${fit.rings.map((h, i) => (fit.to[i] > h + 0.05
-      ? `${h.toFixed(0)}→${fit.to[i].toFixed(0)} m`
+function renderFix() {
+  const btn = $('liftBtn');
+  if (!btn) return;
+  const fit = state.mesh?.hits ? lidar?.fitRings(clearance()) : null;
+  pendingFit = fit?.changed ? fit : null;
+  btn.hidden = !pendingFit || activeView === 'map';
+  // The numbers live in the tooltip, where they are there if you go looking
+  // and not in your way if you do not.
+  btn.title = pendingFit
+    ? `Lift the rings clear of the mesh: ${pendingFit.rings.map((h, i) => (pendingFit.to[i] > h + 0.05
+      ? `${h.toFixed(0)}→${pendingFit.to[i].toFixed(0)} m`
       : `${h.toFixed(0)} m stays`)).join(', ')}`
-      + (fit.to.length > 1 && spread < 3
-        ? ` · they end up within ${spread.toFixed(1)} m of each other, so the rings stop `
-          + `buying different viewpoints — lower the ${clearance()} m clearance to stay tighter`
-        : '')
-      + (fit.skipped ? ` · ${fit.skipped} waypoints over ground not fetched, so not judged` : '');
-    el.append(note);
-    return;
-  }
-
-  // One action. Raising to the tallest requirement satisfies the shorter ones,
-  // and three buttons with three numbers is a puzzle rather than a fix.
-  if (raises.length) {
-    const to = Math.min(120, Math.max(...raises));
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = `Raise to ${to} m`;
-    b.addEventListener('click', () => {
-      tuned = true;
-      $('altitude').value = to;
-      computePlan();
-      history.commit();
-    });
-    el.append(b);
-  }
+    : 'Lift the rings clear of the mesh';
 }
 
 function renderPasses() {
@@ -1682,9 +1465,8 @@ $('syncToMap').addEventListener('click', () => {
 // The three buttons in Advanced. Their handlers were deleted as collateral in
 // daa56de, which took out the service chooser and took these with it -- and
 // left the buttons in index.html, so all three sat there looking live and did
-// nothing. #surveyFit was the worse one: renderAlert still reads state.survey,
-// so the survey ceiling could never appear in the readout either, and a
-// clearance the app was able to measure silently stopped being measured.
+// nothing. When cutting UI here, grep index.html for every $('id') the deleted
+// block touched.
 
 // Is the service answering. Its two failure modes look identical from here --
 // nothing running, and a tunnel that is down -- and one round trip to
@@ -1740,12 +1522,10 @@ $('syncToMap').addEventListener('click', () => {
     const was = btn.textContent;
     try {
       const { surveyCeiling } = await import('./heights.js');
-      state.survey = await surveyCeiling(bounds, {
+      const c = await surveyCeiling(bounds, {
         onWait: () => toast('First look at this ground — downloading the survey. A few minutes.'),
         onProgress: (d, n) => { btn.textContent = `Reading the survey… ${d}/${n}`; },
       });
-      renderAlert(false);
-      const c = state.survey;
       if (c.height === null) toast(c.reason ? `No survey here: ${c.reason}.` : 'The survey has not answered yet.');
       else toast(`Tallest thing under this flight: ${c.height} m.`);
     } finally {
@@ -1796,6 +1576,17 @@ function setCollide(on) {
   $('collideBtn').classList.toggle('on', collideOn);
 }
 $('collideBtn').addEventListener('click', () => { setCollide(!collideOn); writeUrl(); });
+
+// The one action that survived the findings text. It pins every ring at the
+// height the mesh says clears it -- see fitRings in js/scene3d.js -- and then
+// the rings it lifted stop being red, which is the whole conversation.
+$('liftBtn').addEventListener('click', () => {
+  if (!pendingFit) return;
+  tuned = true;
+  pinned.orbitHeights = pendingFit.to;
+  computePlan();
+  history.commit();
+});
 
 $('wiresBtn').addEventListener('click', async () => {
   wiresOn = !wiresOn;
@@ -1989,7 +1780,17 @@ applyUiValues({
   shotsPerStop: DEFAULTS.shotsPerStop,
   orbitRings: DEFAULTS.orbitRings,
   surroundRings: DEFAULTS.surroundRings,
-  nadir: true, oblique: true, orbit: true, surround: true, transect: false, establish: true,
+  // ONE pass to open with: the nadir grid, which is the orthophoto mission and
+  // the thing everybody wants first. Everything else is a checkbox in Advanced
+  // and adds itself to this.
+  //
+  // It opened with five passes on -- nadir, oblique, orbit, surround and the
+  // establishing ring -- which is a good 3DGS recipe and a terrible first
+  // screen: a hundred waypoints and four coloured passes over a site you have
+  // just tapped, before you have said what you are doing. js/planner.js keeps
+  // the full recipe as its DEFAULTS, because that is the library's answer to
+  // "plan me a reconstruction"; this is the app's answer to "I just opened it".
+  nadir: true, oblique: false, orbit: false, surround: false, transect: false, establish: false,
 });
 try {
   const c = localStorage.getItem(CLEARANCE_KEY);

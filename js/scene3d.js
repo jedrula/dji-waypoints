@@ -1069,6 +1069,9 @@ export function createScene3D(canvas) {
         return;
       }
       buildPads();
+      // A wire vertex over ground that was not loaded is dropped, so new ground
+      // means the run can reach further than it did.
+      buildWires();
       render();
       sayMesh();
     } catch (err) {
@@ -1076,15 +1079,40 @@ export function createScene3D(canvas) {
     }
   }
 
+  // The ground under a point, by dropping a ray onto the mesh.
+  //
+  // A wire hangs at the height its voltage implies ABOVE THE GROUND UNDER IT,
+  // and in mesh mode there is no height raster to read that from -- so it is
+  // measured off the geometry instead. Straight down from well above anything,
+  // and the first thing hit is the ground, a roof or a tree, which is exactly
+  // what the wire clears in reality.
+  //
+  // Null when nothing is hit, which is ground no tile has been fetched for.
+  // The vertex is then dropped rather than guessed, the same rule drapeWire
+  // uses off the edge of a tile: a wire drawn at an invented height is worse
+  // than a wire that stops.
+  const groundUnder = (x, z) => {
+    if (!meshGroup) return null;
+    const ray = new THREE.Raycaster(new THREE.Vector3(x, 4000, z), new THREE.Vector3(0, -1, 0));
+    const hit = ray.intersectObjects(meshGroup.children, false)[0];
+    return hit ? hit.point.y : null;
+  };
+
   function buildWires() {
     if (!scene) return;
     if (wireGroup) { scene.remove(wireGroup); wireGroup = null; }
-    if (!wirePaths.length || !loaded?.meta || !mission || loaded.datum === undefined) return;
-    const { meta, height } = loaded;
+    if (!wirePaths.length || !mission) return;
+    if (!meshMode && (!loaded?.meta || loaded.datum === undefined)) return;
     const frame = mission.frame;
     wireGroup = new THREE.Group();
     for (const w of wirePaths) {
-      const pts = drapeWire(meta, height, frame, loaded.datum, w)
+      const pts = (meshMode
+        ? w.path.flatMap((q) => {
+          const l = frame.toLocal(q.lat, q.lon);
+          const g = groundUnder(l.x, -l.y);
+          return g === null ? [] : [{ x: l.x, y: g + w.height, z: -l.y }];
+        })
+        : drapeWire(loaded.meta, loaded.height, frame, loaded.datum, w))
         .map((p) => new THREE.Vector3(p.x, p.y, p.z));
       if (pts.length < 2) continue;
       const g = new THREE.BufferGeometry().setFromPoints(pts);
@@ -1585,6 +1613,7 @@ export function createScene3D(canvas) {
           buildMission();
           frameCamera();
           buildPads();
+          buildWires();
           render();
           sayMesh();
           return;

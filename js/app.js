@@ -294,7 +294,10 @@ function readUrl() {
   basemaps.set(q.get('b') ?? basemaps.name());
   if (['map', 'split', '3d'].includes(q.get('v'))) setView(q.get('v'));
   if (GROUNDS.includes(q.get('s'))) setGround(q.get('s'));
-  if (q.get('w') === '1') { wiresOn = true; drawWires(); }
+  // Fetched, not just switched on. Restoring `w=1` from a link used to set the
+  // toggle and draw an empty list, so a shared plan with wires showing arrived
+  // with none until you turned them off and on again.
+  if (q.get('w') === '1') { wiresOn = true; drawWires(); loadWires().then(drawWires); }
   if (q.get('k') === '0') setLooks(false);
   const [lat, lon] = (q.get('c') ?? '').split(',').map(Number);
   const zoom = Number(q.get('z'));

@@ -33,6 +33,10 @@ const FIELDS = [
   ['transectHeights', 'L'],
   // How far the orbit rings stand off the framing distance, tighter or wider.
   ['orbitStandoff', 'T'],
+  // Where you take off from, so the way in travels with the plan. Appended, so
+  // every code written before this decodes exactly as it did -- without one,
+  // and the mission starts at its first station as it always has.
+  ['approachFrom', 'A'],
 ];
 // Append only: the mask is positional, so a code written before a pass existed
 // decodes with that pass OFF. That is the right answer -- a restored plan has to

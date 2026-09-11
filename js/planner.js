@@ -81,6 +81,26 @@ export const DEFAULTS = {
   // and assuming flat ground is the unusual case, not the common one. Set it to
   // 0 for genuinely flat terrain.
   subjectHeight: 3,
+  // Where the aircraft takes off from, and how high it should be before it
+  // sets out for the first waypoint. Without this, `flyToWaylineMode: safely`
+  // climbs to the mission's own security height -- which for a dome is 20 m --
+  // and then flies a STRAIGHT LINE to waypoint one. It does not path-plan, and
+  // obstacle avoidance during a waypoint mission only brakes, so a tree on that
+  // line is a dead mission at best.
+  //
+  // Measured over Park Staszica: from the middle clearing, the line to the
+  // fountain dome passes a 19 m tree group with the aircraft at 20 m. One metre.
+  // No takeoff point in the park fixes it -- the trees sit between that clearing
+  // and everywhere else -- so the fix is height, and height is something the
+  // mission can carry rather than something the pilot has to remember.
+  //
+  // `{ lat, lon, alt }`: two transit waypoints get prepended, one over the
+  // takeoff point and one over the subject, both at `alt`, both taking no
+  // photo. The capture itself is untouched -- this is the approach, not the
+  // flight, and lifting the rings to clear a tree on the way in would be
+  // solving the wrong problem.
+  approachFrom: null,
+  approachSpeed: 8,
   photoMode: 'waypoint', // 'waypoint' | 'interval'
   shotsPerStop: 1,       // 1 = single frame; >1 = gimbal pitch fan at the stop
   shotSpread: 20,        // degrees between frames in the fan
@@ -992,6 +1012,27 @@ export function planMission(site, opts, cam) {
   // Where each camera actually points. followWayline aims along the leg to the
   // next waypoint; towardPOI aims at the box centre. Needed by both the map
   // pose ticks and the 3D frustums, so it belongs in the plan, not the view.
+  // The way in, if a takeoff point was given. Two waypoints: up over where you
+  // are standing, across at that height, and then the flight's own first
+  // station -- which the aircraft descends into vertically inside whatever
+  // clearing the capture already proved was clear.
+  if (p.approachFrom && waypoints.length) {
+    const a = p.approachFrom;
+    const alt = a.alt ?? Math.max(p.altitude + 10, 30);
+    const first = waypoints[0];
+    // Five metres along the way rather than exactly overhead: a waypoint on top
+    // of the takeoff point is a zero-length leg, and nothing downstream has a
+    // bearing to give it.
+    const away = bearing({ lat: a.lat, lon: a.lon }, first);
+    const lead = frame(a.lat, a.lon).toLatLon(
+      5 * Math.sin((away * Math.PI) / 180), 5 * Math.cos((away * Math.PI) / 180));
+    const transit = (at) => ({
+      ...at, alt, pitch: first.pitch, photo: false, pass: 'transit',
+      heading: { mode: 'followWayline' },
+    });
+    waypoints.unshift(transit(lead), transit({ lat: first.lat, lon: first.lon }));
+  }
+
   waypoints.forEach((w, i) => {
     if (w.heading.mode === 'smoothTransition') {
       w.yaw = w.heading.angle;
@@ -1010,8 +1051,8 @@ export function planMission(site, opts, cam) {
   // A distance trigger fires one frame; the fan only exists in waypoint mode.
   const shotsPerStop = p.photoMode === 'interval' ? 1 : Math.max(1, p.shotsPerStop);
   waypoints.forEach((w) => {
-    w.speed = p.speed;
-    w.shots = fanPitches(w.pitch, shotsPerStop, p.shotSpread, cam);
+    w.speed = w.pass === 'transit' ? p.approachSpeed : p.speed;
+    w.shots = fanPitches(w.pitch, w.pass === 'transit' ? 1 : shotsPerStop, p.shotSpread, cam);
   });
 
   // In interval mode only the turns of the grid legs are waypoints; the photos
@@ -1021,7 +1062,7 @@ export function planMission(site, opts, cam) {
   let photos = waypoints.reduce((n, w) => n + (w.photo === false ? 0 : w.shots.length), 0);
   if (p.photoMode === 'interval') {
     exported = waypoints.filter((w, i) => {
-      if (w.pass === 'orbit' || w.pass === 'surround') return true;
+      if (w.pass === 'orbit' || w.pass === 'surround' || w.pass === 'transit') return true;
       return w.lineStart || i === waypoints.length - 1 || waypoints[i + 1]?.lineStart;
     });
   }

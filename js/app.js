@@ -530,6 +530,11 @@ for (const [name, spec] of Object.entries(SHAPES)) {
 // draggable.
 //
 let pinned = { orbitHeights: null, transectHeights: null };
+// Where the flight starts from, when a plan carries one. Not a control either:
+// it arrives in the plan code and has to survive a load-and-save, or the way in
+// is quietly dropped and the mission goes back to setting off at 20 m through
+// whatever is between you and the first waypoint.
+let approachFrom = null;
 
 function uiValues() {
   const v = {};
@@ -543,6 +548,7 @@ function uiValues() {
   v.surroundRings = +$('surroundRings').value;
   if (pinned.orbitHeights) v.orbitHeights = pinned.orbitHeights;
   if (pinned.transectHeights) v.transectHeights = pinned.transectHeights;
+  if (approachFrom) v.approachFrom = approachFrom;
   return v;
 }
 
@@ -551,6 +557,7 @@ function applyUiValues(v) {
   // a restored plan whose levels were never dragged must go back to the spread
   // the ring count implies, not to whatever the last plan was dragged to.
   pinned = { orbitHeights: v.orbitHeights ?? null, transectHeights: v.transectHeights ?? null };
+  approachFrom = v.approachFrom ?? null;
   for (const k of Object.keys(controls)) if (v[k] !== undefined) controls[k].el.value = v[k];
   for (const id of PASS_IDS) if (v[id] !== undefined) $(id).checked = v[id];
   for (const id of PICK_IDS) if (v[id] !== undefined) $(id).value = String(v[id]);
@@ -571,6 +578,7 @@ function paramsFromUi(v) {
   p.surroundRings = v.surroundRings;
   p.orbitHeights = v.orbitHeights ?? null;
   p.transectHeights = v.transectHeights ?? null;
+  p.approachFrom = v.approachFrom ?? null;
   return p;
 }
 

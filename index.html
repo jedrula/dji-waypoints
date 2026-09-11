@@ -414,6 +414,29 @@
       <p class="hint" id="instNoApi" hidden>No local server behind this page, so it cannot reach a
       controller over USB. Serve it with <code>npm start</code> for that.</p>
       <button id="exportKmz" class="block" type="button">Download the KMZ instead</button>
+
+      <details class="help" id="preflight">
+        <summary>Before you fly: the camera settings this plan assumes</summary>
+        <ul class="prelist">
+          <li><b>4:3, not 16:9.</b> 16:9 crops the sensor, and every shot spacing here is
+            worked out from the full 4:3 frame — the same crop turns 75% front overlap into
+            about 67%.</li>
+          <li><b>12 MP, not 48/50.</b> A 50 MP frame is roughly four times the card space and
+            its shutter cadence is unverified. <span id="preGsd"></span></li>
+          <li><b>JPEG, not JPEG+RAW.</b> RAW roughly triples the storage for images the
+            reconstruction does not read.</li>
+          <li><b>Single shot — no Timed Interval.</b> Measured on the 28 Aug flight: a timed
+            interval kept firing through two hovers and 81 of 196 frames were duplicates of
+            each other. It is sticky across flights and overrides what the mission asks for.
+            <span id="preTrigger"></span></li>
+          <li><b>Manual exposure and white balance, locked.</b> A splat bakes the lighting, so
+            auto drifting across a long capture shows up as a colour gradient.
+            <span id="preShutter"></span></li>
+          <li><b>Return-to-home above everything.</b> <span id="preRth"></span></li>
+          <li><b>Obstacle avoidance on, and know what it does:</b> during a waypoint mission it
+            only brakes — it will not route around anything, and a brake ends the flight.</li>
+        </ul>
+      </details>
       <details class="help">
         <summary>Getting the KMZ into DJI Fly by hand</summary>
         <ol>

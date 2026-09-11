@@ -1162,6 +1162,38 @@ const mmss = (s) => {
 
 // Four numbers, because a plan is four questions: is it worth flying, will it
 // fit a battery, how sharp is it, and does it see everything.
+// The pre-flight list in the Fly pane says what the camera has to be set to.
+// Four of its lines are specific to the flight on screen rather than general
+// advice -- the trigger interval the shutter has to keep up with, the exposure
+// that will not smear at this speed, the return height that clears this site --
+// so they are filled in from the plan rather than written into the page.
+function renderPreflight() {
+  const m = state.mission;
+  const set = (id, text) => { const el = $(id); if (el) el.textContent = text; };
+  if (!m) {
+    for (const id of ['preGsd', 'preTrigger', 'preShutter', 'preRth']) set(id, '');
+    return;
+  }
+  const p = m.params;
+  // The app's own camera model is the 50 MP frame, so at 12 MP every ground
+  // sample is twice what the readout says. Better said here than discovered in
+  // the images.
+  set('preGsd', `At 12 MP this plan resolves ${(m.stats.gsdCm * 2).toFixed(2)} cm/px, `
+    + `not the ${m.stats.gsdCm.toFixed(2)} the readout shows.`);
+  set('preTrigger', p.photoMode === 'interval'
+    ? `This mission fires every ${m.stats.fwdSpacing.toFixed(1)} m, which at ${p.speed} m/s is `
+      + `one frame per ${(m.stats.fwdSpacing / p.speed).toFixed(1)} s — the camera has to keep that up.`
+    : 'This mission takes one photo per waypoint, so the aircraft stops for each.');
+  // A pixel of smear is the most this is worth tolerating, and at 12 MP a pixel
+  // is twice the app's own figure.
+  const px = (m.stats.gsdCm * 2) / 100;
+  const worst = Math.max(1, Math.round(1 / (px / Math.max(p.speed, 0.1)) / 100) * 100);
+  set('preShutter', `At ${p.speed} m/s, 1/${worst} smears one pixel — so 1/${worst * 2} or faster.`);
+  const floor = Math.ceil((p.altitude + 20) / 10) * 10;
+  set('preRth', `This flight tops out at ${p.altitude} m, so set return-to-home to at least `
+    + `${floor} m — and higher if anything around the site is taller than the flight.`);
+}
+
 function renderReadout() {
   const box = $('readout');
   const m = state.mission;
@@ -1174,6 +1206,7 @@ function renderReadout() {
     box.textContent = site.capture().length ? 'Enable at least one pass in Advanced.' : '';
     // An empty box is a grey stripe saying nothing, so it goes away entirely.
     box.hidden = !box.textContent;
+    renderPreflight();
     renderFix();
     renderPasses();
     return;
@@ -1194,6 +1227,7 @@ function renderReadout() {
     <div><b>${mmss(s.seconds)}</b><span>${s.batteries > 1 ? `${s.batteries} batteries` : 'flight'}</span></div>
     <div><b class="${cov === null ? 'dim' : cov < 90 ? 'bad' : 'ok'}">${covText}</b><span>coverage</span></div>`;
   renderPasses();
+  renderPreflight();
   renderFix();
 }
 

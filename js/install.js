@@ -9,6 +9,7 @@
 // the view hides itself, and what is left is the by-hand recipe.
 
 import { readKmz } from './kmzread.js';
+import { groupPlans, groupOf } from './plans.js';
 import { DJI_FLY_MAX_WAYPOINTS } from './planner.js';
 
 const $ = (id) => document.getElementById(id);
@@ -234,7 +235,44 @@ function renderPlans() {
     return;
   }
   if (!plans.some((p) => p.id === state.planId)) state.planId = null;
-  for (const p of plans) {
+  // Grouped exactly as the library groups them, from the same function in
+  // js/plans.js -- two panes listing the same plans in two different shapes is
+  // how "which of these eight am I about to install" stops having an answer.
+  for (const { head, members } of groupPlans(plans)) {
+    if (head) box.append(captureHeader(head, members));
+    for (const p of members) box.append(planRow(p, head));
+  }
+}
+
+// A whole capture, installable from the row that names it. This is what
+// "install all" ought to mean: not "whatever is switched on in some other
+// pane", but these, the ones listed underneath.
+function captureHeader(head, members) {
+  const bar = document.createElement('div');
+  bar.className = 'plangroup';
+  const title = document.createElement('b');
+  title.textContent = head;
+  const meta = document.createElement('em');
+  let minutes = 0;
+  let missions = 0;
+  for (const p of members) {
+    const info = metaFor(p);
+    if (info) { minutes += info.minutes; missions += info.parts; }
+  }
+  meta.textContent = `${missions} mission${missions === 1 ? '' : 's'} · ${mmss(minutes * 60)}`;
+  const go = document.createElement('button');
+  go.type = 'button';
+  go.className = 'planshow';
+  go.textContent = `Install all ${missions}`;
+  go.title = `Write every mission in “${head}” to the controller in flight order`;
+  go.disabled = state.busy || !state.transport;
+  go.addEventListener('click', () => onInstallGroup(head, members));
+  bar.append(title, meta, go);
+  return bar;
+}
+
+function planRow(p, head) {
+  {
     const info = metaFor(p);
     // The waypoint count is the number that matters in THIS panel: DJI Fly caps
     // a mission at 200, so a plan past that needs a mission folder per part and
@@ -245,10 +283,12 @@ function renderPlans() {
         bad: info.parts > 1,
       }
       : { text: 'will not decode', bad: true };
-    box.append(pickRow({
+    return pickRow({
       key: `plan:${p.id}`,
       group: 'instPlanPick',
-      title: p.name,
+      // Inside a capture the head is on the row above, so this wears the half
+      // of the name that differs -- the same split the library makes.
+      title: head ? (groupOf(p.name)?.rest ?? p.name) : p.name,
       sub: info ? `${when(p.updatedAt)} · ${info.altitude} m · ${mmss(info.minutes * 60)}` : when(p.updatedAt),
       meta,
       selected: state.planId === p.id,
@@ -261,7 +301,7 @@ function renderPlans() {
         return `${p.name}: ${route.stats.waypoints} waypoints, ${route.params.altitude} m, `
           + `${route.passes.length} passes — on the map, and in the 3D view`;
       },
-    }));
+    });
   }
 }
 
@@ -403,8 +443,11 @@ async function loadSlots({ quiet = false } = {}) {
     state.slots = [];
     setStatus(e.message, 'bad');
   }
-  renderSlots();
-  renderTransfer();
+  // The plan list too, not just the slots: a capture's Install button is only
+  // live once there is a controller to install onto, and this is the moment
+  // that becomes true. Without it the button rendered before the cable was
+  // found stayed disabled for ever, which reads exactly like a broken button.
+  renderAll();
 }
 
 async function scan() {
@@ -470,6 +513,115 @@ async function go() {
   }
   state.busy = false;
   await loadSlots({ quiet: true });
+}
+
+async function onInstallGroup(head, members) {
+  if (state.busy) return;
+  if (!state.transport) { setStatus('no controller connected — plug the RC in and press Find controller', 'bad'); return; }
+  setStatus(`Installing “${head}” — ${members.length} missions…`);
+  try {
+    const { installed, targets, left } = await installCapture(members, ({ done, total, name }) => {
+      setStatus(name
+        ? `Installing “${head}” — ${done + 1} of ${total}: ${name}…`
+        : `Installing “${head}” — ${total} of ${total}, reading the controller back…`);
+    });
+    // The two things worth knowing afterwards: how many of yours went on, and
+    // what else is still up there. A folder this did not touch is a flight
+    // somebody could still pick by mistake in the field.
+    setStatus(`${installed} mission${installed === 1 ? '' : 's'} of “${head}” installed into `
+      + `${targets.length} slot${targets.length === 1 ? '' : 's'}. `
+      + (left.length
+        ? `${left.length} other mission${left.length === 1 ? '' : 's'} left alone: `
+          + `${left.map((s2) => s2.name ?? shortId(s2.id)).join(', ')}. `
+        : 'Nothing else is on the controller. ')
+      + 'Reopen DJI Fly to see them.', 'ok');
+  } catch (e) {
+    setStatus(e.message, 'bad');
+  }
+  renderAll();
+}
+
+// A whole capture in one go. Park Staszica is eight missions and installing it
+// a plan at a time is eight rounds of pick-plan, pick-slot, press, wait -- with
+// nothing at the end saying whether the eight that matter are all on there.
+//
+// The endpoint has always taken a list (`items`), because a plan over 200
+// waypoints already installs as several parts into consecutive folders. This
+// is the same call with several plans in it.
+//
+// What it will not do is guess. If the controller has fewer mission folders
+// than the capture has missions, it says so and writes nothing: a partial
+// install is the failure that looks like a success until you are standing in
+// the park.
+export async function installCapture(list, onProgress = null) {
+  if (state.busy) throw new Error('already installing');
+  if (!state.transport) throw new Error('no controller connected');
+  if (!list?.length) throw new Error('nothing to install — switch a capture on in Plans first');
+
+  const jobs = [];
+  for (const saved of list) {
+    const parts = partsForPlan(saved);
+    if (!parts?.length) throw new Error(`“${saved.name}” will not build — it may be from an older format`);
+    for (const part of parts) jobs.push({ saved, part });
+  }
+  const usable = state.slots.filter((s) => s.exists);
+  if (usable.length < jobs.length) {
+    throw new Error(`${jobs.length} mission${jobs.length === 1 ? '' : 's'} to install but only `
+      + `${usable.length} folder${usable.length === 1 ? '' : 's'} on the controller — `
+      + `make ${jobs.length - usable.length} more in DJI Fly first`);
+  }
+  const targets = usable.slice(0, jobs.length);
+
+  state.busy = true;
+  renderAll();
+  try {
+    // One request per mission, not one for the lot.
+    //
+    // The endpoint takes a list and will happily write eight in a single call,
+    // and that is what this did first -- but `mtp()` shells out with
+    // execFileSync, so the whole server blocks for the duration and nothing can
+    // say how far it has got. Eight of these takes the better part of a minute
+    // (each one pulls the old mission out for the backup before pushing the new
+    // one, and libusb re-initialises per call), which is long enough that a
+    // silent panel is indistinguishable from a hung one.
+    //
+    // Same total work, and now a mission that fails says which one and how many
+    // were already on the controller -- a half-installed capture you know about
+    // is a different thing from one you discover in the park.
+    const installed = [];
+    for (let i = 0; i < jobs.length; i++) {
+      const j = jobs[i];
+      onProgress?.({ done: i, total: jobs.length, name: j.saved.name });
+      const res = await api('/api/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          transport: state.transport,
+          items: [{ slot: targets[i].id, b64: b64(j.part.bytes) }],
+        }),
+      }).catch((e) => {
+        throw new Error(`${installed.length} of ${jobs.length} installed, then `
+          + `“${j.saved.name}” failed: ${e.message}`);
+      });
+      installed.push(res.installed[0]);
+      // Each plan remembers where it landed, the same as a single install does,
+      // so the slot list shows its name next time instead of a bare UUID.
+      rememberSlot(j.saved.id, state.transport, targets[i].id,
+        { name: j.saved.name, waypoints: res.installed[0]?.waypoints ?? null });
+    }
+    onProgress?.({ done: jobs.length, total: jobs.length, name: null });
+    state.busy = false;
+    await loadSlots({ quiet: true });
+    // What else is up there matters: the folders this did not touch still show
+    // in DJI Fly's list, and picking one of those in the field is a flight of
+    // somebody else's plan.
+    const left = state.slots.filter((s) => s.exists && !targets.some((t) => t.id === s.id));
+    return { installed: installed.length, targets, left };
+  } catch (e) {
+    state.busy = false;
+    await loadSlots({ quiet: true });
+    throw e;
+  }
 }
 
 // Writing a set of parts into consecutive slots from `first`. The one rule the
@@ -541,6 +693,8 @@ export function initInstall(opts) {
     // Saving, deleting or syncing a plan changes what step 2 can offer.
     plansChanged: () => { planMeta.clear(); if (hasApi) renderAll(); },
     refresh: () => { if (hasApi) scan(); },
+    installCapture,
+    ready: () => hasApi && Boolean(state.transport),
 
     // Has this plan been installed somewhere, and is that somewhere on the
     // cable right now? `connected` is what turns Save into an overwrite.

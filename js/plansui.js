@@ -12,33 +12,10 @@
 // `applyCode` / `onLoaded`. Saving is not here either -- it belongs to the plan
 // you are editing, so js/planmode.js owns the button and calls `save` below.
 
-import { createPlanStore } from './plans.js';
+import { createPlanStore, groupOf, groupPlans } from './plans.js';
 import { serviceKey, setServiceKey } from './service.js';
 
 const $ = (id) => document.getElementById(id);
-
-// A capture is several plans -- Park Staszica is seven, because 43 minutes is
-// three batteries and the grids and the low rings want different shutter
-// modes. Nothing in the record says which plans belong together, and nothing
-// should: adding a field to something two devices sync is the one change this
-// repo has to be careful with (see the `local: isImported` note in
-// js/obstacles.js), because an old build drops the field and hands the record
-// back with a newer timestamp.
-//
-// So the group is the part of the NAME before the first "·", which is how
-// people already write these: "Staszica 3× · B1 nadir 36 m". No schema, no
-// migration, and a plan named without one is simply not in a group.
-//
-// A group of one is not a group -- it renders as a plain row under its whole
-// name, so plans written before any of this existed look exactly as they did.
-const SEP = '·';
-function groupOf(name) {
-  const at = String(name ?? '').indexOf(SEP);
-  if (at < 0) return null;
-  const head = name.slice(0, at).trim();
-  const rest = name.slice(at + SEP.length).trim();
-  return head && rest ? { head, rest } : null;
-}
 
 export function initPlans({
   applyCode, exportPlan = null,
@@ -111,28 +88,7 @@ export function initPlans({
       box.innerHTML = '<p class="hint">Nothing saved yet. Draw a box, name it, and it lands here.</p>';
     }
 
-    // Buckets in the order their newest member appears, so a capture saved
-    // today sits above one from last week -- the same ordering the flat list
-    // had. Inside a group, by name: that is what puts B1 before B2 before B3,
-    // which is flight order and the only order worth reading.
-    const groups = new Map();
-    for (const p of plans) {
-      const g = groupOf(p.name);
-      const key = g ? g.head : `\u0000${p.id}`;
-      if (!groups.has(key)) groups.set(key, { head: g?.head ?? null, members: [] });
-      groups.get(key).members.push(p);
-    }
-    const ordered = [];
-    for (const { head, members } of groups.values()) {
-      if (head && members.length > 1) {
-        members.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-        ordered.push({ head, members });
-      } else {
-        for (const p of members) ordered.push({ head: null, members: [p] });
-      }
-    }
-
-    for (const { head, members } of ordered) {
+    for (const { head, members } of groupPlans(plans)) {
       if (head) box.append(groupHeader(head, members));
       for (const p of members) renderRow(box, p, head);
     }

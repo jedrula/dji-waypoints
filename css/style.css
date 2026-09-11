@@ -358,6 +358,9 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plangroup button { min-height: 28px; padding: 4px 9px; font-size: 11px; }
 .planitem.grouped { margin-left: 12px; }
+.prelist { margin: 6px 0 0; padding-left: 18px; }
+.prelist li { margin-bottom: 7px; line-height: 1.45; color: var(--dim); }
+.prelist b { color: var(--fg); font-weight: 600; }
 .syncrow { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
 .syncrow .hint { margin: 0; }
 

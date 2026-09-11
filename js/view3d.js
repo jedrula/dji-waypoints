@@ -34,6 +34,15 @@ const add = (a, b, s = 1) => ({ x: a.x + b.x * s, y: a.y + b.y * s, z: a.z + b.z
 export function createView3D(canvas) {
   const ctx = canvas.getContext('2d');
   let mission = null;
+  // Other saved plans switched on in the Plans pane. A site bigger than one
+  // battery is several missions and the thing you want to see is all of them
+  // at once -- which matters more here than on the map, because what separates
+  // a 36 m grid from an 8 m ring is the axis the map does not have.
+  //
+  // They are drawn in the LIVE mission's frame. Frames are local tangent
+  // planes a few hundred metres across, so projecting another plan's lat/lon
+  // through this one costs nothing and keeps every route in one set of metres.
+  let capture = [];
   let scene = null;
   let coverage = null;
   let showCoverage = true;
@@ -122,22 +131,46 @@ export function createView3D(canvas) {
 
 
   function build() {
-    if (!mission) { scene = null; return; }
-    const f = mission.frame;
-    const pts = mission.waypoints.map((w) => {
+    // With nothing loaded but a capture switched on, the first shown plan
+    // supplies the frame. It supplies nothing else: the taps, the levels and
+    // their drag grips belong to the plan being edited, and handing somebody
+    // another plan's grips would let a drag edit a flight that is not on the
+    // sliders.
+    const base = mission ?? capture[0]?.mission ?? null;
+    if (!base) { scene = null; return; }
+    const f = base.frame;
+    const pts = (mission?.waypoints ?? []).map((w) => {
       const l = f.toLocal(w.lat, w.lon);
       return { x: l.x, y: l.y, z: w.alt, pass: w.pass, yaw: w.yaw ?? 0, shots: w.shots ?? [w.pitch] };
     });
+    const others = capture
+      .filter((c) => c.mission && c.mission !== mission)
+      .map((c) => ({
+        name: c.name,
+        // `shots` comes along because these points feed the altitude scale,
+        // which names the tilts flown at each height -- without it the scale
+        // threw on a capture point the moment one was switched on.
+        pts: c.mission.waypoints.map((w) => {
+          const l = f.toLocal(w.lat, w.lon);
+          return { x: l.x, y: l.y, z: w.alt, pass: w.pass, yaw: w.yaw ?? 0, shots: w.shots ?? [w.pitch] };
+        }),
+      }));
+    // Everything on screen, for the sums that have to cover all of it: how far
+    // the ground reaches, how high the camera pulls back, what the altitude
+    // scale is a scale of.
+    const all = pts.length ? [...pts, ...others.flatMap((o) => o.pts)]
+      : others.flatMap((o) => o.pts);
+    if (!all.length) { scene = null; return; }
     // The footprint you tapped, already in this frame's metres. A mission read
     // off the controller has none -- a KMZ records the flight, not what it was
     // for -- so there the flight's own extent stands in.
-    const src = mission.hull?.length ? mission.hull : pts;
+    const src = mission?.hull?.length ? mission.hull : all;
     const box = {
       x0: Math.min(...src.map((q) => q.x)), x1: Math.max(...src.map((q) => q.x)),
       y0: Math.min(...src.map((q) => q.y)), y1: Math.max(...src.map((q) => q.y)),
     };
     const span = Math.max(box.x1 - box.x0, box.y1 - box.y0, 20);
-    const maxAlt = Math.max(...pts.map((p) => p.z), 1);
+    const maxAlt = Math.max(...all.map((p) => p.z), 1);
     // Keep the frustum wedges readable rather than to scale.
     const frustumLen = Math.max(2, Math.min(span * 0.09, maxAlt * 0.7));
     const step = Math.max(1, Math.ceil(pts.length / 70));
@@ -145,8 +178,11 @@ export function createView3D(canvas) {
     // What actually flies at each height, so the scale can name it rather than
     // just marking a number.
     const NAME = { nadir: 'nadir', oblique: 'oblique', orbit: 'orbit', transect: 'cross', surround: 'surround' };
+    // Every height on screen, the capture's included: with seven missions
+    // switched on this is the list that says 8, 12, 16, 36 and 60 m, which is
+    // the whole reason for looking at a capture in three dimensions.
     const byHeight = new Map();
-    for (const p of pts) {
+    for (const p of all) {
       const key = Math.round(p.z * 10) / 10;
       if (!byHeight.has(key)) byHeight.set(key, { z: key, passes: new Set(), tilts: new Set(), n: 0 });
       const e = byHeight.get(key);
@@ -157,7 +193,7 @@ export function createView3D(canvas) {
     // Which planner knob owns each height, so a dragged level can be handed
     // back to it. A height nothing claims (a device route, say) still gets a
     // label, just no grip.
-    const owners = mission.levels ?? [];
+    const owners = mission?.levels ?? [];
     const levels = [...byHeight.values()]
       .map((e) => ({
         z: e.z,
@@ -174,13 +210,13 @@ export function createView3D(canvas) {
 
     // The taps, in this frame's metres. Drawn as discs on stems -- the same
     // thing the survey view draws as balls and the map as circles.
-    const taps = (mission.points ?? []).map((q) => ({ x: q.x, y: q.y, z: Math.max(q.height ?? 0, 0) }));
+    const taps = (mission?.points ?? []).map((q) => ({ x: q.x, y: q.y, z: Math.max(q.height ?? 0, 0) }));
 
     // What actually flies, which is also what every collision check judges:
     // js/collide.js and js/scene3d.js both walk `exported`, and in interval
     // photo mode that skips the intermediate grid points -- so a verdict
     // indexed by it cannot be drawn over `pts`, which is every waypoint.
-    const flown = (mission.exported ?? mission.waypoints ?? []).map((w) => {
+    const flown = (mission?.exported ?? mission?.waypoints ?? []).map((w) => {
       const l = f.toLocal(w.lat, w.lon);
       return { x: l.x, y: l.y, z: w.alt };
     });
@@ -197,7 +233,7 @@ export function createView3D(canvas) {
     // well outside the box it circles, and a flight path hanging over the edge
     // of the world looks like a bug rather than like a wide orbit.
     const area = { x0: box.x0, x1: box.x1, y0: box.y0, y1: box.y1 };
-    for (const p of pts) {
+    for (const p of all) {
       if (p.x < area.x0) area.x0 = p.x;
       if (p.x > area.x1) area.x1 = p.x;
       if (p.y < area.y0) area.y0 = p.y;
@@ -210,7 +246,12 @@ export function createView3D(canvas) {
     area.x0 -= margin; area.x1 += margin;
     area.y0 -= margin; area.y1 += margin;
 
-    scene = { pts, flown, taps, box, span, maxAlt, frustumLen, step, levels, legs, area };
+    // The frame and camera the scene was built in. Everything downstream used
+    // to read them off `mission`, which is null the moment a capture is the
+    // only thing on screen -- the frustum maths threw on `mission.cam` and the
+    // map sync silently stopped answering.
+    scene = { pts, others, flown, taps, box, span, maxAlt, frustumLen, step, levels, legs, area,
+              frame: f, cam: base.cam };
 
     // Re-frame only when the ground box itself changed. Replanning -- which
     // happens on every slider tick and on every pixel of a level drag -- must
@@ -592,6 +633,30 @@ export function createView3D(canvas) {
         i = j + 1;
       }
     }
+
+    // The rest of the capture, behind the plan being edited: same pass colours
+    // -- js/palette.js holds one table because colour means pass in every view
+    // -- thinner and faded, so a seven-mission capture reads as one picture
+    // with the live flight on top of it. Under the collision paint too: that
+    // verdict is about this plan, and dressing someone else's flight in it
+    // would be a promise nothing measured.
+    for (const o of scene.others ?? []) {
+      let i = 0;
+      while (i < o.pts.length) {
+        const pass = o.pts[i].pass;
+        ctx.strokeStyle = PASS_COLOR[pass] ?? 'rgba(139,152,165,0.8)';
+        ctx.globalAlpha = pts.length ? 0.4 : 0.8;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        let j = i;
+        while (j + 1 < o.pts.length && o.pts[j + 1].pass === pass) {
+          line(o.pts[j], o.pts[j + 1], b, w, h, f);
+          j++;
+        }
+        ctx.stroke();
+        i = j + 1;
+      }
+    }
     ctx.globalAlpha = 1;
 
     // The legs that come too close, restruck over the path in the colour of the
@@ -618,7 +683,7 @@ export function createView3D(canvas) {
     }
     wedges.sort((m, n) => n.depth - m.depth);
 
-    const fv = fov(mission.cam);
+    const fv = fov(scene.cam);
     const th = Math.tan(fv.h / 2);
     const tv = Math.tan(fv.v / 2);
     for (const wd of wedges) {
@@ -808,9 +873,11 @@ export function createView3D(canvas) {
 
     drawTags();
 
-    // start marker
-    const v0 = toView(pts[0], b);
-    if (v0.z > NEAR) {
+    // start marker. Guarded, because with only a capture on screen there is no
+    // live flight to have a start -- the routes each keep their own, drawn by
+    // the map, and putting five white dots in here would say less than one.
+    const v0 = pts.length ? toView(pts[0], b) : null;
+    if (v0 && v0.z > NEAR) {
       const s = project(v0, w, h, f);
       ctx.fillStyle = '#fff';
       ctx.beginPath();
@@ -1030,6 +1097,10 @@ export function createView3D(canvas) {
 
   return {
     setMission(m, cov) { mission = m; coverage = cov ?? null; build(); draw(); },
+    // The saved plans drawn alongside it, as [{ name, mission }]. Same list the
+    // map is given, from the same place, so the two views cannot disagree about
+    // what is on screen.
+    setCapture(list) { capture = list ?? []; build(); draw(); },
     // Boxes in the mission's own local metres, each optionally graded by the
     // collision check, plus the legs that earned the grade.
     // `spec` is { on, url(z,x,y), attribution }. Changing the basemap swaps the
@@ -1097,16 +1168,16 @@ export function createView3D(canvas) {
     // and a span. Both 3D views answer the same two calls, so js/app.js can
     // sync whichever one is up without knowing which it is.
     where() {
-      if (!mission) return null;
-      const g = mission.frame.toLatLon(view.target.x, view.target.y);
+      if (!scene) return null;
+      const g = scene.frame.toLatLon(view.target.x, view.target.y);
       // The inverse of the framing in build(): dist is set to span * 2.2 for a
       // site of that span, so a span comes back out the same way.
       return { lat: g.lat, lon: g.lon, spanM: Math.max(20, view.dist / 2.2) };
     },
 
     lookAt({ lat, lon, spanM }) {
-      if (!mission) return;
-      const l = mission.frame.toLocal(lat, lon);
+      if (!scene) return;
+      const l = scene.frame.toLocal(lat, lon);
       view.target = { x: l.x, y: l.y, z: view.target.z };
       view.dist = Math.max(5, Math.min(6000, spanM * 2.2));
       draw();

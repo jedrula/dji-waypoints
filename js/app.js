@@ -1346,16 +1346,26 @@ function captureBounds() {
   return pts.length ? L.latLngBounds(pts).pad(0.3) : null;
 }
 
+// Built once, here, and handed to every view that draws it. The map and the
+// 3D used to be told about a flight separately, which is how two pictures of
+// the same capture start disagreeing about what is on screen -- the map had
+// the seven missions and the 3D had none of them, because only the map had
+// been wired up.
 function renderCapture() {
+  const list = [];
+  let failed = 0;
+  for (const [id, { name, code }] of shown) {
+    const built = missionFromCode(code);
+    if (!built) { failed++; continue; }
+    list.push({ id, name, mission: built.mission });
+  }
+  view3d.setCapture(list);
+
   layers.capture.clearLayers();
   let waypoints = 0;
   let photos = 0;
   let minutes = 0;
-  let failed = 0;
-  for (const [, { name, code }] of shown) {
-    const built = missionFromCode(code);
-    if (!built) { failed++; continue; }
-    const m = built.mission;
+  for (const { name, mission: m } of list) {
     waypoints += m.stats.waypoints;
     photos += m.stats.photos;
     minutes += m.stats.minutes;

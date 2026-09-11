@@ -123,3 +123,43 @@ should I fly" is a recipe and not a slider, and the same argument says the
 answer to "how do I fly a big site" is a budget and not a drag-and-drop
 sequence. The person picks the place and counts their batteries; everything
 else is measurement.
+
+## Fewer missions, or not — an open question, 2026-09-11
+
+Park Staszica flies as eight missions and Andrzej asked the obvious thing: why
+so many, can domes not share one?
+
+They partly can, now. What blocked it before was the transit between two
+clearings, which ran at ring altitude straight through the canopy -- measured at
+-15 m. `approachFrom` fixes exactly that, so a mission with several domes in it
+is now expressible. Four domes is about 170 waypoints, inside DJI Fly's 200.
+
+Two things still stop it:
+
+- **One pinned ring-height list per plan.** The planner shares `orbitHeights`
+  across every subject, so only domes that fly the *same* heights can share a
+  mission. Domes 3 and 4 both fly 8/12/16; dome 7 flies 14/18/22 and dome 9
+  25/29/33, because the trees around each are different heights. Merging those
+  would mean flying two of them higher than they need to be.
+- **One shutter mode per mission.** A grid wants the distance trigger and a dome
+  wants a photo per station. WPML itself is fine with both -- action groups
+  carry a `actionGroupStartIndex`/`EndIndex` range, so one file could
+  distance-trigger over waypoints 0-48 and fire per-station over 49-90. Our
+  writer emits one or the other. This is the one worth building: it would take
+  the capture from eight missions to three, one per battery.
+
+And a reason not to, from Andrzej, worth keeping in view:
+
+> keeping these separate makes sense, maybe we later do some smart optimization
+> of reconstruction if we keep them separate
+
+Which is a real argument. Eight missions is eight labelled image sets: the nadir
+block, the oblique block, each dome. A reconstruction can weight them, drop one,
+or diagnose which pass contributed what -- and matching frames back to a mission
+(docs, `tools/match.mjs` when it exists) is trivial when each flight is its own
+folder and its own time window. Merge them and that structure has to be
+recovered from EXIF rather than read off the card.
+
+So: the merge is a convenience at the controller, and the split may be worth
+something at the other end of the pipeline. Decide it after the first
+reconstruction, not before.

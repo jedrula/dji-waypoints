@@ -91,6 +91,11 @@ const layers = {
   footprint: L.polygon([], { color: '#4da3ff', weight: 1.5, dashArray: '5,4',
                              fill: true, fillOpacity: 0.05, interactive: false }).addTo(map),
   wires: L.layerGroup().addTo(map),
+  // Saved plans switched on from the Plans pane. Added before `path` so the
+  // plan you are editing draws over them: one site needs more flights than one
+  // battery holds, and until this existed the only way to see the shape of a
+  // whole capture was to load its missions one at a time and remember.
+  capture: L.layerGroup().addTo(map),
   path: L.layerGroup().addTo(map),
   dots: L.layerGroup().addTo(map),
   devicePath: L.layerGroup().addTo(map),
@@ -321,6 +326,12 @@ function writeUrl() {
   if (wiresOn) q.set('w', '1');
   if (!looksOn) q.set('k', '0');
   if (collideOn) q.set('x', '1');
+  // Which saved plans are drawn alongside the one being edited. In the query
+  // string rather than in localStorage because that is what the address bar is
+  // for here -- the view already lives there, and a capture someone is looking
+  // at is a view of it. It also means a link can hand somebody the whole
+  // seven-mission picture, not just the plan in the hash.
+  if (shown.size) q.set('m', [...shown.keys()].join(','));
   for (const k of MOCK_KEYS) if (opened.has(k)) q.set(k, opened.get(k));
   const code = planCode();
   window.history.replaceState(null, '', `?${q}${code ? `#plan=${code}` : ''}`);
@@ -337,6 +348,11 @@ function readUrl() {
   if (q.get('w') === '1') { wiresOn = true; drawWires(); loadWires().then(drawWires); }
   if (q.get('k') === '0') setLooks(false);
   if (q.get('x') === '1') setCollide(true);
+  // Held until the plan library has loaded -- these are ids, and the store
+  // reads from localStorage after this runs. `onChange` resolves them against
+  // the plans that actually exist and then forgets the list, so hiding one
+  // does not bring it back on the next render.
+  wantShown = (q.get('m') ?? '').split(',').filter(Boolean);
   const [lat, lon] = (q.get('c') ?? '').split(',').map(Number);
   const zoom = Number(q.get('z'));
   if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
@@ -1295,6 +1311,89 @@ function renderPath(m, { groups = PLAN_GROUPS(), dashed = false } = {}) {
     .addTo(groups.path).bindTooltip(dashed ? 'On the controller' : 'Start');
 }
 
+/* ---------- the capture: several saved plans on the map at once ---------- */
+// A site bigger than one battery is not one mission and cannot be made into
+// one: 43 minutes over Park Staszica is three flights, the 200-waypoint cap
+// splits it again, and the grids and the low rings want different shutter
+// modes. So a capture is a SET of plans, and the question "does this set cover
+// the site" had no way of being asked -- each plan could only be looked at by
+// loading it, which threw away whatever was on screen.
+//
+// Shown plans keep their PASS colours and are drawn thin and faded. Colouring
+// them per plan was the obvious alternative and it is wrong: js/palette.js
+// holds one table because colour means pass in every view, and a capture whose
+// missions are its passes reads correctly as it is -- blue grid, orange
+// oblique, green rings. What tells two plans apart is the label on the start
+// marker.
+const shown = new Map();          // plan id -> { name, code }
+let wantShown = null;             // ids read out of the URL, before the store exists
+
+// One plan's footprint, and everything switched on. The taps are enough -- a
+// flight never leaves its own footprint by more than the orbit pad, and these
+// only have to be close enough to move the map to.
+function planBounds(code) {
+  const plan = decodePlan(code);
+  if (!plan?.points?.length) return null;
+  return L.latLngBounds(plan.points.map((q) => [q.lat, q.lon])).pad(0.3);
+}
+
+function captureBounds() {
+  const pts = [];
+  for (const [, { code }] of shown) {
+    const plan = decodePlan(code);
+    if (plan) for (const q of plan.points) pts.push([q.lat, q.lon]);
+  }
+  return pts.length ? L.latLngBounds(pts).pad(0.3) : null;
+}
+
+function renderCapture() {
+  layers.capture.clearLayers();
+  let waypoints = 0;
+  let photos = 0;
+  let minutes = 0;
+  let failed = 0;
+  for (const [, { name, code }] of shown) {
+    const built = missionFromCode(code);
+    if (!built) { failed++; continue; }
+    const m = built.mission;
+    waypoints += m.stats.waypoints;
+    photos += m.stats.photos;
+    minutes += m.stats.minutes;
+
+    let run = [];
+    let runPass = null;
+    const flush = () => {
+      if (run.length > 1) {
+        L.polyline(run, { color: PASS_COLOR[runPass] ?? '#8b98a5', weight: 1.5, opacity: 0.45,
+          interactive: false }).addTo(layers.capture);
+      }
+    };
+    for (const w of m.waypoints) {
+      if (w.pass !== runPass) { flush(); run = run.length ? [run[run.length - 1]] : []; runPass = w.pass; }
+      run.push([w.lat, w.lon]);
+    }
+    flush();
+    // The start of each flight, named. On a capture of seven missions this is
+    // the only thing that says which line is which.
+    const first = m.waypoints[0];
+    L.circleMarker([first.lat, first.lon], { radius: 4, color: '#fff', weight: 1.5, opacity: 0.7,
+      fillColor: PASS_COLOR[first.pass] ?? '#8b98a5', fillOpacity: 0.8, interactive: true })
+      .addTo(layers.capture)
+      .bindTooltip(`${name} — ${m.stats.waypoints} wp, ${m.stats.minutes.toFixed(1)} min`,
+        { direction: 'top' });
+  }
+
+  const out = $('captureTotal');
+  if (!shown.size) { out.hidden = true; out.textContent = ''; return; }
+  out.hidden = false;
+  // Batteries, because that is the number that decides whether a capture is one
+  // trip or two. Flight time only -- climb, transit and RTH are on top of it.
+  const batteries = Math.ceil(minutes / (DEFAULTS.usableFlightMin || 18));
+  out.textContent = `${shown.size} on the map — ${waypoints} waypoints, ${photos} photos, `
+    + `${minutes.toFixed(1)} min, ${batteries} batter${batteries === 1 ? 'y' : 'ies'}`
+    + (failed ? ` · ${failed} would not decode` : '');
+}
+
 // The one "other route" channel: a mission read off the controller, or a saved
 // plan being looked at before it is installed. Dashed, next to yours, one at a
 // time, and any replan takes it back down.
@@ -1768,8 +1867,66 @@ function applyPlan(plan) {
 }
 
 const plans = initPlans({
-  onChange: () => { bridge.plansChanged(); renderIdentity(); },
+  onChange: (list) => {
+    // A plan deleted here, or on the other device the last sync pulled from,
+    // must not keep drawing. Shown is a view of the library, not a copy of it.
+    const live = new Map(list.map((p) => [p.id, p]));
+    let changed = false;
+    for (const id of [...shown.keys()]) if (!live.has(id)) { shown.delete(id); changed = true; }
+    if (wantShown) {
+      for (const id of wantShown) {
+        const p = live.get(id);
+        if (p && !shown.has(id)) { shown.set(id, { name: p.name, code: p.code }); changed = true; }
+      }
+      // One shot. A plan that arrives from a later sync is not something the
+      // link asked for, and re-applying the list would undo every Hide.
+      if (list.length) wantShown = null;
+    }
+    if (changed) {
+      renderCapture();
+      // The library loads after the first writeUrl, so without this the
+      // restored set is on the map and NOT in the address bar -- it came back
+      // once and then vanished on the next reload.
+      writeUrl();
+    }
+    bridge.plansChanged();
+    renderIdentity();
+  },
   setCount: (n) => { $('savedTag').textContent = n || ''; },
+  isShown: (id) => shown.has(id),
+  onToggleShow: (p) => {
+    if (shown.has(p.id)) { shown.delete(p.id); renderCapture(); writeUrl(); return false; }
+    shown.set(p.id, { name: p.name, code: p.code });
+    renderCapture();
+    // Move the map only when what you just switched on is not already on it.
+    // "Fit when the first one goes on" was the obvious rule and it is wrong:
+    // the list is newest-first, so switching on a seven-mission capture fitted
+    // to whichever plan happened to be at the top -- a 24 m dome -- and left
+    // you at zoom 21 inside it with the other six off screen.
+    const added = planBounds(p.code);
+    if (added && !map.getBounds().contains(added)) {
+      const all = captureBounds();
+      if (all) map.fitBounds(all, { animate: false, padding: [40, 40], maxZoom: 21 });
+    }
+    writeUrl();
+    return true;
+  },
+  onShowMany: (list, on) => {
+    for (const p of list) {
+      if (on) shown.set(p.id, { name: p.name, code: p.code });
+      else shown.delete(p.id);
+    }
+    renderCapture();
+    if (on) {
+      const all = captureBounds();
+      if (all) map.fitBounds(all, { animate: false, padding: [40, 40], maxZoom: 21 });
+    }
+    writeUrl();
+  },
+  // The group header says how many batteries a capture is, which means
+  // planning every mission in it. Cheap -- a mission is well under a
+  // millisecond -- and it is the number the whole question turns on.
+  statsFor: (code) => missionFromCode(code)?.mission.stats ?? null,
   onLoaded: (p) => {
     session = { id: p.id, name: p.name, code: planCode() };
     $('planName').value = p.name;

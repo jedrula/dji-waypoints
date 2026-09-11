@@ -17,9 +17,33 @@ import { serviceKey, setServiceKey } from './service.js';
 
 const $ = (id) => document.getElementById(id);
 
+// A capture is several plans -- Park Staszica is seven, because 43 minutes is
+// three batteries and the grids and the low rings want different shutter
+// modes. Nothing in the record says which plans belong together, and nothing
+// should: adding a field to something two devices sync is the one change this
+// repo has to be careful with (see the `local: isImported` note in
+// js/obstacles.js), because an old build drops the field and hands the record
+// back with a newer timestamp.
+//
+// So the group is the part of the NAME before the first "·", which is how
+// people already write these: "Staszica 3× · B1 nadir 36 m". No schema, no
+// migration, and a plan named without one is simply not in a group.
+//
+// A group of one is not a group -- it renders as a plain row under its whole
+// name, so plans written before any of this existed look exactly as they did.
+const SEP = '·';
+function groupOf(name) {
+  const at = String(name ?? '').indexOf(SEP);
+  if (at < 0) return null;
+  const head = name.slice(0, at).trim();
+  const rest = name.slice(at + SEP.length).trim();
+  return head && rest ? { head, rest } : null;
+}
+
 export function initPlans({
   applyCode, exportPlan = null,
   setCount = () => {}, onLoaded = () => {}, onChange = () => {}, onDeleted = () => {},
+  isShown = () => false, onToggleShow = null, onShowMany = null, statsFor = null,
 }) {
   const store = createPlanStore();
   let selected = null;
@@ -36,6 +60,48 @@ export function initPlans({
     $('planStatus').className = `hint ${kind}`;
   }
 
+  // Group headers carry the numbers that decide whether a capture is one trip
+  // or three, so they need the missions built, which only the caller can do.
+  function groupHeader(head, members) {
+    const bar = document.createElement('div');
+    bar.className = 'plangroup';
+    const title = document.createElement('b');
+    title.textContent = head;
+    const meta = document.createElement('em');
+    let text = `${members.length} missions`;
+    if (statsFor) {
+      let minutes = 0;
+      let waypoints = 0;
+      for (const p of members) {
+        const s = statsFor(p.code);
+        if (s) { minutes += s.minutes; waypoints += s.waypoints; }
+      }
+      const batteries = Math.ceil(minutes / 18);
+      text += ` · ${waypoints} wp · ${minutes.toFixed(1)} min · `
+        + `${batteries} batter${batteries === 1 ? 'y' : 'ies'}`;
+    }
+    meta.textContent = text;
+    bar.append(title, meta);
+
+    if (onShowMany) {
+      const all = document.createElement('button');
+      all.type = 'button';
+      const set = () => {
+        const on = members.every((p) => isShown(p.id));
+        all.className = `planshow${on ? ' on' : ''}`;
+        all.textContent = on ? 'Hide all' : 'Show all';
+      };
+      set();
+      all.title = 'Draw every mission in this capture on the map at once';
+      all.addEventListener('click', () => {
+        onShowMany(members, !members.every((p) => isShown(p.id)));
+        render();
+      });
+      bar.append(all);
+    }
+    return bar;
+  }
+
   function render() {
     const plans = store.list();
     setCount(plans.length);
@@ -44,11 +110,59 @@ export function initPlans({
     if (!plans.length) {
       box.innerHTML = '<p class="hint">Nothing saved yet. Draw a box, name it, and it lands here.</p>';
     }
+
+    // Buckets in the order their newest member appears, so a capture saved
+    // today sits above one from last week -- the same ordering the flat list
+    // had. Inside a group, by name: that is what puts B1 before B2 before B3,
+    // which is flight order and the only order worth reading.
+    const groups = new Map();
     for (const p of plans) {
+      const g = groupOf(p.name);
+      const key = g ? g.head : `\u0000${p.id}`;
+      if (!groups.has(key)) groups.set(key, { head: g?.head ?? null, members: [] });
+      groups.get(key).members.push(p);
+    }
+    const ordered = [];
+    for (const { head, members } of groups.values()) {
+      if (head && members.length > 1) {
+        members.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+        ordered.push({ head, members });
+      } else {
+        for (const p of members) ordered.push({ head: null, members: [p] });
+      }
+    }
+
+    for (const { head, members } of ordered) {
+      if (head) box.append(groupHeader(head, members));
+      for (const p of members) renderRow(box, p, head);
+    }
+    $('syncNow').disabled = syncing || !store.endpoint();
+    onChange(plans);
+  }
+
+  function renderRow(box, p, head) {
       const row = document.createElement('div');
-      row.className = `planitem${selected === p.id ? ' on' : ''}`;
+      row.className = `planitem${selected === p.id ? ' on' : ''}${head ? ' grouped' : ''}`;
       row.innerHTML = `<span class="planmain"><b></b><em>${when(p.updatedAt)}</em></span>`;
-      row.querySelector('b').textContent = p.name;
+      // Inside a group the head is already above the row, so the row wears the
+      // half of the name that is actually different.
+      row.querySelector('b').textContent = head ? (groupOf(p.name)?.rest ?? p.name) : p.name;
+
+      // Putting a plan on the map is not loading it. A capture is several
+      // plans and you want to see them together; loading one would throw away
+      // whatever is being edited, which is the opposite of the question.
+      const show = onToggleShow && document.createElement('button');
+      if (show) {
+        show.type = 'button';
+        show.className = `planshow${isShown(p.id) ? ' on' : ''}`;
+        show.textContent = isShown(p.id) ? 'Hide' : 'Show';
+        show.title = 'Draw this plan on the map alongside the others';
+        show.addEventListener('click', () => {
+          const on = onToggleShow(p);
+          show.className = `planshow${on ? ' on' : ''}`;
+          show.textContent = on ? 'Hide' : 'Show';
+        });
+      }
 
       const load = document.createElement('button');
       load.type = 'button';
@@ -94,11 +208,8 @@ export function initPlans({
         sync({ quiet: true });
       });
 
-      row.append(load, ...(exp ? [exp] : []), del);
+      row.append(...(show ? [show] : []), load, ...(exp ? [exp] : []), del);
       box.append(row);
-    }
-    $('syncNow').disabled = syncing || !store.endpoint();
-    onChange(plans);
   }
 
   // An id means overwrite the plan you were editing -- including under a new

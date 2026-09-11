@@ -340,6 +340,14 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 .planmain em { font-style: normal; color: var(--dim); font-size: 11px; }
 .planitem button { min-height: 32px; padding: 5px 10px; font-size: 12px; }
 .planx { width: 32px; padding: 0; font-size: 16px; color: var(--dim); }
+.planshow.on { border-color: var(--accent); color: var(--accent); }
+/* A capture -- several plans flown as one job -- above the missions in it. */
+.plangroup { display: flex; align-items: center; gap: 8px; margin: 12px 0 4px; padding: 0 2px; }
+.plangroup b { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.plangroup em { flex: 1; font-style: normal; color: var(--dim); font-size: 11px;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plangroup button { min-height: 28px; padding: 4px 9px; font-size: 11px; }
+.planitem.grouped { margin-left: 12px; }
 .syncrow { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
 .syncrow .hint { margin: 0; }
 

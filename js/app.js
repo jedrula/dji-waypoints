@@ -162,6 +162,10 @@ async function lidarView() {
     lidar.onRadius(moveRadius);
     lidar.onLevelDone(() => history.commit());
     lidar.setLooks(looksOn);
+    // Same reason as the ground below: this view is built the first time it is
+    // opened, which is long after a capture switched on from a link, and
+    // nothing would push the list at it again.
+    lidar.setCapture(captureList());
     // Set here as well as in setView, because this is created lazily and the
     // first tile can load before the view is switched to.
     lidar.setGround(basemaps.groundSpec(true));
@@ -1351,15 +1355,23 @@ function captureBounds() {
 // the same capture start disagreeing about what is on screen -- the map had
 // the seven missions and the 3D had none of them, because only the map had
 // been wired up.
-function renderCapture() {
+// The shown plans as missions. One builder, so a renderer that asks late --
+// the survey view is built the first time it is opened, which can be minutes
+// after a link switched seven plans on -- gets exactly what the others got.
+function captureList() {
   const list = [];
-  let failed = 0;
   for (const [id, { name, code }] of shown) {
     const built = missionFromCode(code);
-    if (!built) { failed++; continue; }
-    list.push({ id, name, mission: built.mission });
+    if (built) list.push({ id, name, mission: built.mission });
   }
+  return list;
+}
+
+function renderCapture() {
+  const list = captureList();
+  const failed = shown.size - list.length;
   view3d.setCapture(list);
+  lidar?.setCapture(list);
 
   layers.capture.clearLayers();
   let waypoints = 0;
@@ -1485,12 +1497,77 @@ const SHEETS = {
 };
 let openSheet = null;
 
+/* ---------- the sheet is a window on a laptop ---------- */
+// On a phone it stays what it was: a sheet up from the bottom with a scrim over
+// everything, because a phone has no room for two things at once and a window
+// you have to drag out of the way is worse than one you dismiss.
+//
+// On anything wider it is a window. Two halves to that, and the scrim is the
+// half that matters more: with it up, the map underneath could not be touched
+// at all, so switching a plan on and looking at where it goes meant closing the
+// pane, looking, and opening it again -- seven times for a capture of seven.
+const WINDOWED = () => window.matchMedia('(min-width: 720px)').matches;
+const SHEET_POS = 'dji.sheetPos';
+
+// Kept off screen edges: a window dragged to where its header is not reachable
+// cannot be dragged back, and this one has no other way to move.
+function placeSheet(x, y) {
+  const el = $('sheet');
+  const w = el.offsetWidth || 420;
+  const cx = Math.max(16 - (w - 120), Math.min(window.innerWidth - 120, x));
+  const cy = Math.max(0, Math.min(window.innerHeight - 40, y));
+  el.classList.add('moved');
+  el.style.left = `${cx}px`;
+  el.style.top = `${cy}px`;
+  try { localStorage.setItem(SHEET_POS, JSON.stringify({ x: cx, y: cy })); } catch { /* private window */ }
+}
+
+function restoreSheetPos() {
+  const el = $('sheet');
+  if (!WINDOWED()) {
+    // Back to a bottom sheet: the inline placement would otherwise survive a
+    // rotation into phone width and leave it stranded mid-screen.
+    el.classList.remove('moved');
+    el.style.left = el.style.top = '';
+    return;
+  }
+  let at = null;
+  try { at = JSON.parse(localStorage.getItem(SHEET_POS) ?? 'null'); } catch { /* private window */ }
+  if (at && Number.isFinite(at.x) && Number.isFinite(at.y)) placeSheet(at.x, at.y);
+}
+
+document.querySelector('.sheethead').addEventListener('pointerdown', (e) => {
+  if (!WINDOWED() || e.target.closest('button')) return;
+  const el = $('sheet');
+  const r = el.getBoundingClientRect();
+  const dx = e.clientX - r.left;
+  const dy = e.clientY - r.top;
+  el.classList.add('dragging');
+  // A synthesised pointerdown carries an id no real pointer had, and capture
+  // throws on it -- which would kill the drag under test rather than in use.
+  try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not a real pointer */ }
+  const move = (ev) => placeSheet(ev.clientX - dx, ev.clientY - dy);
+  const up = () => {
+    el.classList.remove('dragging');
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  e.preventDefault();
+});
+
+window.addEventListener('resize', () => {
+  if (!$('sheet').hidden) restoreSheetPos();
+});
+
 function showSheet(name) {
   openSheet = name;
   $('sheetTitle').textContent = SHEETS[name] ?? '';
   for (const k of Object.keys(SHEETS)) $(`pane-${k}`).hidden = k !== name;
   $('sheet').hidden = false;
-  $('scrim').hidden = false;
+  $('scrim').hidden = WINDOWED();
+  restoreSheetPos();
   if (name === 'device') bridge.refresh();
 }
 function closeSheet() {

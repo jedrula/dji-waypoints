@@ -325,6 +325,16 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
   /* A sheet the width of a laptop is a banner. Keep it a panel. */
   #sheet { left: auto; right: 16px; bottom: 16px; width: 420px; border-radius: 14px;
            border: 1px solid var(--line); max-height: calc(100dvh - 32px); }
+  /* And on a laptop it is a window, not a modal: you switch a plan on and look
+     at the map, which is behind it. Dragging it is by the header, which is the
+     one strip of a window nothing else claims. */
+  .sheethead { cursor: grab; touch-action: none; user-select: none; }
+  .sheethead button { cursor: pointer; }
+  #sheet.dragging { transition: none; }
+  #sheet.dragging .sheethead { cursor: grabbing; }
+  /* Once it has been dragged the panel is placed by its top-left, so the right
+     and bottom anchors have to let go or it stretches between the two. */
+  #sheet.moved { right: auto; bottom: auto; }
 }
 
 /* ---------- saved plans ---------- */

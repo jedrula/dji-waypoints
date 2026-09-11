@@ -424,8 +424,11 @@ export function createView3D(canvas) {
   // holding it up. That is why this is off unless asked for, and why the boxes
   // are the thing to judge clearance against.
   function drawGround(b, w, h, f, dpr) {
-    if (!ground?.on || !tiles || !mission || !scene) return;
-    const fr = mission.frame;
+    // `scene.frame`, not `mission.frame`: with a capture switched on and no
+    // plan loaded there is no live mission, and this used to return here --
+    // which is a 3D view with a grid and no ground under it.
+    if (!ground?.on || !tiles || !scene) return;
+    const fr = scene.frame;
     const { area } = scene;
     const sw = fr.toLatLon(area.x0, area.y0);
     const ne = fr.toLatLon(area.x1, area.y1);

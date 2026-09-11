@@ -128,6 +128,11 @@ export function createScene3D(canvas) {
   let controls = null;
   let missionGroup = null;
   let wireGroup = null;
+  // The other saved plans switched on in the Plans pane, and their own group so
+  // clearing the flight does not take them with it. Same list js/app.js hands
+  // the map and the flat 3D -- one capture, three pictures of it.
+  let capture = [];
+  let captureGroup = null;
   let meshGroup = null;
   // Tile name -> Mesh, so a neighbour asked for twice is fetched once.
   const meshTiles = new Map();
@@ -818,7 +823,7 @@ export function createScene3D(canvas) {
     loaded.crop = { c0, c1, r0, r1 };
     loaded.cells = cols * rows;
     loaded.step = step;
-    buildMission();
+    buildFlights();
     buildWires();
     frameCamera();
   }
@@ -1444,7 +1449,7 @@ export function createScene3D(canvas) {
   function reportMesh() {
     const found = checkMesh();
     meshHazard = found;
-    buildMission();
+    buildFlights();
     buildLevelChips();
     onMesh(found);
   }
@@ -2247,6 +2252,47 @@ export function createScene3D(canvas) {
     return tex;
   }
 
+  // The flight on the sliders and the capture around it, always together: they
+  // are one picture, and a rebuild that did half of it left the survey showing
+  // a plan with no capture or a capture with no plan.
+  function buildFlights() {
+    buildMission();
+    buildCapture();
+  }
+
+  // Drawn in whatever frame this view is standing in -- the live mission's, or
+  // the anchor's when there is no mission at all. Thin and faded under the live
+  // flight, and the pass colours are the same table the other two views use.
+  function buildCapture() {
+    if (!scene) return;
+    if (captureGroup) { scene.remove(captureGroup); dropFat(captureGroup); captureGroup = null; }
+    const frame = frameOf();
+    if (!frame || !capture.length) return;
+    captureGroup = new THREE.Group();
+    for (const c of capture) {
+      if (!c.mission || c.mission === mission) continue;
+      const path = c.mission.exported ?? c.mission.waypoints ?? [];
+      const at = (w) => {
+        const l = frame.toLocal(w.lat, w.lon);
+        return new THREE.Vector3(l.x, w.alt, -l.y);
+      };
+      let run = [];
+      let runPass = path[0]?.pass;
+      const flush = () => {
+        if (run.length > 1) {
+          captureGroup.add(fatLine(run, {
+            color: asHex(PASS_COLOR[runPass] ?? PASS_FALLBACK),
+            linewidth: 1.6, transparent: true, opacity: mission ? 0.45 : 0.85,
+          }));
+        }
+        run = run.length ? [run[run.length - 1]] : [];
+      };
+      for (const w of path) { if (w.pass !== runPass) { flush(); runPass = w.pass; } run.push(at(w)); }
+      flush();
+    }
+    scene.add(captureGroup);
+  }
+
   function buildMission() {
     if (!scene || !mission) return;
     if (missionGroup) { scene.remove(missionGroup); dropFat(missionGroup); }
@@ -2772,6 +2818,9 @@ export function createScene3D(canvas) {
         if (missionGroup) { scene.remove(missionGroup); dropFat(missionGroup); missionGroup = null; }
         if (wireGroup) { scene.remove(wireGroup); wireGroup = null; }
         meshHazard = null;
+        // Not the capture: it is not this plan's, and the frame it is drawn in
+        // survives (the anchor takes over), so it stays exactly where it was.
+        buildCapture();
         buildLevelChips();
         onMesh(null);
         render();
@@ -2795,7 +2844,7 @@ export function createScene3D(canvas) {
       // buildMission first was drawing it twice; and buildWires was not called
       // at all, so wires kept the heights of the plan before last.
       if (meshTiles.size) { reportMesh(); buildWires(); render(); return; }
-      if (moved) buildSurface(); else { buildMission(); render(); }
+      if (moved) buildSurface(); else { buildFlights(); render(); }
     },
 
     // The same list the map draws, so the two pictures cannot disagree about
@@ -2831,6 +2880,14 @@ export function createScene3D(canvas) {
       looksOn = !!on;
       if (!renderer || !mission) return;
       buildMission();
+      render();
+    },
+
+    // The saved plans drawn alongside the flight, as [{ name, mission }].
+    setCapture(list) {
+      capture = list ?? [];
+      if (!renderer) return;
+      buildCapture();
       render();
     },
 

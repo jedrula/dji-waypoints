@@ -1747,6 +1747,14 @@ function renderIdentity() {
 }
 
 function applyPlan(plan) {
+  // A restored plan is already somebody's decision, so auto-fit must not get a
+  // vote. It did: `tuned` was left false here, the settle timer fired a third
+  // of a second after the plan appeared, and proposePlan wrote its own answer
+  // over the top -- the Park Staszica plan opened from its link at 78 m in
+  // waypoint mode instead of the 48 m interval flight that was shared, and the
+  // hash in the address bar was rewritten to match. js/share.js says what the
+  // contract is: a restored plan has to be the plan that was saved.
+  tuned = true;
   applyUiValues(plan.ui);
   if (plan.shape) $('shape').value = plan.shape;
   site.setCapture(plan.points);

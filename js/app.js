@@ -475,7 +475,7 @@ const controls = {
     fmt: (v) => (+v === 0 ? 'framing distance' : `${v > 0 ? '+' : ''}${v} m`),
   },
 };
-const PASS_IDS = ['nadir', 'oblique', 'orbit', 'transect', 'surround', 'establish'];
+const PASS_IDS = ['nadir', 'oblique', 'orbit', 'transect', 'surround', 'context', 'establish'];
 
 // Three recipes, and each one IS its set of passes -- nothing else. Andrzej
 // asked "what should I fly" twice in one afternoon, and both answers were a
@@ -495,10 +495,20 @@ const PASS_IDS = ['nadir', 'oblique', 'orbit', 'transect', 'surround', 'establis
 // The establishing ring is in `map` because it is the best value in the list:
 // 17 waypoints took walls from 13% to 49%, being the one pass that sees the
 // whole site in every frame and ties it together.
+//
+// The context ring is off in all three, and named in all three because
+// `presetNow` compares every id in PASS_IDS -- leave it out and nothing ever
+// matches a preset again. It is off for the same reason the cross passes are:
+// it points AWAY from the subject, so nothing it buys shows up in the coverage
+// numbers that justify the three lines below. And it is not free: on a separate
+// run over a 95 x 65 m box of 21 m corner taps, turning it on took auto-fit
+// from 38 m to 51 m -- a 34% worse GSD over the whole capture -- for 0 points
+// of good% and 0 of walls%. What it buys is a horizon, and a horizon is a
+// site-scale want, not a building one. It stays a checkbox in Advanced.
 const PRESETS = {
-  ortho: { nadir: true, oblique: false, orbit: false, transect: false, surround: false, establish: false },
-  building: { nadir: true, oblique: false, orbit: true, transect: false, surround: false, establish: false },
-  map: { nadir: true, oblique: true, orbit: true, transect: false, surround: true, establish: true },
+  ortho: { nadir: true, oblique: false, orbit: false, transect: false, surround: false, establish: false, context: false },
+  building: { nadir: true, oblique: false, orbit: true, transect: false, surround: false, establish: false, context: false },
+  map: { nadir: true, oblique: true, orbit: true, transect: false, surround: true, establish: true, context: false },
 };
 
 // Which preset the checkboxes currently spell, or 'custom'. The picker reads
@@ -1035,6 +1045,7 @@ function autoFit() {
   // ring on the first settle after the view opened, which made "start simple"
   // last about a second.
   if (!m.params.surround) $('surround').checked = false;
+  if (!m.params.context) $('context').checked = false;
   $('photoMode').value = m.params.photoMode;
   computePlan();
 }
@@ -2214,6 +2225,7 @@ applyUiValues({
   // as its DEFAULTS, because that is the library's answer to "plan me a
   // reconstruction"; this is the app's answer to "I just opened it".
   nadir: true, orbit: true, oblique: false, surround: false, transect: false, establish: false,
+  context: false,
 });
 try {
   const c = localStorage.getItem(CLEARANCE_KEY);

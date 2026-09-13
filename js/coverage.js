@@ -11,6 +11,21 @@ import { insideRing, rayClipsSolid } from './prism.js';
 // sufficient: a surface can be well covered and still reconstruct badly if it
 // is textureless or moving. Treat a good score as "not obviously starved",
 // not as "this will look great".
+//
+// `withLowAngle` is here because a 785-image capture over 5.5 ha rendered its
+// trees far worse than its photographs looked, and none of the numbers anyone
+// logs said why: exposure was clean, the nadir grid was the sharpest mission of
+// the nine, and registered count and track length were both fine. What was
+// wrong was that 31% of the ground had ZERO views from below 40 deg elevation.
+// A tree is a vertical object photographed only from above, so its sides had no
+// observations and the trainer left them unconstrained. The complement --
+// `withDownAngle` -- was already here; this is the other half of the same
+// question, and a surface needs both.
+//
+// Note what `maxIncidenceDeg` does to it on flat ground: a view of level ground
+// from under ~15 deg elevation is rejected as grazing before it is counted, so
+// for ground samples the low band is effectively 15-40 deg. On a wall the whole
+// band counts.
 
 const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
 const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
@@ -20,7 +35,11 @@ const scale = (a, s) => ({ x: a.x * s, y: a.y * s, z: a.z * s });
 export const SCORE_DEFAULTS = {
   minViews: 3,          // guidance: every surface in at least three frames
   minSpreadDeg: 15,     // below this the views share a viewpoint -- no parallax
-  downAngleDeg: 40,     // a view counts as "from above" past this elevation
+  // One angle, two questions. Past this elevation a view counts as "from
+  // above"; below it, as "from the side" -- and a surface wants both. There is
+  // deliberately no second threshold: the low-angle metric is this one's
+  // complement, and two knobs for one boundary is two things to keep in sync.
+  downAngleDeg: 40,
   maxIncidenceDeg: 75,  // grazing views carry almost no surface detail
   minRange: 1,
   maxRange: 250,
@@ -186,6 +205,7 @@ export function scoreCoverage(mission, opts = {}) {
   for (const s of samples) {
     const dirs = [];
     let down = false;
+    let low = false;
     let bestInc = 0;
     const passes = new Set();
 
@@ -210,6 +230,7 @@ export function scoreCoverage(mission, opts = {}) {
       passes.add(c.pass);
       if (cosInc > bestInc) bestInc = cosInc;
       if (dir.z > sinDown) down = true;
+      else low = true;
     }
 
     // Widest angle between any two views: the triangulation baseline.
@@ -233,6 +254,7 @@ export function scoreCoverage(mission, opts = {}) {
       views: dirs.length,
       spreadDeg,
       down,
+      low,
       grade,
       incidenceDeg: (Math.acos(Math.min(1, bestInc)) * 180) / Math.PI,
       passes: [...passes],
@@ -250,6 +272,7 @@ export function scoreCoverage(mission, opts = {}) {
       good: (100 * set.filter((r) => r.grade === 'good').length) / set.length,
       unseen: (100 * set.filter((r) => r.grade === 'unseen').length) / set.length,
       down: (100 * set.filter((r) => r.down).length) / set.length,
+      low: (100 * set.filter((r) => r.low).length) / set.length,
       meanViews: set.reduce((a, r) => a + r.views, 0) / set.length,
     };
   }
@@ -266,6 +289,7 @@ export function scoreCoverage(mission, opts = {}) {
       thin: pct((r) => r.grade === 'thin'),
       unseen: pct((r) => r.grade === 'unseen'),
       withDownAngle: pct((r) => r.down),
+      withLowAngle: pct((r) => r.low),
       meanViews: results.reduce((a, r) => a + r.views, 0) / n,
       meanSpread: results.reduce((a, r) => a + r.spreadDeg, 0) / n,
       byKind,

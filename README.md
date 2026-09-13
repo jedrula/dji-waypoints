@@ -34,6 +34,7 @@ plain nadir mapping grid does not give you. The proposal is four passes:
 | Oblique cross-grid | −45° | lines run perpendicular to the nadir grid, so the two together cover four azimuths |
 | Perimeter orbit | aims at subject | rings form a dome around the site; catches facades and edges the grids miss |
 | Surround ring | faces **outward** | the same ring flown backwards to the subject: the horizon, and the landscape the site sits in |
+| Context ring | faces **outward**, tight | a small circle in the middle at the ceiling: 360° of skyline for two and a half minutes of flying |
 | Cross passes | side-on | lines flown *through* the site, camera 90° off travel — the only pass that sees into gaps |
 
 Published capture guidance the pass set follows: every visible surface should
@@ -66,6 +67,45 @@ It costs a fixed number of stations — a full 360° whatever the box is — but
 ring itself is as long as the orbit's, which on a large site is a quarter of a
 battery spent on something other than the subject. Auto-fit drops it before it
 drops anything else, and says so.
+
+### Why the context ring exists, and what it is not
+
+The surround ring laps the whole site. The context ring is the opposite shape
+for the same job: a **20 m circle in the middle**, at the plan's ceiling, camera
+facing out. On this lens at 80% front overlap: 26 stations, 52 frames, 120 m of
+flying, two and a half minutes.
+
+It does **not** buy distant geometry, and the arithmetic is not close. The
+photogrammetric floor for reliable depth is a base-to-height ratio around
+**0.35** — to triangulate something *D* metres away the two cameras that see it
+want to be about 0.35 *D* apart. So this ring's 40 m of diameter is real depth
+out to **114 m** and nothing beyond, where the whole 5.5 ha site corner to
+corner reaches **671 m**, and a city skyline at 2–5 km sits at 0.05–0.11. That
+far field lands as a backdrop at some plausible radius. The right response is to
+want it: a backdrop is what makes the result read as a place rather than an
+object in a void.
+
+What it does buy is 360° of horizon at consistent exposure, the mid-distance
+annulus the grids stop short of, and a very strong internal view graph —
+consecutive outward frames overlap hugely and match trivially.
+
+**Every station takes two frames, and the second one is the point.** The horizon
+frame's lower edge lands on the ground at `0.76 × altitude` from the aircraft,
+so from the middle of a *small* site that frame contains no ground the rest of
+the plan has ever photographed, and the ring would reconstruct as a disconnected
+component. Rather than make the radius or the altitude answer for that, the
+second frame is tilted steeply enough to see in **under the ring itself** — its
+near edge is inside the nadir grid and its far edge overlaps the horizon frame,
+from the same optical centre. On a low ring the horizon frame already reaches in
+and the second frame is not taken.
+
+Rotating about the optical centre adds no parallax, and that is not what it is
+for. It costs a gimbal move and a shutter, not a stop.
+
+Auto-fit keeps this ring and pays for it in **altitude**: on a 200 x 150 m site
+it climbs from 93 m to 120 m rather than give it up, and it is the last thing
+dropped when nothing else will fit. The full planning argument, with the
+measurements behind it, is in `docs/capture-planning-large-area.md`.
 
 ### Finding yourself on the map
 

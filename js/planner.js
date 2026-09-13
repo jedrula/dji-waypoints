@@ -12,6 +12,8 @@ import { localPrisms, localOutline, ringWithin } from './prism.js';
 //                           and the sky-facing sides the grids miss
 //   4. surround ring      - the same ring flown with the camera pointing OUT,
 //                           so the capture has a horizon and a world around it
+//   5. context ring       - a TIGHT outward circle in the middle at the ceiling:
+//                           360 degrees of skyline for two and a half minutes
 // Gaussian splatting wants view diversity per surface point far more than it
 // wants a perfect nadir block, which is why the oblique pass is on by default.
 
@@ -52,6 +54,14 @@ export const DEFAULTS = {
   establish: true,
   surround: true,        // outward-facing ring: the landscape, not the subject
   surroundRings: 1,      // >1 adds vertical parallax on whatever stands nearby
+  // A tight outward circle in the MIDDLE, at the ceiling: the horizon and the
+  // city the site sits in. On this lens at 80% front overlap that is 26
+  // stations, 52 frames and 120 m of flying -- two and a half minutes, the
+  // cheapest pass here -- but not free when the battery binds: on a 200 x 150 m
+  // site auto-fit keeps it and pays 93 m -> 120 m of altitude for it, a 29%
+  // worse GSD across the whole capture. That is the deliberate ordering, not an
+  // oversight; the ladder gives it up only when nothing else will fit.
+  context: true,
   transect: false,       // crossing lines THROUGH the site, camera side-on
   // Cross passes default to ONE height. Multi-level was built and measured:
   // on its own it helps (45 -> 54% coverage over three levels), but alongside a
@@ -626,27 +636,38 @@ function establishPass(g) {
   return { pts, r, alt, n, frameW, diag, covers: frameW >= diag };
 }
 
+// How to go round facing OUT. Two passes do it -- the surround ring at the
+// perimeter and the context ring in the middle -- and they have to agree about
+// where the horizon is, or their frames do not stitch to each other.
+//
+// Facing outward, a frame covers an ANGLE rather than a patch of ground, so the
+// spacing that matters is the yaw step between stations and nothing about the
+// range. Bounded either side: below 12 stations consecutive frames stop
+// overlapping enough to match, above 36 they are near-duplicates costing
+// waypoints the subject passes spend better.
+//
+// The tilt puts the top of the frame just above the horizon: everything below
+// it is landscape, and the horizon line -- the strongest feature anywhere out
+// here -- stays in shot. It also keeps the sky OUT, which is not decoration:
+// 3DGS reliably spends its largest gaussians on a big untextured region, and
+// those are the floaters. This is a camera angle, not a geometry problem: the
+// horizon is at eye level from 5 m and from 100 m alike, so unlike every other
+// pitch in this file it does not depend on the altitude. What it does depend on
+// is the lens, and a wider one would tilt further down.
+const SKY_MARGIN = 4;
+
+function outwardRing(cam, frontOverlap) {
+  const stepDeg = ((fov(cam).h * 180) / Math.PI) * (1 - frontOverlap);
+  const n = Math.max(12, Math.min(36, Math.ceil(360 / Math.max(2, stepDeg))));
+  const pitch = Math.round(Math.max(cam.minGimbalPitch, Math.min(cam.maxGimbalPitch,
+    -((fov(cam).v * 90) / Math.PI - SKY_MARGIN))) * 10) / 10;
+  return { n, pitch };
+}
+
 function surroundPass(g) {
   const { halfX, halfY, pad, f, alt, rings, cam, frontOverlap } = g;
   const r = Math.max(3, (g.reach ?? Math.hypot(halfX, halfY)) + pad);
-
-  // Facing outward, a frame covers an ANGLE rather than a patch of ground, so
-  // the spacing that matters is the yaw step between stations and nothing about
-  // the range. Bounded either side: below 12 stations consecutive frames stop
-  // overlapping enough to match, above 36 they are near-duplicates costing
-  // waypoints the subject passes spend better.
-  const stepDeg = ((fov(cam).h * 180) / Math.PI) * (1 - frontOverlap);
-  const n = Math.max(12, Math.min(36, Math.ceil(360 / Math.max(2, stepDeg))));
-
-  // Tilt so the top of the frame sits just above the horizon: everything below
-  // it is landscape, and the horizon line -- the strongest feature anywhere out
-  // here -- stays in shot. This is a camera angle, not a geometry problem: the
-  // horizon is at eye level from 5 m and from 100 m alike, so unlike every
-  // other pitch in this file it does not depend on the altitude. What it does
-  // depend on is the lens, and a wider one would tilt further down.
-  const SKY_MARGIN = 4;
-  const pitch = Math.round(Math.max(cam.minGimbalPitch, Math.min(cam.maxGimbalPitch,
-    -((fov(cam).v * 90) / Math.PI - SKY_MARGIN))) * 10) / 10;
+  const { n, pitch } = outwardRing(cam, frontOverlap);
 
   // Extra rings sit BELOW the set altitude, same spread as the orbit. Height
   // buys much less here than it does on the subject -- the far field looks the
@@ -679,6 +700,82 @@ function surroundPass(g) {
     }
   }
   return { pts, n, r, pitch, heights };
+}
+
+// The context ring: a TIGHT circle at the plan's ceiling, in the middle of the
+// site, camera facing out, all the way round.
+//
+// Every other pass photographs the middle of the box, so a splat trained on
+// them alone is a subject floating in a void -- fly a camera through it and
+// there is no horizon, nothing at any distance, and no sense of where you are.
+// This is the only pass that answers "what is this place next to".
+//
+// Be clear about what it is NOT. It does not buy distant geometry, and the
+// arithmetic is not close. The photogrammetric floor for reliable depth is a
+// base-to-height ratio around 0.35 -- to triangulate something D metres away
+// the two cameras that see it want to be about 0.35 D apart -- so this ring's
+// 40 m of diameter is real depth out to 114 m and nothing beyond. A city
+// skyline at 2-5 km sits at B/H 0.05-0.11 and lands as a backdrop at some
+// plausible radius. The right response to that is to want it, not to fight it:
+// a backdrop is what makes the result feel like a place.
+//
+// What it does buy is 360 degrees of horizon at consistent exposure for two
+// minutes of flying, the mid-distance annulus the grids stop short of, and a
+// very strong internal view graph -- consecutive outward frames overlap hugely
+// and match trivially, which is the opposite of the failure mode that killed a
+// ground-level pass on a 5.5 ha capture (22% registered; see
+// docs/capture-planning-large-area.md).
+//
+// The wide baseline on anything genuinely distant still has to come from the
+// SURROUND ring at the perimeter and from the grids, which see the same far
+// field from opposite ends of the site. Fly both. This ring on its own is a
+// panorama, and a panorama will float.
+const CONTEXT_RADIUS = 20;
+
+function contextPass(g) {
+  const { f, alt, cam, frontOverlap } = g;
+  const r = CONTEXT_RADIUS;
+  const { n, pitch } = outwardRing(cam, frontOverlap);
+  const view = fov(cam);
+  const half = (view.v * 90) / Math.PI;          // half the vertical FOV, degrees
+
+  // The second frame at every station, and the reason this pass joins the rest
+  // of the capture instead of sitting beside it as a disconnected component.
+  //
+  // The horizon frame's lower edge lands on the ground at 1/tan(v - SKY_MARGIN)
+  // times the altitude -- 0.76 x altitude on this lens -- so from a ring in the
+  // middle of a SMALL site the horizon frame contains no ground the rest of the
+  // plan has ever photographed. Rather than make the radius or the altitude
+  // answer for that, take one more frame steep enough to see in under the ring
+  // itself: then its near edge is inside the nadir grid and its far edge
+  // overlaps the horizon frame, from the same optical centre, always.
+  //
+  // Rotating about the optical centre adds no parallax -- that is not what this
+  // is for. It costs a gimbal move and a shutter, not a stop.
+  const tieIn = Math.round(Math.max(cam.minGimbalPitch, Math.min(cam.maxGimbalPitch,
+    -((Math.atan2(alt, r) * 180) / Math.PI - half))) * 10) / 10;
+
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const angDeg = (360 * i) / n;
+    const ang = (angDeg * Math.PI) / 180;
+    pts.push({
+      ...f.toLatLon(r * Math.sin(ang), r * Math.cos(ang)),
+      alt,
+      pitch,
+      // Two specific frames, not a fan centred on one pitch, so they are set
+      // here rather than left to fanPitches.
+      shots: tieIn < pitch - 1 ? [tieIn, pitch] : [pitch],
+      // No POI to aim at -- towardPOI only ever points inward -- so the outward
+      // azimuth is written as an explicit compass yaw, the same way the
+      // surround ring and the cross passes hold their cameras.
+      heading: { mode: 'smoothTransition', angle: ((angDeg + 540) % 360) - 180 },
+      photo: true,
+      pass: 'context',
+      lineStart: i === 0,
+    });
+  }
+  return { pts, n, r, pitch, tieIn };
 }
 
 // Lines flown THROUGH the site with the camera side-on. An orbit only ever
@@ -975,6 +1072,17 @@ export function planMission(site, opts, cam) {
     });
   }
 
+  if (p.context) {
+    const r = contextPass({ f, alt: p.altitude, cam, frontOverlap: p.frontOverlap });
+    add(r.pts);
+    passes.push({
+      name: `Context ring ${r.pitch.toFixed(0)}°`,
+      count: r.pts.length,
+      detail: `360° in ${r.n}, r = ${r.r.toFixed(0)} m`
+        + (r.pts[0].shots.length > 1 ? ` · tie-in frame at ${r.tieIn.toFixed(0)}°` : ''),
+    });
+  }
+
   // The establishing ring, but only where the plan does not already satisfy the
   // rule by accident. Round a tall thing the detail rings stand well back and
   // the whole site is in every frame already; over a wide flat one nothing ever
@@ -987,7 +1095,7 @@ export function planMission(site, opts, cam) {
     const aimZ = (p.subjectHeight ?? 0) / 2;
     let widest = 0;
     for (const w of waypoints) {
-      if (!w.photo || w.pass === 'surround') continue;
+      if (!w.photo || w.pass === 'surround' || w.pass === 'context') continue;
       const l = f.toLocal(w.lat, w.lon);
       const range = Math.hypot(l.x, l.y, w.alt - aimZ);
       const wdt = 2 * range * Math.tan(view.h / 2);
@@ -1052,6 +1160,14 @@ export function planMission(site, opts, cam) {
   const shotsPerStop = p.photoMode === 'interval' ? 1 : Math.max(1, p.shotsPerStop);
   waypoints.forEach((w) => {
     w.speed = w.pass === 'transit' ? p.approachSpeed : p.speed;
+    // The context ring picks its own two frames -- the horizon and the tie-in
+    // are a specific pair, not a fan centred on one pitch -- so leave them
+    // alone. A distance trigger can only fire one frame, so interval mode
+    // keeps the horizon and loses the tie-in.
+    if (w.shots) {
+      if (p.photoMode === 'interval') w.shots = [w.pitch];
+      return;
+    }
     w.shots = fanPitches(w.pitch, w.pass === 'transit' ? 1 : shotsPerStop, p.shotSpread, cam);
   });
 
@@ -1062,7 +1178,8 @@ export function planMission(site, opts, cam) {
   let photos = waypoints.reduce((n, w) => n + (w.photo === false ? 0 : w.shots.length), 0);
   if (p.photoMode === 'interval') {
     exported = waypoints.filter((w, i) => {
-      if (w.pass === 'orbit' || w.pass === 'surround' || w.pass === 'transit') return true;
+      if (w.pass === 'orbit' || w.pass === 'surround' || w.pass === 'context'
+          || w.pass === 'transit') return true;
       return w.lineStart || i === waypoints.length - 1 || waypoints[i + 1]?.lineStart;
     });
   }
@@ -1233,9 +1350,10 @@ export function proposePlan(site, base, cam, budget = {}) {
   const step = hasHeight ? 1 : 5;
 
   // Lowest altitude (best GSD) that fits, for one shutter mode and ring count.
-  const lowestFit = (photoMode, orbitRings, surround, establish = true) => {
+  const lowestFit = (photoMode, orbitRings, surround, establish = true, context = true) => {
     for (let alt = floorAlt; alt <= 120; alt += step) {
-      const m = planMission(site, { ...base, altitude: alt, photoMode, orbitRings, surround, establish }, cam);
+      const m = planMission(site,
+        { ...base, altitude: alt, photoMode, orbitRings, surround, establish, context }, cam);
       if (fits(m)) return m;
     }
     return null;
@@ -1244,9 +1362,9 @@ export function proposePlan(site, base, cam, budget = {}) {
   // Waypoint-per-photo is the only shutter mode every DJI Fly build is known to
   // honour, so exhaust it before considering the distance trigger -- a worse
   // GSD that definitely flies beats a better one that might not.
-  const pick = (photoMode, surround, establish = true) => {
+  const pick = (photoMode, surround, establish = true, context = true) => {
     const options = ringChoices
-      .map((r) => ({ rings: r, mission: lowestFit(photoMode, r, surround, establish) }))
+      .map((r) => ({ rings: r, mission: lowestFit(photoMode, r, surround, establish, context) }))
       .filter((o) => o.mission);
     if (!options.length) return null;
     // Rings cost waypoints, which pushes altitude up. Never trade a lot of
@@ -1272,6 +1390,7 @@ export function proposePlan(site, base, cam, budget = {}) {
   // quarter of the battery, and none of it spent on the subject.
   const wantSurround = base.surround ?? DEFAULTS.surround;
   const wantEstablish = base.establish ?? DEFAULTS.establish;
+  const wantContext = base.context ?? DEFAULTS.context;
 
   // What gets given up, and in what order, before the shutter does.
   //
@@ -1293,10 +1412,20 @@ export function proposePlan(site, base, cam, budget = {}) {
     ...(wantSurround ? [{ surround: false, establish: wantEstablish, lost: 'surround' }] : []),
     ...(wantEstablish ? [{ surround: wantSurround, establish: false, lost: 'establish' }] : []),
     ...(wantSurround && wantEstablish ? [{ surround: false, establish: false, lost: 'both' }] : []),
+    // Last, and only once the other two are already gone. The context ring is
+    // the cheapest pass in the plan -- 26 stations, 120 m of flying -- so it
+    // is never the right first economy, but it is not free either: on a
+    // 200 x 150 m site its two and a half minutes cost 27 m of altitude (93 ->
+    // 120 m, measured, and a 29% worse GSD everywhere). Dropping it is
+    // the last thing tried before the shutter mode changes, because a capture
+    // with no horizon is still a capture and one flown on an unverified trigger
+    // may be nothing at all.
+    ...(wantContext && wantSurround && wantEstablish
+      ? [{ surround: false, establish: false, context: false, lost: 'all three' }] : []),
   ];
   let chosen = null;
   for (const rung of ladder) {
-    const m = pick('waypoint', rung.surround, rung.establish);
+    const m = pick('waypoint', rung.surround, rung.establish, rung.context ?? wantContext);
     if (m) { chosen = { mission: m, lost: rung.lost }; break; }
   }
   const primary = chosen?.mission ?? null;
@@ -1305,8 +1434,9 @@ export function proposePlan(site, base, cam, budget = {}) {
     surround: 'One battery does not cover the surround ring as well, so it is off — the subject passes come first. Turn it back on and accept a longer flight, or a split.',
     establish: 'One battery does not stretch to the establishing orbit — over a site this size it is a kilometre of flying — so it is off. Nothing in the plan now holds the whole site in one frame, which is the usual reason a reconstruction will not join up across a big site. Turn it back on and accept a longer flight, or a split.',
     both: 'One battery does not cover the surround ring or the establishing orbit, so both are off and the passes that photograph the subject keep the whole battery. Nothing now holds the whole site in one frame. Turn them back on and accept a longer flight, or a split.',
+    'all three': 'One battery covers only the passes that photograph the subject: the surround ring, the establishing orbit and the context ring are all off. Nothing holds the whole site in one frame and nothing photographs the horizon, so the result will be a subject in a void. This site wants two flights.',
   };
-  const fallback = pick('interval', wantSurround, wantEstablish);
+  const fallback = pick('interval', wantSurround, wantEstablish, wantContext);
 
   if (primary) {
     const better = fallback && fallback.params.altitude < primary.params.altitude - 5;

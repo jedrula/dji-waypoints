@@ -177,7 +177,8 @@ export function createView3D(canvas) {
 
     // What actually flies at each height, so the scale can name it rather than
     // just marking a number.
-    const NAME = { nadir: 'nadir', oblique: 'oblique', orbit: 'orbit', transect: 'cross', surround: 'surround' };
+    const NAME = { nadir: 'nadir', oblique: 'oblique', orbit: 'orbit', transect: 'cross',
+                   surround: 'surround', context: 'context' };
     // Every height on screen, the capture's included: with seven missions
     // switched on this is the list that says 8, 12, 16, 36 and 60 m, which is
     // the whole reason for looking at a capture in three dimensions.

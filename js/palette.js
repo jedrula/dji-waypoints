@@ -15,6 +15,7 @@ export const PASS_COLOR = {
   orbit: '#5ad19a',
   transect: '#c98bff',
   surround: '#ff6fb5',
+  context: '#ff9f5a',
   establish: '#7ee0a0',
 };
 

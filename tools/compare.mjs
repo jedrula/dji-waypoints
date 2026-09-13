@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { CAMERAS } from '../js/camera.js';
-import { planMission } from '../js/planner.js';
+import { planMission, pointsFromRect } from '../js/planner.js';
 import { scoreCoverage } from '../js/coverage.js';
 
 // Score capture configurations against each other geometrically. Answers
@@ -11,13 +11,21 @@ import { scoreCoverage } from '../js/coverage.js';
 const cam = CAMERAS.mini5pro;
 const [W = 25, D = 17, H = 3, ALT = 7] = process.argv.slice(2).map(Number);
 
-const rect = (() => {
+// The planner takes what you TAPPED, not a rectangle, and a rectangle is four
+// taps -- one at each corner, since a box's hull is its own corners. The taps
+// carry the height: `subjectsOf` only treats a tap as a thing if the tap says
+// it is tall, so corners at height 0 describe a patch of flat ground, the
+// scorer builds no faces for it, and every configuration below would score
+// identically on nothing but grass.
+const site = (() => {
   const dLat = D / 111132;
   const dLon = W / (111412 * Math.cos((50 * Math.PI) / 180));
-  return { south: 50, north: 50 + dLat, west: 19.93, east: 19.93 + dLon };
+  const rect = { south: 50, north: 50 + dLat, west: 19.93, east: 19.93 + dLon };
+  return { points: pointsFromRect(rect, H) };
 })();
 
-const base = { subjectHeight: H, orbitPad: 0, nadir: false, oblique: false, orbit: true };
+const base = { subjectHeight: H, orbitPad: 0, nadir: false, oblique: false, orbit: true,
+               surround: false, establish: false };
 
 const CONFIGS = [
   ['nadir grid only (high)', { altitude: 40, nadir: true, orbit: false }],
@@ -36,12 +44,12 @@ const CONFIGS = [
 
 console.log(`\nsite ${W} x ${D} m · subject ${H} m tall · orbit altitude ${ALT} m`);
 console.log(`camera ${cam.name}\n`);
-console.log('configuration              wp  photos   good%  unseen%  walls%  down%   views  spread°  per-100wp');
-console.log('─'.repeat(103));
+console.log('configuration              wp  photos   good%  unseen%  walls%  down%   low%   views  spread°  per-100wp');
+console.log('─'.repeat(110));
 
 const rows = [];
 for (const [label, opts] of CONFIGS) {
-  const m = planMission(rect, { ...base, ...opts }, cam);
+  const m = planMission(site, { ...base, ...opts }, cam);
   const r = scoreCoverage(m);
   const s = r.summary;
   const walls = s.byKind.wall?.good ?? 0;
@@ -57,6 +65,7 @@ for (const [label, opts] of CONFIGS) {
     s.unseen.toFixed(0).padStart(8),
     walls.toFixed(0).padStart(7),
     s.withDownAngle.toFixed(0).padStart(6),
+    s.withLowAngle.toFixed(0).padStart(6),
     s.meanViews.toFixed(0).padStart(7),
     s.meanSpread.toFixed(0).padStart(8),
     efficiency.toFixed(2).padStart(10),
@@ -75,6 +84,7 @@ const delta = (a, b) => {
     `${dw >= 0 ? '+' : ''}${dw} wp`.padStart(9),
     `good ${(B.good - A.good) >= 0 ? '+' : ''}${(B.good - A.good).toFixed(1)}`.padStart(13),
     `down ${(B.withDownAngle - A.withDownAngle) >= 0 ? '+' : ''}${(B.withDownAngle - A.withDownAngle).toFixed(1)}`.padStart(13),
+    `low ${(B.withLowAngle - A.withLowAngle) >= 0 ? '+' : ''}${(B.withLowAngle - A.withLowAngle).toFixed(1)}`.padStart(12),
   );
 };
 delta('1 ring', '2 rings');

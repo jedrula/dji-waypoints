@@ -47,7 +47,9 @@ const FIELDS = [
 // share link or a saved plan: it came back off, and the preset picker read the
 // restored plan as Custom because of it. Appended, which is exactly what this
 // comment says to do, and every existing code decodes with it off as before.
-const PASSES = ['nadir', 'oblique', 'orbit', 'transect', 'surround', 'establish'];
+// `context` went on after it for the same reason and in the same way: a code
+// written by any build before this one decodes with the context ring off.
+const PASSES = ['nadir', 'oblique', 'orbit', 'transect', 'surround', 'establish', 'context'];
 
 function b64url(s) {
   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');

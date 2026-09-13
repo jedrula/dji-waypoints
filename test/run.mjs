@@ -126,7 +126,7 @@ ok('line spacing = across-footprint x (1 - side overlap)',
    near(m.stats.sideSpacing, footprint(cam, 40).across * 0.3, 1e-6));
 ok('shot spacing = along-footprint x (1 - front overlap)',
    near(m.stats.fwdSpacing, footprint(cam, 40).along * 0.2, 1e-6));
-ok('five passes present', m.passes.length === 5, JSON.stringify(m.passes.map(p => p.name)));
+ok('six passes present', m.passes.length === 6, JSON.stringify(m.passes.map(p => p.name)));
 // 200 x 150 m and low: no detail ring round anything that small ever holds the
 // whole site in frame, which is the case the capture SOP opens with.
 ok('a wide flat site earns an establishing orbit',
@@ -329,7 +329,7 @@ ok('orbit radius never collapses onto the thing',
    Math.min(...domesOf(tower)[0].map((w) => Math.hypot(
      tower.frame.toLocal(w.lat, w.lon).x, tower.frame.toLocal(w.lat, w.lon).y))) >= 2.9);
 const rings2 = planMission({ points: [{ lat: 50.061, lon: 19.931, height: 12 }] },
-  { altitude: 40, orbitRings: 2, nadir: false, oblique: false, surround: false }, cam);
+  { altitude: 40, orbitRings: 2, nadir: false, oblique: false, surround: false, context: false }, cam);
 ok('2 rings fly at two distinct heights',
    new Set(rings2.waypoints.filter(w => !w.transit).map(w => w.alt)).size === 2);
 
@@ -434,7 +434,7 @@ ok('interval mode keeps the whole orbit ring',
    iv.exported.filter(w => w.pass === 'orbit').length === iv.waypoints.filter(w => w.pass === 'orbit').length);
 ok('export indices are 0..n-1 contiguous',
    iv.exported.every((w, i) => w.exportIndex === i));
-const nadirOnly = planMission(site(rect), { oblique: false, orbit: false, surround: false, establish: false }, cam);
+const nadirOnly = planMission(site(rect), { oblique: false, orbit: false, surround: false, context: false, establish: false }, cam);
 ok('passes can be switched off', nadirOnly.passes.length === 1 && nadirOnly.waypoints.every(w => w.pass === 'nadir'));
 ok('higher altitude -> fewer photos', planMission(site(rect), { altitude: 80 }, cam).stats.photos < m.stats.photos);
 
@@ -473,7 +473,7 @@ for (const [label, opts] of [
   ['a tall thing', { altitude: 60, orbitRings: 1 }],
 ]) {
   const p = planMission(site(houseRect, opts.altitude === 8 ? 3 : 25),
-    { ...opts, nadir: false, oblique: false, surround: false }, cam);
+    { ...opts, nadir: false, oblique: false, surround: false, context: false }, cam);
   const per = p.waypoints.filter(w => w.pass === 'orbit').length;
   ok(`${label}: ${per} frames/ring = ${(360 / per).toFixed(1)}° steps, inside 7.5–15°`,
      per >= 12 && per <= 32, String(per));
@@ -481,7 +481,7 @@ for (const [label, opts] of [
 
 const tr = planMission(site(houseRect), {
   altitude: 5, subjectHeight: 3, transect: true,
-  nadir: false, oblique: false, orbit: false, surround: false, establish: false,
+  nadir: false, oblique: false, orbit: false, surround: false, context: false, establish: false,
 }, cam);
 const tPts = tr.waypoints.filter(w => w.pass === 'transect');
 ok('cross passes are planned', tPts.length > 0);
@@ -538,11 +538,11 @@ console.log('\nsurround ring');
   const hfovDeg = (fov(cam).h * 180) / Math.PI;
   const vfovDeg = (fov(cam).v * 180) / Math.PI;
 
-  const sr = planMission(site(rect), { altitude: 40, nadir: false, oblique: false, orbit: false, establish: false }, cam);
+  const sr = planMission(site(rect), { altitude: 40, nadir: false, oblique: false, orbit: false, context: false, establish: false }, cam);
   const sp = sr.waypoints.filter(w => w.pass === 'surround');
   ok('the surround ring is on by default', sp.length > 0);
   ok('it can be switched off', planMission(site(rect),
-     { altitude: 40, nadir: false, oblique: false, orbit: false, surround: false, establish: false },
+     { altitude: 40, nadir: false, oblique: false, orbit: false, surround: false, context: false, establish: false },
      cam).waypoints.length === 0);
 
   // Facing OUT is the whole point: every camera must look away from the centre.
@@ -569,24 +569,24 @@ console.log('\nsurround ring');
   ok(`the frame's top edge sits just above the horizon (+${topEdge.toFixed(1)}°)`,
      topEdge > 0 && topEdge < 8, `${topEdge.toFixed(1)}`);
   ok('and the pitch does not chase the altitude the way the orbit does',
-     planMission(site(rect), { altitude: 100, nadir: false, oblique: false, orbit: false, establish: false }, cam)
+     planMission(site(rect), { altitude: 100, nadir: false, oblique: false, orbit: false, context: false, establish: false }, cam)
        .waypoints[0].pitch === sp[0].pitch);
 
   // Cost has to be flat: a fixed number of looks, whatever the box is.
   const big = planMission(site({ south: 50.06, north: 50.065, west: 19.93, east: 19.94 }),
-     { altitude: 40, nadir: false, oblique: false, orbit: false, establish: false }, cam);
+     { altitude: 40, nadir: false, oblique: false, orbit: false, context: false, establish: false }, cam);
   ok(`the ring costs the same on a big box as a small one (${sp.length} vs ${big.waypoints.length} wp)`,
      big.waypoints.length === sp.length);
 
   // It is the only pass left that laps the whole site: the orbit is a dome per
   // thing now, so the surround ring stands alone at the footprint's own reach.
-  const both = planMission(site(rect), { altitude: 40, nadir: false, oblique: false, establish: false }, cam);
+  const both = planMission(site(rect), { altitude: 40, nadir: false, oblique: false, context: false, establish: false }, cam);
   const radiusOfPass = (m, pass) => Math.max(...m.waypoints.filter(w => w.pass === pass)
      .map(w => { const l = m.frame.toLocal(w.lat, w.lon); return Math.hypot(l.x, l.y); }));
   ok('the surround ring laps the whole footprint',
      radiusOfPass(both, 'surround') >= both.stats.reachM);
 
-  const two = planMission(site(rect), { altitude: 40, surroundRings: 2, nadir: false, oblique: false, orbit: false, establish: false }, cam);
+  const two = planMission(site(rect), { altitude: 40, surroundRings: 2, nadir: false, oblique: false, orbit: false, context: false, establish: false }, cam);
   ok('2 rings doubles the stations at two distinct heights',
      two.waypoints.length === 2 * sp.length && new Set(two.waypoints.map(w => w.alt)).size === 2);
   ok('the extra ring sits below the set altitude', Math.min(...two.waypoints.map(w => w.alt)) < 40);
@@ -681,10 +681,15 @@ ok('grid cameras follow the leg they are flying', poseM.waypoints.filter((w, i) 
 ok('all yaws are finite', poseM.waypoints.every(w => Number.isFinite(w.yaw)));
 
 console.log('\nshot fan');
-const fan = planMission(site(rect), { altitude: 40, shotsPerStop: 3 }, cam);
+// The context ring sets its own two frames rather than taking a fan centred on
+// one pitch, so it is switched off wherever the fan or the single-shot action
+// encoding is under test. That exemption is the thing being checked, and it is
+// checked in its own block.
+const mSingle = planMission(site(rect), { altitude: 40, speed: 4, context: false }, cam);
+const fan = planMission(site(rect), { altitude: 40, shotsPerStop: 3, context: false }, cam);
 ok('fan mode plans 3 frames per stop', fan.exported.every(w => w.shots.length === 3));
-ok('fan costs no extra waypoints', fan.exported.length === m.exported.length);
-ok('fan triples the photo count', fan.stats.photos === 3 * m.stats.photos);
+ok('fan costs no extra waypoints', fan.exported.length === mSingle.exported.length);
+ok('fan triples the photo count', fan.stats.photos === 3 * mSingle.stats.photos);
 ok('fan angles stay inside gimbal travel',
    fan.exported.every(w => w.shots.every(p => p >= cam.minGimbalPitch && p <= cam.maxGimbalPitch)));
 ok('fan angles are distinct at a nadir stop',
@@ -695,7 +700,7 @@ ok('interval mode ignores the fan',
    planMission(site(rect), { shotsPerStop: 3, photoMode: 'interval' }, cam).exported.every(w => w.shots.length === 1));
 
 console.log('\nKMZ output');
-const bytes = buildKmz(m, 'fly', 1750000000000);
+const bytes = buildKmz(mSingle, 'fly', 1750000000000);
 const dir = mkdtempSync(join(tmpdir(), 'kmz-'));
 const kmzPath = join(dir, 'mission.kmz');
 writeFileSync(kmzPath, bytes);
@@ -740,18 +745,18 @@ print(json.dumps({
 }))
 `);
 const d = JSON.parse(probe);
-ok('uses the DJI Fly namespace + author', waylinesWpml(m, PROFILES.fly).includes('http://www.uav.com/wpmz/1.0.2'));
+ok('uses the DJI Fly namespace + author', waylinesWpml(mSingle, PROFILES.fly).includes('http://www.uav.com/wpmz/1.0.2'));
 ok('droneEnumValue 68 / sub 0', d.drone === '68' && d.sub === '0');
 ok('executeHeightMode relativeToStartPoint', d.heightMode === 'relativeToStartPoint');
 ok('waylineId 0', d.waylineId === '0');
-ok('waypoint count matches plan', d.n === m.exported.length, `${d.n} vs ${m.exported.length}`);
+ok('waypoint count matches plan', d.n === mSingle.exported.length, `${d.n} vs ${mSingle.exported.length}`);
 ok('indices contiguous from 0', d.contiguous);
 ok('every waypoint has height/speed/heading/turn',
    d.all_have_height && d.all_have_speed && d.all_have_heading && d.all_have_turn);
 ok('coordinates are lon,lat pairs', d.coords_ok);
 // Transits between domes are places the aircraft passes through, not stations,
 // so they carry no shutter.
-const shooting = m.exported.filter((w) => w.photo !== false).length;
+const shooting = mSingle.exported.filter((w) => w.photo !== false).length;
 ok('one takePhoto per station', d.photos === shooting, `${d.photos} of ${shooting}`);
 // And a transit is a place the aircraft passes through, not a station. They
 // only exist where a dome sits below the height the aircraft travels at, which
@@ -762,14 +767,15 @@ ok('one takePhoto per station', d.photos === shooting, `${d.photos} of ${shootin
   const two = planMission({ points: [
     { lat: 50.061, lon: 19.931, height: 18 },
     { lat: 50.061, lon: 19.9325, height: 6 },
-  ] }, { altitude: 25, orbitRings: 3, nadir: false, oblique: false, surround: false }, cam);
+  ] }, { altitude: 25, orbitRings: 3, nadir: false, oblique: false, surround: false,
+         context: false }, cam);
   const transits = two.exported.filter((w) => w.transit);
   ok(`a transit carries no shutter (${transits.length} of them)`,
      transits.length > 0 && transits.every((w) => w.photo === false), String(transits.length));
 }
-ok('single-shot mode plans one frame per stop', m.exported.every(w => w.shots.length === 1));
+ok('single-shot mode plans one frame per stop', mSingle.exported.every(w => w.shots.length === 1));
 // The gimbal is commanded once per pitch change, not once per waypoint.
-const pitchChanges = m.exported.reduce((n, w, i) => n + (i === 0 || w.pitch !== m.exported[i - 1].pitch ? 1 : 0), 0);
+const pitchChanges = mSingle.exported.reduce((n, w, i) => n + (i === 0 || w.pitch !== mSingle.exported[i - 1].pitch ? 1 : 0), 0);
 ok(`one gimbalRotate per pitch change (${d.gimbals} for ${pitchChanges} changes)`, d.gimbals === pitchChanges);
 // One per grid pass, plus one per dome ring -- each ring looks at the thing
 // from its own elevation, which is the point of flying more than one.
@@ -844,7 +850,7 @@ const covRect = { south: 50.06, north: 50.06 + 17 / 111132,
 // establishing ring is off here for the same reason the grids are: it would
 // add views to every case and flatten the comparison the tests exist to make.
 const covOf = (o) => scoreCoverage(planMission(site(covRect, 3),
-  { orbitPad: 0, nadir: false, oblique: false, orbit: true, surround: false, establish: false, ...o },
+  { orbitPad: 0, nadir: false, oblique: false, orbit: true, surround: false, context: false, establish: false, ...o },
   cam)).summary;
 
 // The scorer models the site as the cubes you tapped, so these are points now.
@@ -919,6 +925,24 @@ const covWithNadir = covOf({ altitude: 7, orbitRings: 3, transect: true, nadir: 
 ok(`nadir transforms down-angle coverage (${covNoNadir.withDownAngle.toFixed(0)}% → ${covWithNadir.withDownAngle.toFixed(0)}%)`,
    covWithNadir.withDownAngle - covNoNadir.withDownAngle > 25);
 
+// ...and it is the ONLY thing that fixes the down angle. The complement holds
+// too, and it is the measurement that made `withLowAngle` exist: a nadir grid
+// contributes nothing whatever from below 40 deg, so a plan that is only a
+// nadir grid photographs no vertical surface from the side at all. That is why
+// the trees in a 785-image 5.5 ha capture rendered worse than the photographs
+// looked; see docs/capture-planning-large-area.md.
+ok(`nadir buys no low-angle views at all (${(covWithNadir.withLowAngle - covNoNadir.withLowAngle).toFixed(1)} points)`,
+   Math.abs(covWithNadir.withLowAngle - covNoNadir.withLowAngle) < 1);
+const covNadirOnly = covOf({ altitude: 40, orbitRings: 0, orbit: false, nadir: true });
+ok(`a nadir grid alone sees nothing from the side (${covNadirOnly.withLowAngle.toFixed(0)}%)`,
+   covNadirOnly.withLowAngle === 0);
+
+// The two halves are one threshold, so no view can be counted in both and no
+// view of a surface can escape being counted in one.
+const bothOf = covOf({ altitude: 7, orbitRings: 3, transect: true, nadir: true });
+ok('every seen surface is either lit from above or from the side, never neither',
+   bothOf.withDownAngle + bothOf.withLowAngle >= 100 - bothOf.unseen - 0.001);
+
 // The frame fan costs no waypoints, so any gain is free coverage.
 const covFan1 = covOf({ altitude: 7, orbitRings: 3, shotsPerStop: 1 });
 const covFan3 = covOf({ altitude: 7, orbitRings: 3, shotsPerStop: 3 });
@@ -945,7 +969,7 @@ const { zip: rezip } = await import('../js/zip.js');
 
 const good = checkKmz(Buffer.from(bytes));
 ok('our own KMZ passes the validator', good.errors.length === 0, good.errors.slice(0, 3).join('; '));
-ok('validator reads back the right waypoint count', good.info.waypoints === m.exported.length);
+ok('validator reads back the right waypoint count', good.info.waypoints === mSingle.exported.length);
 ok('validator identifies the DJI Fly flavour', good.info.flavour === 'DJI Fly (consumer)');
 ok('validator can read a deflated archive too', (() => {
   // Node writes deflate; the reader must handle method 8, which is what DJI uses.
@@ -989,14 +1013,102 @@ ok('catches something that is not a zip at all',
 
 const sh = shape(Buffer.from(bytes));
 ok('shape fingerprint counts elements per file',
-   sh['wpmz/waylines.wpml'].get('Placemark') === m.exported.length);
+   sh['wpmz/waylines.wpml'].get('Placemark') === mSingle.exported.length);
+
+console.log('\ncontext ring');
+{
+  const { fov } = await import('../js/camera.js');
+  const { bearing } = await import('../js/geo.js');
+  const { proposePlan } = await import('../js/planner.js');
+  const vfovDeg = (fov(cam).v * 180) / Math.PI;
+  const only = { nadir: false, oblique: false, orbit: false, surround: false, establish: false };
+  const cr = planMission(site(rect), { altitude: 100, ...only }, cam);
+  const cp = cr.waypoints.filter((w) => w.pass === 'context');
+  ok('the context ring is on by default', cp.length > 0);
+  ok('it can be switched off',
+     planMission(site(rect), { altitude: 100, ...only, context: false }, cam).waypoints.length === 0);
+
+  // Tight, and tight on purpose: it is a panorama with a little parallax, and
+  // the wide baseline is the surround ring's job. A radius that grew with the
+  // site would make it a second surround ring.
+  const radii = cp.map((w) => { const l = cr.frame.toLocal(w.lat, w.lon); return Math.hypot(l.x, l.y); });
+  ok(`a tight ring whatever the site (r = ${Math.max(...radii).toFixed(0)} m)`,
+     Math.max(...radii) - Math.min(...radii) < 0.5 && Math.max(...radii) < 30);
+  const big = planMission(site({ south: 50.06, north: 50.065, west: 19.93, east: 19.94 }),
+     { altitude: 100, ...only }, cam);
+  ok('a ten-times-larger box costs the same ring',
+     big.waypoints.length === cp.length
+     && Math.abs(Math.hypot(...Object.values(big.frame.toLocal(big.waypoints[0].lat, big.waypoints[0].lon)))
+        - radii[0]) < 0.5);
+
+  // Facing OUT, like the surround ring, and by the same rule -- if the two
+  // disagreed about where the horizon is their frames would not stitch.
+  ok('every context camera looks directly away from the centre',
+     cp.every((w) => Math.abs(((bearing(cr.centre, w) - w.yaw + 540) % 360) - 180) < 1));
+  const sur = planMission(site(rect), { altitude: 100, nadir: false, oblique: false, orbit: false,
+     context: false, establish: false }, cam);
+  ok('and shares the surround ring\'s horizon pitch',
+     cp[0].pitch === sur.waypoints[0].pitch);
+  const topEdge = cp[0].pitch + vfovDeg / 2;
+  ok(`the frame's top edge sits just above the horizon (+${topEdge.toFixed(1)}deg)`,
+     topEdge > 0 && topEdge < 8);
+
+  // The second frame is what joins this pass to the rest of the capture. Its
+  // near edge has to fall INSIDE the ring, or the ring photographs ground
+  // nothing else in the plan has seen and reconstructs as its own component.
+  ok('every station takes two frames', cp.every((w) => w.shots.length === 2));
+  const tieIn = Math.min(...cp[0].shots);
+  const nearEdge = 100 / Math.tan(((-tieIn + vfovDeg / 2) * Math.PI) / 180);
+  ok(`the tie-in frame reaches in under the ring (${nearEdge.toFixed(0)} m vs r = ${radii[0].toFixed(0)} m)`,
+     nearEdge <= radii[0] + 0.5);
+  ok('and its far edge overlaps the horizon frame',
+     -tieIn - vfovDeg / 2 < -cp[0].pitch + vfovDeg / 2);
+
+  // Where the horizon frame already reaches in on its own, the second frame
+  // would be a duplicate, so it is not taken.
+  const low = planMission(site(rect), { altitude: 10, ...only }, cam);
+  ok('a low ring needs no tie-in frame and does not take one',
+     low.waypoints.filter((w) => w.pass === 'context').every((w) => w.shots.length === 1));
+
+  // The pair is not a fan, so it does not answer to the fan's knob.
+  const noFan = planMission(site(rect), { altitude: 100, ...only, shotsPerStop: 1 }, cam);
+  const bigFan = planMission(site(rect), { altitude: 100, ...only, shotsPerStop: 3 }, cam);
+  ok('the pair ignores shotsPerStop in both directions',
+     noFan.waypoints[0].shots.length === 2 && bigFan.waypoints[0].shots.length === 2);
+
+  // A distance trigger can only fire one frame, so interval mode keeps the
+  // horizon and loses the tie-in -- but it keeps every station, because a
+  // circle cut down to its endpoints is a straight line.
+  const ivc = planMission(site(rect), { altitude: 100, ...only, photoMode: 'interval' }, cam);
+  ok('interval mode keeps the whole ring and one frame per station',
+     ivc.exported.length === cp.length && ivc.exported.every((w) => w.shots.length === 1));
+
+  ok('context KMZ passes the validator',
+     checkKmz(Buffer.from(buildKmz(cr, 'fly', 1750000000000))).errors.length === 0);
+
+  // It points away from the site, so it can never be the reason the plan holds
+  // the whole site in one frame -- that is what the establishing ring is for.
+  const wide = { south: 50.06, north: 50.0614, west: 19.93, east: 19.9328 };
+  const named = (mm) => mm.passes.map((q) => q.name).join('|');
+  ok('it never talks the establishing orbit out of existing',
+     named(planMission(site(wide), { altitude: 40, orbit: false }, cam)).includes('Establishing'));
+
+  // Auto-fit keeps it and pays in altitude, rather than dropping it to fly
+  // lower. It is the cheapest pass in the plan, so it is the LAST economy --
+  // and what it costs when the battery binds is worth writing down.
+  const kept = proposePlan(site(wide), { ...DEFAULTS }, cam);
+  const dropped = proposePlan(site(wide), { ...DEFAULTS, context: false }, cam);
+  ok(`auto-fit keeps the ring and pays for it in altitude (${dropped.mission.params.altitude} m -> ${kept.mission.params.altitude} m)`,
+     kept.mission.params.context === true
+     && kept.mission.params.altitude > dropped.mission.params.altitude);
+}
 
 console.log('\nplan codes');
 {
   const ui = {
     altitude: 52, frontOverlap: 80, sideOverlap: 70, speed: 4, orbitPad: 5, subjectHeight: 3,
     photoMode: 'waypoint', shotsPerStop: 3, orbitRings: 3, profile: 'fly',
-    nadir: true, oblique: true, orbit: true, transect: false, surround: true,
+    nadir: true, oblique: true, orbit: true, transect: false, surround: true, context: true,
     surroundRings: 1,
   };
   const taps = [
@@ -1038,6 +1150,10 @@ console.log('\nplan codes');
   })).toString('base64url'));
   ok('a code from before the surround ring restores it switched off',
      legacy.ui.orbit === true && legacy.ui.surround === false);
+  // Same property, one pass later: append-only means a code written yesterday
+  // decodes with today's pass off, which is the plan that was saved rather than
+  // today's defaults applied to yesterday's box.
+  ok('and one from before the context ring does the same', legacy.ui.context === false);
 
   // Every plan saved before points existed is a rectangle, and a rectangle is
   // its four corners -- so an old link has to open as the footprint it always
@@ -1083,10 +1199,10 @@ console.log('\nreading a mission back');
   ok('and its drone enum', back.meta.drone === '68/0');
 
   const ours = await readKmz(Buffer.from(bytes));
-  ok('reads our own stored KMZ', ours.meta.waypoints === m.exported.length);
+  ok('reads our own stored KMZ', ours.meta.waypoints === mSingle.exported.length);
   ok('round-trips the first waypoint position',
-     near(ours.waypoints[0].lat, m.exported[0].lat, 1e-6) && near(ours.waypoints[0].lon, m.exported[0].lon, 1e-6));
-  ok('round-trips altitude', near(ours.waypoints[0].alt, m.exported[0].alt ?? m.params.altitude, 0.05));
+     near(ours.waypoints[0].lat, mSingle.exported[0].lat, 1e-6) && near(ours.waypoints[0].lon, mSingle.exported[0].lon, 1e-6));
+  ok('round-trips altitude', near(ours.waypoints[0].alt, mSingle.exported[0].alt ?? mSingle.params.altitude, 0.05));
   // Gimbal pitch is written once per pass and held; reading has to carry it
   // forward or most waypoints look like they point at the horizon.
   ok('carries a held gimbal pitch forward', ours.waypoints.every((w) => Number.isFinite(w.pitch)));
@@ -1925,7 +2041,7 @@ console.log('\ncontroller bridge');
   const slots = listSlots(t);
   ok('lists every mission folder', slots.length === 2);
   ok('reads the waypoint count out of an installed mission',
-     slots.find((x) => x.id === full)?.waypoints === m.exported.length);
+     slots.find((x) => x.id === full)?.waypoints === mSingle.exported.length);
   ok('marks a folder with no kmz as unusable', slots.find((x) => x.id === bare)?.exists === false);
 
   const smaller = buildKmz(planMission(site(rect), { altitude: 90, speed: 4 }, cam), 'fly');

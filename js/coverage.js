@@ -164,6 +164,52 @@ const rayHitsGroup = (p, dir, maxT, g) => raySegmentHitsBox(p, dir, maxT, g)
 // block the view of everything behind them, and they are never sampled: a tree
 // next to the house is not a surface you failed to photograph, and scoring it
 // would only make a good plan look bad.
+// Failures that no amount of extra photos fixes, from measured reconstructions rather than
+// from published guidance. Each of these produced a model whose cameras could not be fitted to
+// the true poses by any similarity transform -- the scene came back WARPED, not blurry, while
+// registration sat near 100% and PSNR looked unremarkable.
+//
+//   nadir-only        capture_nadir_only  197.9 m sim3 error, 8/66 inliers,  PSNR 28.7
+//                     div_nadir64           9.7 m sim3 error, 6/64 inliers,  PSNR 19.3
+//   too few azimuths  az4p30 (4 azimuths at -30 deg) returned sim3 scale 0.0 -- degenerate --
+//                     while its -45 deg twin reconstructed fine. Pitch and azimuth count
+//                     INTERACT, so neither alone is a safe rule; the failures cluster where
+//                     both are low.
+//
+// Best cell measured so far: ~8 positions x 8 azimuths at -30 deg (57.5% retained detail at 64
+// frames). Fewer positions stops paying -- 4 positions x 16 azimuths fell to 49.0%.
+function captureRisk(results, cams) {
+  const n = results.length || 1;
+  const low = results.filter((r) => r.low).length / n;
+  // Count distinct headings from the forward vector orientation() actually returns (`forward`,
+  // not `fwd` -- reading the wrong key silently collapsed every camera into one bucket and fired
+  // this warning on the BEST measured plan). Bucketed at 45 deg: two headings 3 deg apart are
+  // not two looks at anything.
+  const azimuths = new Set(cams
+    .map((c) => c.forward ?? c.fwd)
+    .filter(Boolean)
+    .map((f) => Math.round((((Math.atan2(f.x, f.y) * 180) / Math.PI + 360) % 360) / 45) % 8)).size;
+  const out = [];
+  if (low === 0) {
+    out.push({ level: 'broken', code: 'no-low-angle',
+      msg: 'No view of any surface from below 40 deg. Nadir-only plans have reconstructed '
+         + 'WARPED twice in simulation (197.9 m and 9.7 m pose error) while registering ~100%. '
+         + 'Add an oblique or shallow pass.' });
+  } else if (low < 0.3) {
+    out.push({ level: 'warn', code: 'thin-low-angle',
+      msg: `Only ${Math.round(low * 100)}% of surfaces have a view below 40 deg. Low-angle `
+         + 'coverage is the strongest measured predictor of reconstruction quality (r = 0.979).' });
+  }
+  if (azimuths <= 4) {
+    out.push({ level: 'warn', code: 'few-azimuths',
+      msg: `Only ${azimuths} distinct azimuth${azimuths === 1 ? '' : 's'} flown. Four azimuths at `
+         + 'a shallow pitch produced the worst model measured (degenerate geometry). Eight is '
+         + 'the best value tested.' });
+  }
+  return out;
+}
+
+
 export function scoreCoverage(mission, opts = {}) {
   const cfg = { ...SCORE_DEFAULTS, ...opts };
   const halfX = mission.sizeX / 2;
@@ -293,6 +339,15 @@ export function scoreCoverage(mission, opts = {}) {
       meanViews: results.reduce((a, r) => a + r.views, 0) / n,
       meanSpread: results.reduce((a, r) => a + r.spreadDeg, 0) / n,
       byKind,
+      // What this scorer's numbers are actually worth, measured rather than assumed.
+      // sim3dgs/calibrate_coverage.mjs flew eight plans, graded each splat on 31 shared novel
+      // views against Blender ground truth, and correlated those against these predictions:
+      //   withLowAngle r = 0.979 | meanSpread r = 0.979 | meanViews r = 0.919
+      //   cameras      r = 0.843 | good + flat r = 0.000
+      // So rank plans on lowAngle/spread, never on good%. `risk` below is the part that is
+      // not a ranking at all but a hard warning, from three separate reconstructions that
+      // came back GEOMETRICALLY BROKEN rather than merely soft.
+      risk: captureRisk(results, cams),
     },
   };
 }

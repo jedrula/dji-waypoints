@@ -1236,7 +1236,20 @@ function renderReadout() {
   // already, so these are added, not scaled: what is left after the unseen and
   // the thinly-seen have been taken off.
   const sum = state.coverage?.summary;
-  const cov = sum ? Math.round(sum.good + sum.flat) : null;
+  // MEASURED 2026-09-16, sim3dgs/calibrate_coverage.mjs: eight capture plans flown in
+  // simulation, each splat graded on 31 shared novel views against Blender ground truth, then
+  // correlated against what this scorer predicted for the same poses.
+  //
+  //   low-angle %       r = 0.979
+  //   mean spread       r = 0.979
+  //   mean views        r = 0.919
+  //   frame count       r = 0.843
+  //   good% + flat%     r = 0.000      <- what this readout used to show
+  //
+  // good% saturates: it read 100.0 for seven of the eight plans, which differed by 15
+  // percentage points of real retained detail. It answers "is anything starved" and on any
+  // plausible mission nothing is, so it cannot rank plans at all. Low-angle coverage can.
+  const cov = sum ? Math.round(sum.withLowAngle) : null;
   const covText = cov === null ? '…' : `${cov}%`;
   box.hidden = false;
   box.className = 'readout';
@@ -1244,7 +1257,7 @@ function renderReadout() {
     <div><b>${s.photos}</b><span>photos</span></div>
     <div><b class="${over ? 'bad' : ''}">${s.waypoints}</b><span>waypoints</span></div>
     <div><b>${mmss(s.seconds)}</b><span>${s.batteries > 1 ? `${s.batteries} batteries` : 'flight'}</span></div>
-    <div><b class="${cov === null ? 'dim' : cov < 90 ? 'bad' : 'ok'}">${covText}</b><span>coverage</span></div>`;
+    <div><b class="${cov === null ? 'dim' : cov < 60 ? 'bad' : 'ok'}">${covText}</b><span>low-angle</span></div>`;
   renderPasses();
   renderPreflight();
   renderFix();

@@ -52,6 +52,30 @@ not to support the claim, the claim comes out. Benchmark in Node against cached
 data, not in a browser; `node --cpu-prof` plus a script that sums `timeDeltas`
 finds hot spots that reading never will.
 
+## The coverage scorer is calibrated — use the right number
+
+Measured 2026-09-16 by flying plans in simulation (`../sim3dgs`), rebuilding them
+blind through GLOMAP + Brush, and grading each splat on 31 SHARED novel views
+against Blender ground truth. Write-up:
+`docs/2026-09-16-does-coverage-predict-quality.md`.
+
+- Rank plans on `withLowAngle` or `meanSpread` — **r = 0.979** against measured
+  retained detail. `meanViews` is 0.919, camera count 0.843.
+- **Never rank on `good%`** — **r = 0.000**. It reads 98-100 for every plausible
+  plan, including two that reconstruct into warped geometry.
+- `summary.risk` is a hard warning, not a score: nadir-only and
+  four-azimuths-at-shallow-pitch both produced models whose cameras cannot be
+  fitted to the true poses by ANY similarity transform, at ~100% registration
+  and unremarkable PSNR. No 2-D metric catches this.
+- Best geometry measured, at a fixed 64 frames: **~8 positions x 8 azimuths at
+  -30**. Pitch and azimuth count interact strongly enough to flip sign, so
+  neither is a standalone rule.
+- **The noise floor is sd 1.06 points**, measured over four runs on identical
+  frames. A gap under ~2 points is unreadable; do not rank on one. LPIPS is 3x
+  more stable and is the better discriminator for close calls.
+- Not established: one scene, 64-frame budget, FLAT GROUND, n = 1 per cell.
+  Do not restate any of this as universal.
+
 ## Degrade to yesterday's behaviour, never to a wrong answer
 
 Every failure path lands on the conservative thing the app did before the

@@ -72,8 +72,19 @@ Read the table above as the shape of a trade, not as a universal optimum.
   move.
 - **64 frames is not a real budget.** The best cell scored 57.5% against a 300-frame plan's
   73.3%. The optimum may move at a realistic frame count.
-- **n = 1 per cell, no error bars.** Brush is stochastic and the noise floor was not measured
-  until after these numbers were reported. Treat single-cell gaps under a few points as unproven.
+- **The noise floor is 1.06 points (1 sd).** Measured afterwards, by training the best cell
+  **four times on byte-identical frames**: 55.82 / 57.53 / 57.94 / 58.14, range 2.32. So a gap
+  must clear roughly **2 points** before it means anything.
+
+  Against that floor: the shallow pass (13.3), the pitch effect at 8 azimuths (14.0) and the
+  8-vs-16 azimuth drop (8.5) are all real, at 8-13 sd. But the ordering of the top five capture
+  arms is NOT — BASELINE 73.3, no_surround 73.2, no_outward 71.7, shallow_sparse 70.4,
+  no_context 70.4 are indistinguishable, and the ranked table they first appeared in implied a
+  precision the data does not have. Dropping the context, surround or outward passes cannot be
+  shown to cost anything measurable; dropping the shallow pass plainly can.
+
+  LPIPS was three times more stable (sd 0.0068 on a 0.2-0.6 range) and may be the better
+  discriminator for close calls.
 - **Altitude and overlap were never varied at fixed count.** Every cell above is at 80 m.
 - **The ground is dead flat.** Slope is what breaks a constant-altitude plan, and the simulated
   world has none.

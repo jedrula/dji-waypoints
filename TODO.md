@@ -76,12 +76,20 @@ will not route around anything, and a brake mid-mission stops the flight.
 Geometric only, and deliberately so — it needs no renderer, GPU or training.
 What it cannot tell you:
 
-- [ ] **Whether coverage predicts reconstruction quality.** The obvious next
-      step is the render loop: Blender or a splat renderer produces frames along
-      a planned trajectory, COLMAP plus a trainer rebuilds it, and the result is
-      compared against ground truth. Then calibrate the fast scorer against the
-      slow one. Beware: SfM behaves differently on synthetic imagery, and
-      rendering from a splat favours trajectories like the one that made it.
+- [x] **Whether coverage predicts reconstruction quality.** ANSWERED 2026-09-16 —
+      see `docs/2026-09-16-does-coverage-predict-quality.md`. The render loop was
+      built (`../sim3dgs`), plans were flown in Blender, rebuilt blind through
+      GLOMAP + Brush, and graded on 31 SHARED novel views against ground truth.
+      `withLowAngle` and `meanSpread` predict quality at **r = 0.979**;
+      `meanViews` at 0.919; camera count at 0.843; and **`good%` at r = 0.000**,
+      because it reads 98-100 for every plausible plan. The readout now leads
+      with low-angle, and `summary.risk` hard-warns on nadir-only and
+      few-azimuth plans, both of which reconstruct WARPED at ~100% registration.
+      Both of the warned-about traps were real: SfM on synthetic imagery was
+      gated against the real capture first (features 1.92x, consecutive inliers
+      0.99x — comparable), and nothing is scored by rendering from a splat that
+      made it, which is why the eval poses are ones no plan flies.
+      Still open: one scene only, 64-frame budget, no slope, n = 1 per cell.
 - [ ] **Thin structures.** The proxy is boxes. Chains, bars and netting are
       where real playground captures actually fail, and a box proxy says nothing
       about them.

@@ -201,3 +201,26 @@ enough to put the horizon in frame, which holds for everything auto-fit currentl
 proposes but by coincidence rather than design. Branch `ground-imagery` pushed to
 GitHub for the first time, which published all five commits on it, not just that
 day's.
+
+## 2026-09-16 — the coverage scorer is now calibrated, and one of its numbers was worthless
+
+The render loop `TODO.md` asked for since before Plac Staszica exists and has run. Eight capture
+plans flown in simulation, rebuilt blind, each graded on 31 shared novel views against Blender
+ground truth, and this scorer's predictions correlated against those grades. Full write-up in
+`docs/2026-09-16-does-coverage-predict-quality.md`.
+
+`withLowAngle` and `meanSpread` predict retained detail at **r = 0.979**. `good% + flat%`, which
+the readout led with, predicts at **r = 0.000** — it reads 98-100 for every plausible plan,
+including two that reconstruct into warped geometry. The readout now shows low-angle coverage and
+reddens below 60%.
+
+`summary.risk` is new: a hard warning, not a ranking, for the two plan shapes measured to produce
+geometrically BROKEN reconstructions at ~100% registration and unremarkable PSNR — nadir-only
+(197.9 m and 9.7 m pose error in two separate runs) and four-azimuths-at-shallow-pitch (sim3 scale
+0.0, degenerate). Best geometry measured at a fixed 64 frames: **~8 positions x 8 azimuths at
+-30 deg**, 57.5% retained detail. The azimuth payoff peaks near 8 and falls at 16, and pitch
+interacts with azimuth count strongly enough to flip sign, so neither is a standalone rule.
+
+Also settled: the shallow -20 pass that `capture-planning-large-area.md` recommends is worth
+**13.3 points** of detail. An arm that dropped it topped the PSNR table at 32.56 and ranks 6th of
+8 on the shared eval set — self-scored PSNR is gameable by dropping the hard views.

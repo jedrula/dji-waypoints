@@ -21,6 +21,11 @@ import { detect, listSlots, pullSlot, install } from './bridge.mjs';
 // difference; everything between here and there is what it always was.
 const DEFAULT_ROOT = process.cwd();
 const DEFAULT_PORT = Number(process.env.PORT ?? 8123);
+// Loopback by default, but HOST=0.0.0.0 makes the dev page reachable from
+// another machine on the tailnet. That is not a convenience: the browser used
+// to check this UI does not run on the box that serves it, so a 127.0.0.1 bind
+// means the page simply cannot be opened for review.
+const DEFAULT_HOST = process.env.HOST ?? '127.0.0.1';
 let ROOT = DEFAULT_ROOT;
 
 const TYPES = {
@@ -140,7 +145,7 @@ const server = createServer(async (req, res) => {
 
 // Started either way: `npm start` from a terminal, or the desktop app calling
 // this with a root and port 0 and reading back what it got.
-export function serve({ root = DEFAULT_ROOT, port = DEFAULT_PORT, host = '127.0.0.1' } = {}) {
+export function serve({ root = DEFAULT_ROOT, port = DEFAULT_PORT, host = DEFAULT_HOST } = {}) {
   ROOT = root;
   return new Promise((ok, fail) => {
     server.once('error', fail);

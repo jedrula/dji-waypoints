@@ -64,6 +64,7 @@ export function createView3D(canvas) {
   let onBoxSelect = null;     // ditto, for clicking one
   let hits = [];              // every projected obstacle face, nearest first
   let tags = [];              // name + height plates, drawn last so nothing hides them
+  let onWaypointPick = null;  // (index) => void, when a camera is clicked
   let hoverBox = null;        // obstacle id under the pointer, or being dragged
   let scale = null;           // last drawn altitude scale, for hit testing
   let anchorIdx = -1;         // which outset corner currently carries the mast
@@ -986,8 +987,33 @@ export function createView3D(canvas) {
     return zAtScreenY(scale.anchor, pt.y, basis(), h, focal(h));
   }
 
+  // Which waypoint is under the pointer, if any. The view already projects
+  // every point to draw it, so this is the same arithmetic once more rather
+  // than a second camera model -- and a camera you can click is what turns a
+  // plan into a way of reading the capture: click where the drone stood, see
+  // what it photographed.
+  function waypointAt(px, py, radius = 11) {
+    if (!scene?.pts?.length) return null;
+    const b = basis();
+    const w = canvas.clientWidth, h = canvas.clientHeight, f = focal(w, h);
+    let best = null, bestD = radius * radius;
+    scene.pts.forEach((p, i) => {
+      const v = toView(p, b);
+      if (v.z <= NEAR) return;
+      const q = project(v, w, h, f);
+      const d = (q.x - px) * (q.x - px) + (q.y - py) * (q.y - py);
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    return best;
+  }
+
   canvas.addEventListener('pointerdown', (e) => {
     const pt = local(e);
+    // A waypoint sits in front of whatever is behind it, so it is tested first.
+    if (onWaypointPick) {
+      const wi = waypointAt(pt.x, pt.y);
+      if (wi != null) { onWaypointPick(wi); return; }
+    }
     const t = levelAt(pt.x, pt.y);
     const face = t ? null : faceAt(pt.x, pt.y);
     if (face) {
@@ -1159,6 +1185,7 @@ export function createView3D(canvas) {
     // end of the gesture, which is the only part worth storing.
     onBoxHeight(fn) { onBoxHeight = fn; },
     // Called with the id of a box that was clicked rather than dragged.
+    onWaypointPick(fn) { onWaypointPick = fn; },
     onBoxSelect(fn) { onBoxSelect = fn; },
     setCoverage(c) { coverage = c; draw(); },
     toggleCoverage(on) { showCoverage = on; draw(); },

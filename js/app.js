@@ -1064,7 +1064,7 @@ $('pDelete').addEventListener('click', () => {
 $('clearMode').addEventListener('click', () => {
   if (!site.capture().length) { toast('No points to clear.'); return; }
   lidar?.clearPaint();
-  liftApplied = 0;
+  detailBaseAlt = null;
   lidar?.setHeat(null);
   state.paint = null;
   state.paintCover = null;
@@ -2512,7 +2512,7 @@ $('paintBtn').addEventListener('click', () => {
 async function paintToSite(cells) {
   const got = paintedSite(cells);
   if (!got) return;
-  liftApplied = 0;
+  detailBaseAlt = null;
   state.paint = cells;
   // Saved after the plan is set, below, so it is keyed to the right points.
   site.setCapture(got.points);
@@ -2644,28 +2644,86 @@ function surveyCheck() {
   }
 }
 
-// A candidate the survey says flies clear, or null. The paint search used to
-// judge candidates on coverage alone -- tighter rings, cross passes through the
-// site -- and the one it picked over Kielce was seen going through trees. So a
-// candidate is checked against the LiDAR at the clearance you set, and if it
-// hits, the whole thing is lifted -- points and altitude together, 3 m at a
-// time -- until it clears. Lifting only ever moves away from what it would
-// hit; 45 m of it and the candidate is given up.
-function safePlan(v, points = site.capture()) {
-  for (let lift = 0; lift <= 45; lift += 3) {
-    const p = paramsFromUi({ ...v, altitude: v.altitude + lift });
-    p.subjectClearance = clearance();
-    let m;
-    try {
-      m = planMission({ ...siteForPlanner(), points: points.map((q) => ({ ...q, height: q.height + lift })) }, p, cam);
-    } catch { return null; }
-    const check = lidar?.checkFlight?.(m, clearance());
-    // No survey to check against: not safe to call safe, so no lift is
-    // offered either -- the plan is what it was before this search existed.
-    if (!check) return lift === 0 ? { mission: m, lift: 0 } : null;
-    if (!check.hits) return { mission: m, lift };
+// Make a candidate fly clear of the survey the way a pilot would: change it
+// as little as possible. Lifting the whole plan -- points and altitude -- was
+// the first answer and the wrong one: a higher subject pushes every ring
+// OUTWARD (the radius follows the framing distance), into the taller trees
+// beyond, so over Kadzielnia 45 m of lift never cleared and the plan was left
+// colliding. A pilot would pull the ring in half a metre, or raise only the
+// ring that clips a crown, by what it clips it by.
+//
+// So, against the check's per-leg `need` (the level altitude that clears):
+//   1. lift only what hits -- each orbit ring to its own need (pinned, the
+//      same mechanism as dragging its chip), the grid altitude to the grid's
+//      need, the cross levels to theirs -- and re-check, a few rounds, since a
+//      raised ring can lengthen its transit;
+//   2. the same after pulling the rings in or pushing them out by 1-8 m;
+//   3. take whichever changed the plan least: metres sideways plus the
+//      biggest single lift, metre for metre.
+// Null if nothing within reach clears. No survey loaded: the plan as it is,
+// which is what the app did before any of this existed.
+function planWith(v) {
+  const p = paramsFromUi(v);
+  p.subjectClearance = clearance();
+  return planMission(siteForPlanner(), p, cam);
+}
+const GRID_PASSES = new Set(['nadir', 'oblique', 'establish', 'surround', 'context', 'transit', 'bridge']);
+function liftToClear(v0) {
+  let v = { ...v0 };
+  let m;
+  try { m = planWith(v); } catch { return null; }
+  let chk = lidar?.checkFlight?.(m, clearance());
+  if (!chk) return { mission: m, v, cost: 0, unchecked: true };
+  const startAlt = v.altitude;
+  const startRings = (m.heights?.orbit ?? []).slice();
+  const startCross = (m.heights?.transect ?? []).slice();
+  for (let round = 0; round < 6 && chk.hits; round++) {
+    const rings = (m.heights?.orbit ?? []).slice();
+    const cross = (m.heights?.transect ?? []).slice();
+    let alt = v.altitude;
+    m.exported.forEach((w, i) => {
+      const need = chk.needs?.[i];
+      if (need == null || chk.verdict[i] !== 1) return;
+      const ri = w.pass === 'orbit' ? rings.findIndex((h) => Math.abs(h - w.alt) < 0.05) : -1;
+      const ti = w.pass === 'transect' ? cross.findIndex((h) => Math.abs(h - w.alt) < 0.05) : -1;
+      if (ri >= 0) rings[ri] = Math.max(rings[ri], Math.ceil(need));
+      else if (ti >= 0) cross[ti] = Math.max(cross[ti], Math.ceil(need));
+      else if (GRID_PASSES.has(w.pass) || ri < 0) alt = Math.max(alt, Math.ceil(need));
+    });
+    // Rings keep their spacing as they rise. Each lifted to its own need,
+    // three rings over Kadzielnia all landed on 14 m -- three passes of the
+    // same photographs, which is the elevation diversity the rings exist for
+    // thrown away. So in height order, each stays at least the original gap
+    // (or 3 m) above the one below it.
+    const order = startRings.map((h, i) => i).sort((x, y) => startRings[x] - startRings[y]);
+    for (let k = 1; k < order.length; k++) {
+      const lo = order[k - 1];
+      const hi = order[k];
+      const gap = Math.max(3, startRings[hi] - startRings[lo]);
+      rings[hi] = Math.max(rings[hi], rings[lo] + gap);
+    }
+    v = { ...v, altitude: Math.min(120, alt),
+      orbitHeights: rings.length ? rings : null, transectHeights: cross.length ? cross : null };
+    try { m = planWith(v); } catch { return null; }
+    chk = lidar.checkFlight(m, clearance());
   }
-  return null;
+  if (chk.hits) return null;
+  const lifts = [v.altitude - startAlt,
+    ...(m.heights?.orbit ?? []).map((h, i) => h - (startRings[i] ?? h)),
+    ...(m.heights?.transect ?? []).map((h, i) => h - (startCross[i] ?? h))];
+  return { mission: m, v, cost: Math.max(0, ...lifts) };
+}
+function safePlan(v) {
+  const base = { ...v, orbitHeights: null, transectHeights: null };
+  let best = null;
+  for (const d of [0, -1, 1, -2, 2, -3, 3, -5, 5, -8, 8]) {
+    const r = liftToClear({ ...base, orbitStandoff: (base.orbitStandoff ?? 0) + d });
+    if (!r) continue;
+    const cost = r.cost + Math.abs(d);
+    if (!best || cost < best.cost) best = { ...r, cost, sideways: d };
+    if (r.unchecked || cost === 0) break;
+  }
+  return best;
 }
 
 // Detail: one slider over the recipe, five notches. Each is a set of the
@@ -2715,42 +2773,40 @@ function renderDetail() {
   $('detailOut').textContent = custom ? 'Custom' : DETAIL[level].label;
 }
 
-// How much the current plan has been lifted to clear the survey, so the
-// next notch lifts from the plan as painted and not from the last notch's
-// answer. Without it every drag of the slider added its lift to the one
-// before: measured over Kadzielnia, 51 m crept to 96 m in four moves and
-// dragging back to Quick look kept every metre.
-let liftApplied = 0;
+// The altitude a notch starts from, before any adjustment to clear the
+// survey -- so each notch is adjusted from the plan as painted, not from the
+// last notch's answer. Without it every drag of the slider stacked its lift
+// on the one before: 51 m crept to 96 m in four moves over Kadzielnia.
+let detailBaseAlt = null;
 function applyDetail(level) {
   const d = DETAIL[level];
   if (!d) return;
-  const baseAlt = +$('altitude').value - liftApplied;
-  const basePoints = site.capture().map((q) => ({ ...q, height: Math.max(0, q.height - liftApplied) }));
-  const v = { ...uiValues(), altitude: baseAlt, orbitRings: d.orbitRings, orbitStandoff: d.orbitStandoff,
+  detailBaseAlt ??= +$('altitude').value;
+  const v = { ...uiValues(), altitude: detailBaseAlt, orbitRings: d.orbitRings, orbitStandoff: d.orbitStandoff,
     transect: d.transect, frontOverlap: d.frontOverlap };
-  const safe = safePlan(v, basePoints);
+  const safe = safePlan(v);
   if (!safe) {
-    toast('Nothing at this detail stays clear of the survey within 45 m of lift — '
-      + 'try less detail, or less clearance.');
+    toast('Nothing at this detail stays clear of the survey without big changes — '
+      + 'try less detail, or paint less of the trees.');
     renderDetail();
     return;
   }
   $('orbitRings').value = String(d.orbitRings);
   $('transect').checked = d.transect;
-  controls.orbitStandoff.el.value = d.orbitStandoff;
   controls.frontOverlap.el.value = d.frontOverlap;
-  $('altitude').value = baseAlt + safe.lift;
-  if (safe.lift !== liftApplied) {
-    site.setCapture(basePoints.map((q) => ({ ...q, height: q.height + safe.lift })));
-  }
-  liftApplied = safe.lift;
+  controls.orbitStandoff.el.value = safe.v.orbitStandoff;
+  $('altitude').value = safe.v.altitude;
+  pinned = { orbitHeights: safe.v.orbitHeights ?? null, transectHeights: safe.v.transectHeights ?? null };
   tuned = true;
   showPreset();
   readOuts();
   computePlan();
   history.commit();
   renderDetail();
-  if (safe.lift) toast(`Lifted ${safe.lift} m to stay ${clearance()} m clear of what the survey measured.`);
+  const bits = [];
+  if (safe.sideways) bits.push(`rings ${safe.sideways < 0 ? 'pulled in' : 'pushed out'} ${Math.abs(safe.sideways)} m`);
+  if (safe.cost - Math.abs(safe.sideways ?? 0) > 0) bits.push(`raised up to ${Math.round(safe.cost - Math.abs(safe.sideways ?? 0))} m where it clipped`);
+  if (bits.length) toast(`Adjusted to stay ${clearance()} m clear of what the survey measured: ${bits.join(', ')}.`);
 }
 $('detail').addEventListener('input', () => {
   $('detailOut').textContent = DETAIL[+$('detail').value].label;

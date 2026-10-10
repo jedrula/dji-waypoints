@@ -1535,7 +1535,19 @@ export function createScene3D(canvas) {
     const path = m.exported ?? m.waypoints ?? [];
     if (!path.length) return null;
     const t0 = performance.now();
-    const frame = m.frame;
+    // In the GRID's frame and datum, not the plan's. A candidate the app is
+    // still deciding on has its own origin (the middle of its taps) and its
+    // altitudes are above ITS first waypoint's ground; the grid was built in
+    // whatever frame was current, measured from that frame's datum. Read in
+    // the plan's frame, a candidate was checked against the wrong cells at
+    // the wrong height, and a 5 m nadir over Kadzielnia's trees came back
+    // clear and then collided "like crazy" once it was drawn.
+    const frame = heights.frame ?? m.frame;
+    let lift = 0;
+    if (!meshMode && loaded?.meta && heights.datum !== undefined && path[0]) {
+      const own = groundAt(loaded.meta, loaded.height, path[0].lat, path[0].lon);
+      if (own !== null) lift = own - heights.datum;
+    }
     // Sideways clearance as a neighbourhood: the tallest cell within the
     // clearance of the point. Max-of-maxes, so it only ever errs high.
     const R = Math.max(0, Math.ceil(clr / HCELL));
@@ -1550,15 +1562,17 @@ export function createScene3D(canvas) {
       }
       return top;
     };
+    // A plan's altitude plus how far its own datum sits above the grid's.
     const at = (w) => {
       const l = frame.toLocal(w.lat, w.lon);
-      return new THREE.Vector3(l.x, w.alt, -l.y);
+      return new THREE.Vector3(l.x, w.alt + lift, -l.y);
     };
 
     const legs = [];
     // Every leg's verdict, not only the bad ones: collision mode paints the
     // clear ones green, and "clear" and "never checked" are different answers.
     const verdict = new Uint8Array(path.length);
+    const needs = new Array(path.length).fill(null);
     let tallest = -Infinity;      // the highest thing under any waypoint
     let lowestGap = Infinity;     // the least air under any waypoint
     let over = 0;                 // waypoints with mesh under them at all
@@ -1586,13 +1600,19 @@ export function createScene3D(canvas) {
       const steps = Math.max(1, Math.ceil(len / (HCELL / 2)));
       let through = false;
       let anyGround = false;
-      for (let k = 0; k <= steps && !through; k++) {
+      // Walked to the end, not stopped at the first strike: `need` is the
+      // altitude this leg would have to fly, level, to clear everything along
+      // it -- what the app's adjuster lifts a ring or a grid to, and no more.
+      let top = -Infinity;
+      for (let k = 0; k <= steps; k++) {
         const f = k / steps;
         const g2 = near(a.x + dx * f, a.z + dz * f);
         if (g2 === null) continue;
         anyGround = true;
+        if (g2 > top) top = g2;
         if (a.y + dy * f < g2 + clr) through = true;
       }
+      needs[i] = Number.isFinite(top) ? top + clr - lift : null;
       // 1 hits, 2 clear, 0 not judged -- and a leg with no mesh anywhere under
       // it is NOT clear, it is unjudged. This said `through ? 1 : 2` for one
       // afternoon and collision mode painted the whole flight green over a
@@ -1614,6 +1634,7 @@ export function createScene3D(canvas) {
       hits,
       legs,
       verdict,
+      needs,
       ms: Math.round(performance.now() - t0),
       gridMs: heights?.ms ?? null,
     };
@@ -2387,7 +2408,8 @@ export function createScene3D(canvas) {
         }
       }
     }
-    heights = { x0, z0, nx, nz, cell: HCELL, max, ms: Math.round(performance.now() - t0) };
+    heights = { x0, z0, nx, nz, cell: HCELL, max, ms: Math.round(performance.now() - t0),
+      frame: frameOf(), datum: 0 };
   }
 
   // The same grid from the LiDAR raster, for everywhere there is no mesh. The
@@ -2419,7 +2441,8 @@ export function createScene3D(canvas) {
         if (v > max[i]) max[i] = v;
       }
     }
-    heights = { x0, z0, nx, nz, cell: HCELL, max, ms: Math.round(performance.now() - t0) };
+    heights = { x0, z0, nx, nz, cell: HCELL, max, ms: Math.round(performance.now() - t0),
+      frame: frameOf(), datum: loaded.datum };
   }
 
   // The tallest thing under a point, or null where no tile has been fetched.

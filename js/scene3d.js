@@ -182,6 +182,9 @@ export function createScene3D(canvas) {
   // no switch: coverage decides, and an option nobody can answer better than
   // the data can is not worth carrying.
   let meshMode = false;
+  // Where the first mesh tile put its zero (meshDatum), in PUWG92 -- what the
+  // points are levelled to when they are drawn over the mesh.
+  let meshZero = null;
   let wirePaths = [];
   let groundSpec = null;
   let looksOn = true;
@@ -1199,8 +1202,10 @@ export function createScene3D(canvas) {
     meshGroup ??= new THREE.Group();
     if (!meshGroup.parent) scene.add(meshGroup);
     meshGroup.add(tile);
+    if (!meshTiles.size) meshZero = { e: here.east, n: here.north };
     meshTiles.set(name, tile);
     meshCovers.push(box);
+    meshedPoints();
     // Rebuilt here because this is where the set of tiles changes, and both
     // the wires and the flight check read it.
     buildHeights();
@@ -1307,6 +1312,7 @@ export function createScene3D(canvas) {
   function dropMesh() {
     for (const t of meshTiles.values()) { meshGroup?.remove(t); t.geometry.dispose(); }
     meshTiles.clear();
+    meshZero = null;
     meshCovers.length = 0;
     heights = null;
     meshHazard = null;
@@ -1942,7 +1948,7 @@ export function createScene3D(canvas) {
 
   async function loadCloud() {
     const f = frameOf();
-    if (!f || meshMode) return;
+    if (!f) return;
     // The points cover 150 m round where they were asked for. A new frame
     // origin inside that -- and the first paint stroke makes one, the plan's
     // own -- is the same ground: re-placed by buildCloud, not fetched again.
@@ -1974,7 +1980,7 @@ export function createScene3D(canvas) {
       // photo's (buildCloud). Grey points over a photo-draped surface were a
       // worse picture than the surface alone, so with neither they wait for
       // the button.
-      cloudOn = !!meta.hasRgb || !!loaded?.ortho;
+      cloudOn = !!meta.hasRgb || (!meshMode && !!loaded?.ortho);
       buildCloud();
       applyPendingSel();
       onCloud(true, cloudOn);
@@ -1996,6 +2002,20 @@ export function createScene3D(canvas) {
     return Number.isFinite(d) ? 0.6 * Math.sqrt(Math.max(1, 12 / d)) : 0.6;
   }
 
+  // Which points a mesh tile covers -- the PUWG92 boxes in meshCovers.
+  function meshedPoints() {
+    const a = cloud?.points?.geometry.getAttribute('aMeshed');
+    if (!a) return;
+    const { raw, meta } = cloud;
+    const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    for (let i = 0; i < meta.count; i++) {
+      const e = meta.e + dv.getInt16(i * 10, true) / 100;
+      const n = meta.n + dv.getInt16(i * 10 + 2, true) / 100;
+      a.array[i] = meshCovers.some((b) => e >= b.eMin && e <= b.eMax && n >= b.nMin && n <= b.nMax) ? 1 : 0;
+    }
+    a.needsUpdate = true;
+  }
+
   // The cloud's photo is the surface's: called wherever loaded.ortho changes.
   function cloudOrtho() {
     const u = cloud?.points?.material.uniforms;
@@ -2005,8 +2025,33 @@ export function createScene3D(canvas) {
     u.uPatch.value = patchUv();
   }
 
+  // The height the points' zero sits at. Over the LiDAR surface that is its
+  // datum. Over a mesh it is the mesh's own zero -- the lowest vertex within
+  // 10 m of where its first tile was built (meshDatum) -- matched by the
+  // lowest ground return within the same 10 m, rather than by trusting the
+  // mesh and the survey to share a vertical reference, which nothing says.
+  function cloudDatum() {
+    if (!meshMode) return loaded?.datum;
+    if (!meshZero || !cloud) return undefined;
+    const { raw, meta } = cloud;
+    const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    let ground = Infinity, any = Infinity;
+    for (let i = 0; i < meta.count; i++) {
+      const o = i * 10;
+      const dx = meta.e + dv.getInt16(o, true) / 100 - meshZero.e;
+      const dy = meta.n + dv.getInt16(o + 2, true) / 100 - meshZero.n;
+      if (dx * dx + dy * dy > 100) continue;
+      const z = dv.getUint16(o + 4, true);
+      if (z < any) any = z;
+      if (raw[o + 9] === 2 && z < ground) ground = z;
+    }
+    const z = Number.isFinite(ground) ? ground : any;
+    return Number.isFinite(z) ? meta.zBase + z / 100 : undefined;
+  }
+
   function buildCloud() {
-    if (!cloud || !scene || !loaded || loaded.datum === undefined) return;
+    const datum = cloudDatum();
+    if (!cloud || !scene || datum === undefined) return;
     if (cloud.points) { scene.remove(cloud.points); cloud.points.geometry.dispose(); cloud.points = null; }
     const f = frameOf();
     if (!f) return;
@@ -2021,14 +2066,14 @@ export function createScene3D(canvas) {
     // sheet (2022, point format 1, 4 per m2) drew as a grey fog over the
     // picture it sat on. Per point, the tile UV the surface's own patch
     // mapping takes; the shader keeps the survey grey outside the patch.
-    const span = loaded.meta.tileMetres;
-    const { east: E0, north: N0 } = loaded.meta.origin;
-    const puv = meta.hasRgb ? null : new Float32Array(count * 2);
+    const span = loaded?.meta?.tileMetres;
+    const { east: E0, north: N0 } = loaded?.meta?.origin ?? {};
+    const puv = meta.hasRgb || meshMode || !span ? null : new Float32Array(count * 2);
     for (let i = 0; i < count; i++) {
       const o = i * 10;
       const l = toLocal(meta.e + dv.getInt16(o, true) / 100, meta.n + dv.getInt16(o + 2, true) / 100);
       pos[i * 3] = l.x;
-      pos[i * 3 + 1] = meta.zBase + dv.getUint16(o + 4, true) / 100 - loaded.datum;
+      pos[i * 3 + 1] = meta.zBase + dv.getUint16(o + 4, true) / 100 - datum;
       pos[i * 3 + 2] = -l.y;
       col[i * 3] = raw[o + 6]; col[i * 3 + 1] = raw[o + 7]; col[i * 3 + 2] = raw[o + 8];
       if (puv) {
@@ -2039,6 +2084,15 @@ export function createScene3D(canvas) {
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geom.setAttribute('aColor', new THREE.BufferAttribute(col, 3, true));
+    // The class, for drawing only the trees over a mesh: its buildings are
+    // photographed and sharp, its trees melt into blobs -- Park Staszica --
+    // and the survey's trees are the better half of each. Past the mesh's
+    // edge every point is drawn (meshedPoints), or the trees there hung in
+    // the sky over nothing.
+    const kind = new Uint8Array(count);
+    for (let i = 0; i < count; i++) kind[i] = raw[i * 10 + 9];
+    geom.setAttribute('aClass', new THREE.BufferAttribute(kind, 1));
+    geom.setAttribute('aMeshed', new THREE.BufferAttribute(new Uint8Array(count), 1));
     geom.setAttribute('aTileUv', new THREE.BufferAttribute(puv ?? new Float32Array(count * 2).fill(-1), 2));
     // Round, sized in metres so they close up into a surface as you come in,
     // tinted by the same heat texture the surface carries.
@@ -2056,10 +2110,14 @@ export function createScene3D(canvas) {
       uniforms: {
         uSize: { value: dotSize(meta) }, uScale: { value: 600 }, uPointHeat: pointHeatOn, uSelOn: selOn,
         uOrtho: { value: null }, uHasOrtho: { value: 0 }, uPatch: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uTreesOnly: { value: meshMode ? 1 : 0 },
       },
       vertexShader: `
         attribute vec3 aColor;
         attribute vec2 aTileUv;
+        attribute float aClass;
+        attribute float aMeshed;
+        uniform float uTreesOnly;
         uniform sampler2D uOrtho;
         uniform int uHasOrtho;
         uniform vec4 uPatch;
@@ -2075,6 +2133,8 @@ export function createScene3D(canvas) {
             vColor = texture2D(uOrtho, pUv).rgb;
           vHeat = aHeat;
           vSel = aSel;
+          // Vegetation is ASPRS 3-5; anything else is pushed off-screen.
+          if (uTreesOnly > 0.5 && aMeshed > 0.5 && (aClass < 2.5 || aClass > 5.5)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
           gl_Position = projectionMatrix * mv;
           gl_PointSize = clamp(uSize * uScale / -mv.z, 2.0, 22.0);
@@ -2101,6 +2161,7 @@ export function createScene3D(canvas) {
     points.visible = cloudOn;
     cloud.points = points;
     cloudOrtho();
+    meshedPoints();
     scene.add(points);
     applyBacking();
   }
@@ -3847,6 +3908,9 @@ export function createScene3D(canvas) {
           onLoading(null);
           render();
           sayMesh();
+          // The survey's trees on top (buildCloud), after the mesh is up.
+          if (cloud) buildCloud();
+          loadCloud();
           // And then the neighbours you had last time, on top of the picture
           // that is already up rather than instead of it -- the first tile is
           // the one you are waiting for.

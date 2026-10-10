@@ -564,5 +564,31 @@ console.log('\nbuildings with walls (LoD1 CityGML)');
   ok('no package is null rather than a throw', none === null);
 }
 
+console.log('\nthe survey as points');
+{
+  const { createPointSet, keepFor } = await import('../src/points.js');
+  const { rgbOffset } = await import('../src/laz.js');
+  ok('colour sits after the GPS time in format 3', rgbOffset(3) === 28 && rgbOffset(1) === null);
+
+  const set = createPointSet({ e: 1000, n: 2000, r: 10 });
+  set.addPoint(1003, 2004, 251.25, 2, 0x8000, 0x4000, 0xff00);   // 5 m out: kept
+  set.addPoint(1011, 2000, 250, 2, 0, 0, 0);                     // 11 m out: dropped
+  set.addPoint(1000, 2000, 250, 7, 0, 0, 0);                     // noise: dropped
+  set.addPoint(999.5, 1999, 250, 5, 0x1000, 0x1000, 0x1000);
+  const { body, meta } = set.finish();
+  ok('only points inside the disc, and never noise', meta.count === 2);
+  ok('positions in centimetres from the centre', body.readInt16LE(0) === 300 && body.readInt16LE(2) === 400);
+  ok('heights in centimetres above the lowest kept', body.readUInt16LE(4) === 125 && body.readUInt16LE(14) === 0 && meta.zBase === 250);
+  ok('16-bit colour comes down to 8', body[6] === 0x80 && body[7] === 0x40 && body[8] === 0xff);
+  ok('and the class rides along', body[9] === 2 && body[19] === 5);
+
+  // Two sheets of 1000 points per 10,000 m2 each; a 50 m disc on their shared
+  // edge sees half of each, so about 785 points expected in all.
+  const sheet = (e0) => ({ count: 1000, bounds: { e0, e1: e0 + 100, n0: 0, n1: 100 } });
+  const k = keepFor([sheet(0), sheet(100)], { e: 100, n: 50, r: 50, maxPoints: 400 });
+  ok('the budget thins by what the disc overlaps', Math.abs(k - 400 / (0.1 * 100 * 100 * Math.PI / 4)) < 1e-9, k.toFixed(3));
+  ok('and keeps everything under budget', keepFor([sheet(0)], { e: 50, n: 50, r: 10, maxPoints: 1e6 }) === 1);
+}
+
 console.log(`\n${fails === 0 ? 'ALL PASS' : `${fails} FAILURES`}`);
 process.exit(fails ? 1 : 0);

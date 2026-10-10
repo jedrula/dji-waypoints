@@ -33,11 +33,13 @@ import { encodePlan, decodePlan } from './share.js';
 import { initPlans } from './plansui.js';
 import { routeFromRead } from './route.js';
 import { createBasemaps } from './basemap.js';
-import { createSite, parseHeight, DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS } from './site.js';
+import { createSite, parseHeight, paintedSite, DEFAULT_POINT_HEIGHT, MAX_CAPTURE_POINTS } from './site.js';
 import { localPrisms, overlaps } from './prism.js';
 import { spanQuads, LINE_SPAN } from './lines.js';
 import { checkObstacles } from './collide.js';
 import { createHistory } from './history.js';
+import { surfaceSamples, measureViews, paintedCoverage, bridgeMission } from './views.js';
+import { toPuwg92 } from './puwg92.js';
 
 import { bestFix, GPS_ERRORS, STALE_MS } from './gps.js';
 import { serviceUrl, serviceHeaders } from './service.js';
@@ -85,7 +87,11 @@ let showRoute = true;
 try { showRoute = localStorage.getItem(ROUTE_KEY) !== '0'; } catch { /* private window */ }
 
 /* ---------- map ---------- */
-const map = L.map('map', { zoomControl: true, attributionControl: true }).setView([50.0614, 19.9366], 16);
+// Fractional zoom, so a linked map can match the 3D's scale rather than snap to
+// the nearest power of two -- a factor of two either way, which is the
+// difference between six buildings and twenty-four.
+const map = L.map('map', { zoomControl: true, attributionControl: true, zoomSnap: 0.1 })
+  .setView([50.0614, 19.9366], 16);
 
 const layers = {
   footprint: L.polygon([], { color: '#4da3ff', weight: 1.5, dashArray: '5,4',
@@ -128,6 +134,12 @@ let activeView = 'map';
 // brings three.js with it and nobody planning over imagery needs the megabyte.
 const GROUNDS = ['simple', 'imagery', 'survey'];
 let groundMode = 'imagery';
+let paintOn = false;   // a left-drag on the survey paints; see "painting"
+let cloudReady = false; // the survey view has this ground as points
+let linked = false;     // the map and the 3D move together; see "Linked views"
+let moveFromThreeD = false;
+let loadState = null;   // what the survey view is waiting for; see "loading state"
+let loadClock = null;
 let lidar = null;
 
 // Overhead lines, and whether they are being shown.
@@ -158,6 +170,7 @@ async function lidarView() {
       renderFix();
     });
     lidar.setCollision(collideOn);
+    lidar.setClearance(clearance());
     lidar.onLevel(moveLevel);
     lidar.onRadius(moveRadius);
     lidar.onLevelDone(() => history.commit());
@@ -169,6 +182,19 @@ async function lidarView() {
     // Set here as well as in setView, because this is created lazily and the
     // first tile can load before the view is switched to.
     lidar.setGround(basemaps.groundSpec(true));
+    lidar.onPaint(paintToSite);
+    if (state.paint) lidar.restorePaint({ cells: state.paint, selection: savedPaint()?.selection ?? null });
+    lidar.onCloud((has, on) => {
+      cloudReady = has;
+      if (has) $('cloudBtn').classList.toggle('on', !!on);
+      applyViewCanvases();
+      // Points arriving over a plan already scored on the surface: score the
+      // points, so the heat is on what is now drawn.
+      if (has && state.mission) { surveyCheck(); renderReadout(); }
+    });
+    lidar.onLoading(showLoading);
+    lidar.onViewMove(threeDMoved);
+    lidar.setPaint(paintOn);
     lidar.onStatus((text) => toast(text, { sticky: /minutes|Asking|Downloading/.test(text) }));
   }
   return lidar;
@@ -218,6 +244,14 @@ function applyViewCanvases() {
   // The same for the flat canvas: it had no client size while hidden, so
   // whatever it drew last was drawn at the wrong size or not at all.
   if (show3d && !survey) view3d.draw();
+  // Painting needs the survey under the brush; anywhere else it switches off
+  // rather than staying armed for a view it cannot act on.
+  $('paintBtn').hidden = !(show3d && survey);
+  $('heatBtn').hidden = !(show3d && survey);
+  $('cloudBtn').hidden = !(show3d && survey && cloudReady);
+  placePaintView();
+  placeLoading();
+  if ($('paintBtn').hidden) setPaint(false);
   renderEmpty3d();
 }
 
@@ -225,13 +259,15 @@ function applyViewCanvases() {
 // it drew nothing at all, and pressing 3D read as a dead button. Say so, and
 // offer the survey, which does have something to show before a plan exists.
 function renderEmpty3d() {
-  $('empty3d').hidden = activeView === 'map' || groundMode === 'survey' || !!state.mission;
+  const nothing = activeView !== 'map' && groundMode !== 'survey' && !state.mission;
+  $('empty3d').hidden = !nothing;
 }
 $('empty3dSurvey').addEventListener('click', () => setGround('survey'));
 
 
 
 function setView(name) {
+  const was = activeView;
   activeView = name;
   const showMap = name !== '3d';
   const show3d = name !== 'map';
@@ -249,8 +285,6 @@ function setView(name) {
   $('groundtabs').hidden = !show3d;
   // Each sync is only offered when the view it READS from is on screen: there
   // is no sense in aiming the 3D at a map you cannot see.
-  $('syncTo3d').hidden = !showMap;
-  $('syncToMap').hidden = !show3d;
   $('looksBtn').hidden = !show3d;
   $('collideBtn').hidden = !show3d;
   $('liftBtn').hidden = !show3d || !pendingFit;
@@ -259,6 +293,13 @@ function setView(name) {
   if (showMap) map.invalidateSize();
   applyViewCanvases();
   if (show3d && groundMode !== 'survey') view3d.draw();
+  // Linked, a pane coming on screen joins the other: the 3D comes to the map,
+  // and the map -- when it is the one appearing from a 3D-only view -- comes
+  // to the 3D.
+  if (linked && ready) {
+    if (show3d && was !== '3d') point3dAtMap();
+    else if (name === 'map' && was === '3d') pointMapAt3d();
+  }
   writeUrl();
 }
 
@@ -332,7 +373,7 @@ function writeUrl() {
   q.set('b', basemaps.name());
   const c = map.getCenter();
   q.set('c', `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`);
-  q.set('z', String(map.getZoom()));
+  q.set('z', String(Math.round(map.getZoom() * 100) / 100));
   if (groundMode !== 'imagery') q.set('s', groundMode);
   if (wiresOn) q.set('w', '1');
   if (!looksOn) q.set('k', '0');
@@ -420,14 +461,36 @@ const photon = L.Control.Geocoder.photon({ geocodingQueryParams: { lang: 'defaul
 //
 // Each row also says WHAT it is: "Kadzielnia, Kielce" came back three times --
 // the peak, the district and a street -- and three identical rows is a guess.
+//
+// And the label is ours, because the plugin's leaves out the house number:
+// "Emilii Plater 17, Kielce" was found exactly -- the building, to the metre --
+// and listed as "Emilii Plater, Kielce, ..." tagged "yes", which read as not
+// found. "yes" is OpenStreetMap for building=yes; the key says what it is.
 const esc = (t) => String(t).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-const kindOf = (r) => (r.properties?.osm_value ?? '').replace(/_/g, ' ');
-const labelled = (rs) => rs.map((r) => ({
-  ...r,
-  html: kindOf(r)
-    ? `${esc(r.name)} <span class="leaflet-control-geocoder-address-detail">${esc(kindOf(r))}</span>`
-    : esc(r.name),
-}));
+const kindOf = (r) => {
+  const p = r.properties ?? {};
+  const v = p.osm_value === 'yes' ? p.osm_key : p.osm_value;
+  return (v ?? '').replace(/_/g, ' ');
+};
+const nameOf = (r) => {
+  const p = r.properties;
+  if (!p) return r.name;
+  const street = [p.street, p.housenumber].filter(Boolean).join(' ');
+  const head = p.name ?? street;
+  const rest = [p.name && street, p.city ?? p.town ?? p.village, p.state]
+    .filter((x) => x && x !== head);
+  return [head, ...rest].filter(Boolean).join(', ') || r.name;
+};
+const labelled = (rs) => rs.map((r) => {
+  const name = nameOf(r);
+  return {
+    ...r,
+    name,
+    html: kindOf(r)
+      ? `${esc(name)} <span class="leaflet-control-geocoder-address-detail">${esc(kindOf(r))}</span>`
+      : esc(name),
+  };
+});
 const lookup = async (q, ctx) => {
   const here = await coords.geocode(q, ctx);
   return here.length ? here : labelled(await photon.geocode(q, ctx));
@@ -991,6 +1054,12 @@ $('pDelete').addEventListener('click', () => {
 });
 $('clearMode').addEventListener('click', () => {
   if (!site.capture().length) { toast('No points to clear.'); return; }
+  lidar?.clearPaint();
+  lidar?.setHeat(null);
+  state.paint = null;
+  state.paintCover = null;
+  savePaint();
+  placePaintView();
   site.clearCapture();
   state.selected = null;
   renderPointBar();
@@ -1021,6 +1090,7 @@ function settleSoon() {
     // Tagged so a later replan can tell whether this score is still about the
     // flight on screen, rather than leaving yesterday's number sitting there.
     state.coverage.forWaypoints = state.mission.stats.waypoints;
+    surveyCheck();
     renderReadout();
     view3d.setMission(state.mission, state.coverage);
   }, 260);
@@ -1259,7 +1329,15 @@ function renderReadout() {
   // good% saturates: it read 100.0 for seven of the eight plans, which differed by 15
   // percentage points of real retained detail. It answers "is anything starved" and on any
   // plausible mission nothing is, so it cannot rank plans at all. Low-angle coverage can.
-  const cov = sum ? Math.round(sum.withLowAngle) : null;
+  //
+  // With paint and the survey loaded, the tile shows something else: the share
+  // of the PAINTED surface that came out hot (js/views.js -- seen often, from
+  // close, from wide angles). That one is NOT calibrated against reconstructions
+  // the way low-angle is; it is the paint search's own target, and it is
+  // labelled as such rather than passed off as the measured number.
+  const painted = state.paintCover != null;
+  const cov = painted ? Math.round(state.paintCover * 100)
+    : sum ? Math.round(sum.withLowAngle) : null;
   const covText = cov === null ? '…' : `${cov}%`;
   box.hidden = false;
   box.className = 'readout';
@@ -1267,7 +1345,7 @@ function renderReadout() {
     <div><b>${s.photos}</b><span>photos</span></div>
     <div><b class="${over ? 'bad' : ''}">${s.waypoints}</b><span>waypoints</span></div>
     <div><b>${mmss(s.seconds)}</b><span>${s.batteries > 1 ? `${s.batteries} batteries` : 'flight'}</span></div>
-    <div><b class="${cov === null ? 'dim' : cov < 60 ? 'bad' : 'ok'}">${covText}</b><span>low-angle</span></div>`;
+    <div><b class="${cov === null ? 'dim' : cov < (painted ? 90 : 60) ? 'bad' : 'ok'}">${covText}</b><span>${painted ? 'painted' : 'low-angle'}</span></div>`;
   renderPasses();
   renderPreflight();
   renderFix();
@@ -1297,6 +1375,15 @@ function renderReadout() {
 let pendingFit = null;
 
 function renderFix() {
+  // Said in the band, in every view: the lift button lives on the 3D pane,
+  // so from the map a plan flying into a tree used to say nothing at all.
+  const hits = state.mesh?.hits ?? 0;
+  $('hazardWarn').hidden = !hits;
+  if (hits) {
+    $('hazardWarn').textContent = `${hits} leg${hits === 1 ? '' : 's'} pass within ${clearance()} m of `
+      + 'trees or buildings in the survey. In 3D, the red lift button raises the rings clear; '
+      + 'grid and cross-pass legs need more altitude.';
+  }
   const btn = $('liftBtn');
   if (!btn) return;
   const fit = state.mesh?.hits ? lidar?.fitRings(clearance()) : null;
@@ -1552,7 +1639,20 @@ function missionFromCode(code) {
   const plan = decodePlan(code);
   if (!plan) return null;
   try {
-    return { plan, mission: planMission({ points: plan.points, shape: plan.shape }, paramsFromUi(plan.ui), cam) };
+    let mission = planMission({ points: plan.points, shape: plan.shape }, paramsFromUi(plan.ui), cam);
+    // The shots surveyCheck adds between non-overlapping photos are not in
+    // the code -- they are derived, like everything else -- so a plan rebuilt
+    // for installing has to derive them again, or the controller gets the
+    // flight without them. Only for the plan the survey is loaded under: its
+    // heights are measured from THAT plan's takeoff ground, and another
+    // plan's altitudes are measured from its own.
+    const here = state.mission?.frame;
+    const same = here && here.lat0 === mission.frame.lat0 && here.lon0 === mission.frame.lon0;
+    const yAt = same ? lidar?.sampler?.() : null;
+    if (yAt) {
+      mission = bridgeMission(mission, surveySamples(mission, yAt, null), yAt).mission;
+    }
+    return { plan, mission };
   } catch {
     return null;
   }
@@ -1814,25 +1914,63 @@ const view3dWidth = () => {
   return Math.max(200, el.clientWidth || 800);
 };
 
-$('syncTo3d').addEventListener('click', () => {
+// Linked views. On, the map moving points the 3D at the same ground, and the
+// 3D moving points the map -- so six buildings on the left are the same six
+// on the right. The 3D comes to it straight down, north up, which is the only
+// way the two pictures can be compared at all (see scene3d's lookAt).
+//
+// The two directions guard each other: moving the map from the 3D marks the
+// move, and the map's own moveend then skips sending it back -- which would
+// reset an orbit you were in the middle of to straight-down.
+// (`linked` and `moveFromThreeD` are declared up with the view state:
+// setView reads them during startup.)
+try { linked = localStorage.getItem('dji.linked') === '1'; } catch { /* per load */ }
+
+async function point3dAtMap() {
+  // The flat view draws the plan, so with no plan it has nowhere to stand;
+  // the survey can show any ground, plan or not.
+  if (!state.mission && groundMode !== 'survey') await setGround('survey');
   const v = active3d();
-  if (!v?.lookAt) { toast('Nothing in the 3D view to point yet.'); return; }
+  if (!v?.lookAt) return;
   const c = map.getCenter();
   v.lookAt({ lat: c.lat, lon: c.lng, spanM: mapMPerPx() * view3dWidth() });
-  toast('The 3D view is looking where the map is.');
-});
-
-$('syncToMap').addEventListener('click', () => {
+}
+function pointMapAt3d() {
   const at = active3d()?.where?.();
-  if (!at) { toast('Tap out a site first — there is nothing to line up on.'); return; }
-  // A scale back to a zoom: the level whose ground-per-pixel is nearest the
-  // 3D view's own. Never past 21, which is as far as the imagery goes.
+  if (!at) return;
+  // A scale back to a zoom, fractional so the two match rather than land on
+  // the nearest power of two: the zoom whose ground-per-pixel is the 3D's.
   const want = at.spanM / view3dWidth();
-  let z = 21;
-  while (z > 3 && mPerPx(at.lat, z) < want) z -= 1;
-  map.setView([at.lat, at.lon], z, { animate: false });
-  toast('The map is looking where the 3D view is.');
+  const z = Math.max(3, Math.min(21, Math.log2(mPerPx(at.lat, 0) / want)));
+  // Unanimated, Leaflet fires moveend inside setView, so the flag only has
+  // to last the call. Left for moveend to clear, a setView that changed
+  // nothing fired no moveend, and the flag swallowed your next real pan.
+  moveFromThreeD = true;
+  try { map.setView([at.lat, at.lon], z, { animate: false }); } finally { moveFromThreeD = false; }
+}
+let threeDMoveTimer = null;
+function threeDMoved() {
+  if (!linked || activeView === '3d') return;
+  // A drag fires sixty of these a second; the map redraws its tiles on each.
+  if (threeDMoveTimer) return;
+  threeDMoveTimer = setTimeout(() => { threeDMoveTimer = null; pointMapAt3d(); }, 80);
+}
+view3d.onViewMove(threeDMoved);
+map.on('moveend', () => {
+  if (moveFromThreeD) return;
+  if (linked && activeView !== 'map') point3dAtMap();
 });
+function setLinked(on) {
+  linked = !!on;
+  try { localStorage.setItem('dji.linked', linked ? '1' : '0'); } catch { /* per load */ }
+  $('linkBtn').classList.toggle('on', linked);
+  if (linked && activeView !== 'map') point3dAtMap();
+}
+$('linkBtn').addEventListener('click', () => {
+  setLinked(!linked);
+  toast(linked ? 'Views linked: move either one and the other follows.' : 'Views unlinked.');
+});
+$('linkBtn').classList.toggle('on', linked);
 
 // Overhead lines: on, and fetch any this view has not asked about yet. The
 // register is the only source for them, so the switch does the asking too --
@@ -2213,7 +2351,7 @@ $('preset').addEventListener('change', () => {
   renderIdentity();
   history.commit();
 });
-$('clearance').addEventListener('input', () => { computePlan(); });
+$('clearance').addEventListener('input', () => { lidar?.setClearance(clearance()); computePlan(); });
 $('clearance').addEventListener('change', () => {
   try { localStorage.setItem(CLEARANCE_KEY, $('clearance').value); } catch { /* private window */ }
 });
@@ -2342,3 +2480,322 @@ $('stage').addEventListener('pointerout', (e) => {
   if (tipFor && !tipFor.contains(e.relatedTarget)) hideTip();
 });
 window.addEventListener('pointerdown', hideTip, true);
+
+/* ---------- painting ---------- */
+// Drag over the survey to say what you want captured, instead of tapping
+// points and typing heights. A stroke becomes taps (see paintedSite), so
+// everything downstream -- the planner, the share code, undo -- is unchanged.
+// Strokes accumulate: each one re-derives the whole painted area, and Clear
+// wipes the paint with the points. (`paintOn` is declared up with the other
+// view state: applyViewCanvases reads it during startup, before this runs.)
+function setPaint(on) {
+  paintOn = !!on;
+  $('paintBtn').classList.toggle('on', paintOn);
+  lidar?.setPaint(paintOn);
+}
+$('paintBtn').addEventListener('click', () => {
+  setPaint(!paintOn);
+  if (paintOn) toast('Drag over what you want captured. Wheel zooms, right-drag pans.');
+});
+
+async function paintToSite(cells) {
+  const got = paintedSite(cells);
+  if (!got) return;
+  state.paint = cells;
+  // Saved after the plan is set, below, so it is keyed to the right points.
+  site.setCapture(got.points);
+  state.selected = null;
+  renderPointBar();
+  history.commit();
+  // The survey's own height-above-ground, over the painted outline, when that
+  // is taller than the relief the brush saw -- a canopy painted only on its
+  // top has no relief at all. Upgrade-only, like probeHeight: no service, no
+  // change, and the relief stands.
+  let height = got.points[0].height;
+  try {
+    const { measure } = await import('./heights.js');
+    const lats = got.poly.map((p) => p.lat);
+    const lons = got.poly.map((p) => p.lon);
+    const res = await measure([{
+      north: Math.max(...lats), south: Math.min(...lats),
+      east: Math.max(...lons), west: Math.min(...lons),
+      poly: got.poly.map((p) => [p.lat, p.lon]),
+      height, assumed: true,
+    }]);
+    const m = res.obstacles[0];
+    if (m?.measured && m.height > height) {
+      height = m.height;
+      site.setCapture(got.points.map((p) => ({ ...p, height })));
+      history.commit();
+    }
+  } catch { /* the relief stands */ }
+  savePaint();
+  toast(`Painted ${Math.round(got.areaM2)} m² — planning for ${height} m tall. Checking every spot is seen…`,
+    { sticky: true });
+  // Let the toast paint before the search takes the thread.
+  setTimeout(fitToPaint, 30);
+}
+
+/* ---------- checking the plan against the survey ---------- */
+// What the photos see of the real ground (js/views.js), run once things settle:
+// shots added wherever consecutive photos stop overlapping, so sequential
+// matching can chain the whole capture; and the heat layer. Needs the survey
+// loaded -- without it nothing here runs and the plan stands as planned.
+let surveyBusy = false;
+function surveySamples(m, yAt, paint = state.paint) {
+  const f = m.frame;
+  const xs = [];
+  const ys = [];
+  // Round the paint when there is paint, so every candidate plan -- and the
+  // plan on screen afterwards -- is graded on the SAME samples. Sized from the
+  // flight, the grid moved with each candidate, and the search reported 88%
+  // for the plan the readout then called 76%.
+  const around = paint?.length ? paint : m.exported;
+  for (const c of around) { const p = f.toLocal(c.lat, c.lon); xs.push(p.x); ys.push(p.y); }
+  const pad = paint?.length ? 30 : 15;
+  // About 8,000 ground samples whatever the size: 3 m cells on a small site,
+  // coarser on a big one, so a check stays around a second. Snapped to the
+  // step, so the same ground gives the same samples.
+  const w0 = Math.max(...xs) - Math.min(...xs) + 2 * pad;
+  const h0 = Math.max(...ys) - Math.min(...ys) + 2 * pad;
+  const step = Math.max(3, Math.ceil(Math.sqrt((w0 * h0) / 8000)));
+  const snap = (v) => Math.floor(v / step) * step;
+  const x0 = snap(Math.min(...xs) - pad), x1 = Math.max(...xs) + pad;
+  const y0 = snap(Math.min(...ys) - pad), y1 = Math.max(...ys) + pad;
+  const keys = new Set((paint ?? []).map((c) => {
+    const q = toPuwg92(c.lat, c.lon);
+    return `${Math.floor(q.east / 2)},${Math.floor(q.north / 2)}`;
+  }));
+  const painted = (x, y) => {
+    if (!keys.size) return false;
+    const g = f.toLatLon(x, y);
+    const q = toPuwg92(g.lat, g.lon);
+    // A 2 m paint cell is smaller than a coarse sample step; any paint within
+    // a cell of the sample counts.
+    for (let de = -1; de <= 1; de++) for (let dn = -1; dn <= 1; dn++) {
+      if (keys.has(`${Math.floor(q.east / 2) + de},${Math.floor(q.north / 2) + dn}`)) return true;
+    }
+    return false;
+  };
+  // What is drawn is what is scored: with the points up, the samples are the
+  // points' own voxels, so the heat lands on the points you are looking at --
+  // a wall's points and the floor's below it are different voxels, where the
+  // surface's 2D heat gave them one colour. Coarsened until the count is
+  // about what a check affords: voxels stack, so the same step gives several
+  // times the samples a ground grid does.
+  if (lidar?.cloudShown?.()) {
+    let vstep = step;
+    let vox = lidar.voxelSamples({ x0, x1, y0, y1, step: vstep });
+    while (vox && vox.length > 12000) {
+      vstep *= 1.25;
+      vox = lidar.voxelSamples({ x0, x1, y0, y1, step: vstep });
+    }
+    if (vox?.length) {
+      // Painted from the selected points themselves when the brush selected
+      // points; from the painted ground cells when it painted the surface.
+      if (!vox.selAware) for (const sm of vox) sm.painted = painted(sm.x, sm.y);
+      vox.step = vstep;
+      vox.voxel = true;
+      return vox;
+    }
+  }
+  const out = surfaceSamples({ yAt, x0, x1, y0, y1, step, painted });
+  out.step = step;
+  return out;
+}
+function judge(m, samples, yAt) {
+  const bridged = bridgeMission(m, samples, yAt);
+  const v = measureViews(bridged.mission, samples, yAt);
+  return { mission: bridged.mission, added: bridged.added, heat: v.heat,
+    cover: paintedCoverage(samples, v.heat) };
+}
+function surveyCheck() {
+  const yAt = lidar?.sampler?.();
+  if (!yAt || !state.mission || surveyBusy) return;
+  surveyBusy = true;
+  try {
+    const samples = surveySamples(state.mission, yAt);
+    const got = judge(state.mission, samples, yAt);
+    state.paintCover = state.paint ? got.cover : null;
+    if (got.added) {
+      state.mission = got.mission;
+      drawRoute();
+      lidar?.setMission(state.mission, state.hazard);
+    }
+    if (samples.voxel) {
+      lidar?.setHeat(null);
+      lidar?.setCloudHeat(got.heat);
+    } else {
+      lidar?.setHeat(samples.map((sm, i) => ({ ...sm, heat: got.heat[i] })), { size: samples.step });
+    }
+  } finally {
+    surveyBusy = false;
+  }
+}
+
+// After a stroke: more rings, then cross passes, then tighter rings, until
+// nine-tenths of what was painted comes out hot -- or the ladder runs out, in
+// which case the best rung wins and the readout says how far short it fell.
+// Multiple circles and more batteries are acceptable; an unseen wall is not.
+// A candidate the survey says flies clear, or null. Each rung of the ladder
+// was judged on coverage alone -- tighter rings, cross passes through the
+// site -- and the one picked over Kielce was seen going through trees. So a
+// candidate is checked against the LiDAR at the clearance you set, and if it
+// hits, the whole thing is lifted -- points and altitude together, 3 m at a
+// time -- until it clears. Lifting only ever moves away from what it would
+// hit; 45 m of it and the rung is given up.
+function safePlan(v) {
+  const points = site.capture();
+  for (let lift = 0; lift <= 45; lift += 3) {
+    const p = paramsFromUi({ ...v, altitude: v.altitude + lift });
+    p.subjectClearance = clearance();
+    let m;
+    try {
+      m = planMission({ ...siteForPlanner(), points: points.map((q) => ({ ...q, height: q.height + lift })) }, p, cam);
+    } catch { return null; }
+    const check = lidar?.checkFlight?.(m, clearance());
+    // No survey to check against: not safe to call safe, so no lift is
+    // offered either -- the plan is what it was before this search existed.
+    if (!check) return lift === 0 ? { mission: m, lift: 0 } : null;
+    if (!check.hits) return { mission: m, lift };
+  }
+  return null;
+}
+
+const PAINT_LADDER = [
+  {},
+  { orbitRings: 2 },
+  { orbitRings: 3 },
+  { orbitRings: 3, transect: true },
+  { orbitRings: 3, transect: true, orbitStandoff: -10 },
+  { orbitRings: 4, transect: true, orbitStandoff: -10 },
+];
+function fitToPaint() {
+  const yAt = lidar?.sampler?.();
+  if (!yAt || !state.mission) return;
+  if (!tuned) autoFit();
+  const base = uiValues();
+  const samples = surveySamples(state.mission, yAt);
+  let best = null;
+  for (const rung of PAINT_LADDER) {
+    const v = { ...base, ...rung };
+    const safe = safePlan(v);
+    if (!safe) continue;
+    const got = judge(safe.mission, samples, yAt);
+    if (!best || got.cover > best.cover) best = { ...got, rung, lift: safe.lift };
+    if (got.cover >= 0.9) break;
+  }
+  if (!best) {
+    toast('No plan here stays clear of the survey within 45 m of lift — paint less, or raise the clearance.');
+    return;
+  }
+  if (best.lift) {
+    $('altitude').value = +$('altitude').value + best.lift;
+    site.setCapture(site.capture().map((q) => ({ ...q, height: q.height + best.lift })));
+  }
+  if (best.rung.orbitRings) $('orbitRings').value = String(best.rung.orbitRings);
+  if (best.rung.transect) $('transect').checked = true;
+  if (best.rung.orbitStandoff !== undefined) controls.orbitStandoff.el.value = best.rung.orbitStandoff;
+  tuned = true;
+  showPreset();
+  computePlan();
+  surveyCheck();
+  renderReadout();
+  setPaintView('captured');
+  const pct = Math.round(best.cover * 100);
+  toast(pct >= 90
+    ? `${pct}% of what you painted is seen well — close, often, from wide angles.`
+    : `Best found: ${pct}% of what you painted is seen well. The cold and missing spots are under the heat layer.`);
+}
+$('cloudBtn').addEventListener('click', () => {
+  const on = !$('cloudBtn').classList.contains('on');
+  $('cloudBtn').classList.toggle('on', on);
+  lidar?.setCloud(on);
+  // The heat lives on whichever picture is drawn; score again for this one.
+  surveyCheck();
+  renderReadout();
+});
+$('heatBtn').addEventListener('click', () => {
+  const on = !$('heatBtn').classList.contains('on');
+  $('heatBtn').classList.toggle('on', on);
+  lidar?.setHeatVisible(on);
+});
+
+/* ---------- the survey's loading state ---------- */
+// Drawn from what js/scene3d.js says it is waiting for. An open-ended wait --
+// a first build is minutes -- counts its own time, because a bar that does not
+// move and a clock that does is the difference between waiting and wondering.
+// (`loadState` and `loadClock` are declared up with the view state: startup
+// calls placeLoading through applyViewCanvases before this runs.)
+const mmssOf = (ms) => {
+  const t = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+};
+function placeLoading() {
+  $('load3d').hidden = !loadState || activeView === 'map' || groundMode !== 'survey';
+}
+function paintLoading() {
+  const st = loadState;
+  if (!st) return;
+  $('loadStage').textContent = st.stage;
+  const clock = st.since ? `${st.detail ? ' · ' : ''}${mmssOf(Date.now() - st.since)} so far` : '';
+  $('loadDetail').textContent = `${st.detail ?? ''}${clock}`;
+  const bar = $('loadBar');
+  bar.parentElement.classList.toggle('sweep', st.frac == null);
+  bar.style.width = st.frac == null ? '' : `${Math.round(Math.min(1, st.frac) * 100)}%`;
+}
+function showLoading(st) {
+  loadState = st;
+  clearInterval(loadClock);
+  loadClock = null;
+  $('load3d').classList.toggle('minor', !!st?.minor);
+  if (st?.since) loadClock = setInterval(paintLoading, 1000);
+  paintLoading();
+  placeLoading();
+}
+
+/* ---------- painted, or what will be captured ---------- */
+// The capture always takes in more than was painted -- a ring photographs
+// everything it passes -- so after a stroke the points can show either:
+// what you selected, or how well each will come out. Only with the points up
+// and something painted; the surface keeps its own heat button.
+function placePaintView() {
+  $('paintView').hidden = !(activeView !== 'map' && groundMode === 'survey'
+    && lidar?.cloudShown?.() && state.paint?.length);
+}
+function setPaintView(view) {
+  for (const b of document.querySelectorAll('#paintView button')) {
+    b.classList.toggle('on', b.dataset.view === view);
+  }
+  lidar?.setPaintView(view);
+  placePaintView();
+}
+for (const b of document.querySelectorAll('#paintView button')) {
+  b.addEventListener('click', () => setPaintView(b.dataset.view));
+}
+
+/* ---------- paint across a reload ---------- */
+// What was painted survives a refresh. Kept in this browser only -- it is a
+// working state, like the undo stack, not part of the plan code -- and keyed
+// to the plan's points, because a refresh restores the plan through the same
+// path a different saved plan loads through, and paint belongs to one plan.
+const PAINT_KEY = 'dji.paint';
+const planSig = () => site.capture().map((q) => `${q.lat.toFixed(6)},${q.lon.toFixed(6)}`).join(';');
+function savedPaint() {
+  try { return JSON.parse(localStorage.getItem(PAINT_KEY) ?? 'null'); } catch { return null; }
+}
+function savePaint() {
+  try {
+    if (!state.paint?.length) { localStorage.removeItem(PAINT_KEY); return; }
+    localStorage.setItem(PAINT_KEY, JSON.stringify({
+      sig: planSig(),
+      cells: state.paint.map((c) => ({ lat: +c.lat.toFixed(7), lon: +c.lon.toFixed(7), y: +c.y.toFixed(2) })),
+      selection: lidar?.selectionState?.() ?? null,
+    }));
+  } catch { /* storage full or blocked: paint lasts this load only */ }
+}
+{
+  const saved = savedPaint();
+  if (saved?.cells?.length && saved.sig === planSig()) state.paint = saved.cells;
+}
+

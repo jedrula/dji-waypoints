@@ -32,6 +32,7 @@ const norm = (a) => {
 const add = (a, b, s = 1) => ({ x: a.x + b.x * s, y: a.y + b.y * s, z: a.z + b.z * s });
 
 export function createView3D(canvas) {
+  let onViewMove = () => {};
   const ctx = canvas.getContext('2d');
   let mission = null;
   // Other saved plans switched on in the Plans pane. A site bigger than one
@@ -1093,6 +1094,7 @@ export function createView3D(canvas) {
     view.el = Math.max(-5, Math.min(89, view.el + (e.clientY - drag.y) * 0.3));
     drag = { x: e.clientX, y: e.clientY };
     draw();
+    onViewMove();
   });
   // A height dragged in the air is a draft until the mouse comes up; that is
   // when it becomes an edit worth storing and sending. A box let go of without
@@ -1123,6 +1125,7 @@ export function createView3D(canvas) {
     e.preventDefault();
     view.dist = Math.max(5, Math.min(6000, view.dist * (e.deltaY > 0 ? 1.12 : 0.89)));
     draw();
+    onViewMove();
   }, { passive: false });
 
   return {
@@ -1205,6 +1208,10 @@ export function createView3D(canvas) {
       // site of that span, so a span comes back out the same way.
       return { lat: g.lat, lon: g.lon, spanM: Math.max(20, view.dist / 2.2) };
     },
+
+    // You moved the camera -- not lookAt, which is the app moving it -- so a
+    // linked map can follow.
+    onViewMove(fn) { onViewMove = fn ?? (() => {}); },
 
     lookAt({ lat, lon, spanM }) {
       if (!scene) return;

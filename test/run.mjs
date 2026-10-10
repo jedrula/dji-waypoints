@@ -1790,6 +1790,118 @@ console.log('\nPL-2000, the grid the mesh models arrive in');
      `${(home.east - p.east).toFixed(0)} m east, ${(home.north - p.north).toFixed(0)} m north`);
 }
 
+console.log('\na painted area');
+{
+  const { paintedSite, PAINT_HULL_MAX, DEFAULT_POINT_HEIGHT } = await import('../js/site.js');
+  const { frame } = await import('../js/geo.js');
+  // A 40 x 20 m patch of 2 m cells over Kadzielnia: floor at 0, a wall
+  // climbing to 23 m along its north edge.
+  const f = frame(50.8612, 20.6167);
+  const cells = [];
+  for (let x = 0; x < 40; x += 2) for (let y = 0; y < 20; y += 2) {
+    cells.push({ ...f.toLatLon(x, y), y: y >= 18 ? 23 : 0 });
+  }
+  const got = paintedSite(cells);
+  ok('a painted patch becomes points on its outline', got.points.length >= 4 && got.points.length <= PAINT_HULL_MAX,
+     `${got.points.length} points`);
+  ok('each carries the painted relief, top minus bottom', got.points.every((p) => p.height === 23));
+  ok('the outline covers the patch', Math.abs(got.areaM2 - 38 * 18) < 1, `${got.areaM2.toFixed(0)} m2`);
+
+  // One painted thing is one thing to the planner -- one ring, not one per
+  // bunch of outline points.
+  const { planMission } = await import('../js/planner.js');
+  const { CAMERAS } = await import('../js/camera.js');
+  const plan = planMission({ points: got.points }, {}, CAMERAS.mini5pro);
+  ok('and the planner reads it as ONE thing', plan.subjects.filter((t) => t.kind === 'capture').length === 1,
+     `${plan.subjects.filter((t) => t.kind === 'capture').length} things`);
+
+  const flat = paintedSite(cells.map((c) => ({ ...c, y: 5 })));
+  ok('flat paint never goes under the default height', flat.points.every((p) => p.height === DEFAULT_POINT_HEIGHT));
+
+  const blob = [];
+  for (let a = 0; a < 360; a += 3) blob.push({ ...f.toLatLon(30 * Math.cos(a * Math.PI / 180), 30 * Math.sin(a * Math.PI / 180)), y: 0 });
+  ok('a round patch is thinned to the cap', paintedSite(blob).points.length === PAINT_HULL_MAX);
+  ok('a line of paint is no area', paintedSite([cells[0], cells[1]]) === null);
+}
+
+console.log('\nthe survey in local metres');
+{
+  const { localSampler, groundAt } = await import('../js/surface.js');
+  const { frame } = await import('../js/geo.js');
+  const { toWgs84 } = await import('../js/puwg92.js');
+  // A synthetic tile at Kadzielnia's: heights that differ in every cell, so a
+  // sampler one cell out anywhere is caught.
+  const meta = { origin: { east: 616000, north: 331500 }, tileMetres: 500, cellMetres: 0.5, grid: 1000, base: 260 };
+  const height = new Uint16Array(1000 * 1000).map((_, i) => (i * 7919) % 6000);
+  const g0 = toWgs84(616250, 331750);
+  const f = frame(g0.lat, g0.lon);
+  const yAt = localSampler(meta, height, f, 270);
+  let worst = 0;
+  for (let k = 0; k < 400; k++) {
+    const e = 616010 + ((k * 37) % 480);
+    const n = 331510 + ((k * 53) % 480);
+    const g = toWgs84(e + 0.1, n + 0.1);
+    const l = f.toLocal(g.lat, g.lon);
+    worst = Math.max(worst, Math.abs(yAt(l.x, l.y) - (groundAt(meta, height, g.lat, g.lon) - 270)));
+  }
+  ok('the local sampler reads the same cell as groundAt', worst === 0, `worst ${worst.toFixed(2)} m`);
+  ok('and nothing off the tile', yAt(-400, -400) === null);
+}
+
+console.log('\nwhat the photos see of the survey');
+{
+  const V = await import('../js/views.js');
+  const { frame } = await import('../js/geo.js');
+  // Flat ground at 0 with a 12 m wall: everything east of x = 20 is a 12 m
+  // plateau, so the face at x = 20 looks WEST.
+  const yAt = (x) => (x >= 20 ? 12 : 0);
+  const samples = V.surfaceSamples({ yAt, x0: -30, x1: 40, y0: -20, y1: 20, step: 2, painted: () => true });
+  const wall = samples.filter((s) => s.wall);
+  ok('a step in the survey becomes a wall', wall.length > 0 && wall.every((s) => s.nx === -1 && s.nz === 0),
+     `${wall.length} wall samples`);
+
+  const idx = (pred) => samples.findIndex(pred);
+  const groundWest = idx((s) => !s.wall && s.x === 10 && s.y === 0);
+  const face = idx((s) => s.wall && Math.abs(s.y) < 1 && s.z >= 5 && s.z <= 7);
+  // From the west, level with the face: sees it.
+  const west = V.frameSees({ x: -10, y: 0, z: 6, yaw: 90, pitch: 0 }, samples, yAt);
+  ok('a camera facing the wall sees it', face >= 0 && west.includes(face));
+  // From the plateau, looking west and down at ground beyond the wall's foot.
+  const behind = V.frameSees({ x: 34, y: 0, z: 14, yaw: 270, pitch: -10 }, samples, yAt);
+  ok('and never the back of it', face >= 0 && !behind.includes(face));
+  // Low on the plateau, looking down at ground the wall top hides.
+  const hidden = V.frameSees({ x: 30, y: 0, z: 13, yaw: 270, pitch: -15 }, samples, yAt);
+  ok('ground the wall stands in front of is hidden', !hidden.includes(groundWest));
+
+  const s0 = { x: 0, y: 0, z: 0 };
+  const far = [{ x: -80, y: 0, z: 40 }, { x: -78, y: 6, z: 40 }];
+  ok('seen only far out by two cameras is cold', V.heatOf(s0, far) < 0.15, V.heatOf(s0, far).toFixed(2));
+  const close = [{ x: -8, y: 0, z: 6 }, { x: 0, y: -8, z: 6 }, { x: 8, y: 0, z: 6 }, { x: 0, y: 8, z: 6 }];
+  ok('seen close, from four sides, is hot', V.heatOf(s0, close) === 1);
+  const stacked = [{ x: -8, y: 0, z: 6 }, { x: -8.2, y: 0, z: 6 }, { x: -8.4, y: 0, z: 6 }];
+  ok('three close views from one spot have no parallax', V.heatOf(s0, stacked) < 0.1, V.heatOf(s0, stacked).toFixed(2));
+  ok('unseen is zero', V.heatOf(s0, []) === 0);
+
+  // Two photos of the plain, one looking north and the next looking south:
+  // nothing in common, so sequential matching would lose the thread there.
+  const flat = () => 0;
+  const plain = V.surfaceSamples({ yAt: flat, x0: -60, x1: 60, y0: -60, y1: 60, step: 3 });
+  const f = frame(50.86, 20.61);
+  const at = (x, y, yaw) => ({ ...f.toLatLon(x, y), alt: 15, yaw, shots: [-30], heading: { mode: 'smoothTransition', angle: yaw }, speed: 4 });
+  const mission = { frame: f, exported: [at(-10, 0, 0), at(10, 0, 180)], stats: { waypoints: 2, photos: 2, seconds: 10 } };
+  const before = V.measureViews(mission, plain, flat);
+  ok('opposite views do not overlap', V.weakLinks(before.sees).length === 1);
+  const fixed = V.bridgeMission(mission, plain, flat);
+  const after = V.measureViews(fixed.mission, plain, flat);
+  ok('bridging adds shots until every consecutive pair overlaps',
+     fixed.added > 0 && V.weakLinks(after.sees).length === 0, `${fixed.added} added`);
+  const onLeg = fixed.mission.exported.every((w) => {
+    const p = f.toLocal(w.lat, w.lon);
+    return Math.abs(p.y) < 1e-6 && p.x >= -10 - 1e-6 && p.x <= 10 + 1e-6 && w.alt === 15;
+  });
+  ok('and every added shot is on the leg already flown', onLeg);
+}
+
 console.log('\nthe height you type');
 {
   const { parseHeight } = await import('../js/site.js');
@@ -2082,6 +2194,14 @@ console.log('\ncontroller bridge');
     globalThis.location = { hostname: 'localhost' };
     ok('a page from this machine talks to the service on this machine',
        serviceUrl() === 'http://localhost:8130', serviceUrl());
+    globalThis.dji = { desktop: true };
+    globalThis.location = { hostname: '127.0.0.1' };
+    ok('so does the desktop app, which runs its own',
+       serviceUrl() === 'http://localhost:8130', serviceUrl());
+    const { syncUrl } = await import('../js/service.js');
+    ok('but it syncs the library with the hosted one, where the phone is',
+       syncUrl() === 'https://drone.topomatch.com', syncUrl());
+    delete globalThis.dji;
   } finally {
     if (realLocation === undefined) delete globalThis.location;
     else globalThis.location = realLocation;

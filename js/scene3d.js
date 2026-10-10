@@ -35,7 +35,7 @@ import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { toPuwg92, toWgs84 } from './puwg92.js';
 import { tileRange, tileCount, tileBounds, mPerPx, TILE_PX } from './tiles.js';
-import { groundAt, puwgToLocal, localToTile, drapeWire, stitch } from './surface.js';
+import { groundAt, puwgToLocal, localToTile, drapeWire, stitch, localSampler } from './surface.js';
 import { toWgs84 as puwgToWgs84 } from './puwg92.js';
 import { serviceUrl, serviceHeaders } from './service.js';
 import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, VERDICT_COLOR, TAP_COLOR, asHex } from './palette.js';
@@ -62,6 +62,26 @@ const MARGIN_M = 200;
 // 1 m. 121 ms, once, on a view whose first tile is minutes of downloading --
 // and a metre is the width of the things this picture exists to show.
 const MAX_VERTS = 600_000;
+
+// The heat colour ramp, once: the surface's heat texture is coloured from it
+// in JS, and the points are coloured from it in GLSL generated from the same
+// stops -- two renderings of one scale must not drift into two scales.
+const HEAT_RAMP = [
+  [0.00, [0.20, 0.05, 0.45]],
+  [0.35, [0.62, 0.10, 0.55]],
+  [0.60, [0.93, 0.27, 0.27]],
+  [0.82, [0.99, 0.62, 0.15]],
+  [1.00, [1.00, 0.95, 0.60]],
+];
+const glslVec = (c) => `vec3(${c.map((v) => v.toFixed(3)).join(', ')})`;
+const HEAT_RAMP_GLSL = `
+  vec3 heatRamp(float t) {
+${HEAT_RAMP.slice(1).map(([t1, c1], i) => {
+    const [t0, c0] = HEAT_RAMP[i];
+    return `    if (t <= ${t1.toFixed(3)}) return mix(${glslVec(c0)}, ${glslVec(c1)}, (t - ${t0.toFixed(3)}) / ${(t1 - t0).toFixed(3)});`;
+  }).join('\n')}
+    return ${glslVec(HEAT_RAMP.at(-1)[1])};
+  }`;
 
 // A step between neighbouring cells this big is a vertical face rather than a
 // slope. Same 1.75 m the service's viewer defaults its "mark walls at" slider
@@ -193,6 +213,61 @@ export function createScene3D(canvas) {
   let opening = false;
   let inFlight = null;
 
+  // Painting what you want captured, on the surface itself. Cells on a fixed
+  // PUWG92 grid so a stroke over ground already painted adds nothing twice,
+  // and kept as lat/lon so the paint survives the frame moving under it --
+  // which it does the moment the first stroke turns into a plan with its own
+  // origin. `y` is the height the brush hit at, in this view's metres: the
+  // only per-cell height this view has without a raycast per cell, and what
+  // the relief of the painted thing is read from. See onPaint.
+  const PAINT_CELL = 2;
+  let paintOn = false;
+  let painting = false;
+  const painted = new Map();   // "e,n" -> { lat, lon, y }
+  let paintDots = null;
+  let onPaint = () => {};
+  let heatOn = true;
+  // The survey as its own points (server/src/points.js), drawn over the
+  // raster surface wherever the service has them. The surface stays drawn
+  // underneath as a backing -- alone, the points let the sky through between
+  // them and the picture washed out pale blue -- and the brush raycasts
+  // against it and the heat is measured on it. `raw` is kept so a change of
+  // frame or datum re-places the same points.
+  let cloud = null;          // { raw: Uint8Array, meta, points }
+  let cloudFor = null;       // the request it answers, so one place asks once
+  let cloudOn = true;
+  let onCloud = () => {};
+  // What the view is waiting for, for the app to draw over the pane. The
+  // toasts were the whole loading state, and a toast over an empty sky for the
+  // minutes a first build takes read as broken. `{ stage, detail, frac, since,
+  // minor }`: frac 0..1 when bytes are counted, null when only time is; since
+  // is when an open-ended wait began; minor is a wait that does not block the
+  // picture (the points, over a surface already drawn). null when idle.
+  let onLoading = () => {};
+  const pointHeatOn = { value: 0 };
+  let clearM = 3;   // the clearance the flight check judges against; setClearance
+  let userMoving = false;
+  let onViewMove = () => {};
+  // Which the points show: the painted selection, or the heat. Forced on
+  // while a stroke is in progress -- you see what you are painting.
+  const selOn = { value: 0 };
+  let selView = false;
+  // Where the camera was last placed from: the frame origin and datum it was
+  // expressed in, so a rebuild in a new frame can move it rather than reset it.
+  let viewSet = null;
+  // Shared by every surface material this view builds: buildSurface makes a
+  // new one per tile load, and the heat must not fall off when it does.
+  const heatU = {
+    uHeat: { value: null },
+    uHeatBox: { value: new THREE.Vector4(0, 0, 1, 1) },
+    uHeatOn: { value: 0 },
+    // 1 while the points are drawn over the surface: it darkens to a backing
+    // and is pushed back in depth (polygonOffset, see applyBacking) so the
+    // points on a wall -- level with the surface's own wall -- win the depth
+    // test instead of vanishing into it.
+    uBacking: { value: 0 },
+  };
+
   function boot() {
     if (renderer) return;
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -216,7 +291,17 @@ export function createScene3D(canvas) {
     // bug this comment is standing on: "Maximum call stack size exceeded", the
     // first time the view was ever opened.
     controls.enableDamping = false;
-    controls.addEventListener('change', () => { render(); scheduleRedrape(); });
+    controls.addEventListener('change', () => {
+      render();
+      scheduleRedrape();
+      // Only a move YOU made: the controls bracket every user gesture --
+      // wheel included -- with start and end, and lookAt's update() is not
+      // one. Without the distinction a linked map moving the view would be
+      // told the view moved, and move the map back.
+      if (userMoving) onViewMove();
+    });
+    controls.addEventListener('start', () => { userMoving = true; });
+    controls.addEventListener('end', () => { userMoving = false; onViewMove(); });
     // The chips live over the canvas, and a drag on one is not an orbit.
     chipBox = document.createElement('div');
     chipBox.id = 'levelchips';
@@ -229,6 +314,8 @@ export function createScene3D(canvas) {
     globalThis.addEventListener('pointermove', moveRing);
     globalThis.addEventListener('pointerup', endRing);
     globalThis.addEventListener('pointercancel', endRing);
+    globalThis.addEventListener('pointerup', endPaint);
+    globalThis.addEventListener('pointercancel', endPaint);
 
     canvas.addEventListener('pointerdown', meshDown);
     canvas.addEventListener('pointermove', meshMove);
@@ -362,6 +449,7 @@ export function createScene3D(canvas) {
         // UV space: origin then size. The whole tile is (0,0,1,1); a patch
         // draped at a higher zoom is a smaller rect inside it.
         uPatch: { value: patchUv() },
+        ...heatU,
       },
       vertexShader: `
         attribute vec3 color;
@@ -370,8 +458,10 @@ export function createScene3D(canvas) {
         varying vec2 vUv;
         varying vec3 vColor, vNormal2;
         varying float vWall, vKind;
+        varying vec2 vLocal;
         void main() {
           vUv = uv;
+          vLocal = vec2(position.x, -position.z);
           vColor = color;
           vWall = aWall;
           vKind = aKind;
@@ -382,9 +472,14 @@ export function createScene3D(canvas) {
         uniform sampler2D uOrtho;
         uniform int uHasOrtho;
         uniform vec4 uPatch;
+        uniform sampler2D uHeat;
+        uniform vec4 uHeatBox;
+        uniform float uHeatOn;
+        uniform float uBacking;
         varying vec2 vUv;
         varying vec3 vColor, vNormal2;
         varying float vWall, vKind;
+        varying vec2 vLocal;
 
         ${LAMBERT_GLSL}
 
@@ -415,7 +510,18 @@ export function createScene3D(canvas) {
           // A photograph taken in sunlight already has the sun in it, so this
           // only gives the relief an edge: never below 0.42 of the photo,
           // never above it.
-          gl_FragColor = vec4(base * lambert(vNormal2), 1.0);
+          vec3 lit = base * lambert(vNormal2) * (uBacking > 0.5 ? 0.45 : 1.0);
+          // The heat layer (setHeat): a texture over the local metres the
+          // samples covered, alpha zero where no photo sees the ground -- so
+          // the uncaptured is the plain survey, not a cold colour.
+          if (uHeatOn > 0.5) {
+            vec2 hUv = (vLocal - uHeatBox.xy) / (uHeatBox.zw - uHeatBox.xy);
+            if (hUv.x >= 0.0 && hUv.x <= 1.0 && hUv.y >= 0.0 && hUv.y <= 1.0) {
+              vec4 h = texture2D(uHeat, hUv);
+              lit = mix(lit, h.rgb, h.a * 0.78);
+            }
+          }
+          gl_FragColor = vec4(lit, 1.0);
         }`,
     });
   }
@@ -647,6 +753,10 @@ export function createScene3D(canvas) {
   function render() {
     if (!renderer || !running) return;
     size();
+    if (cloud?.points) {
+      cloud.points.material.uniforms.uScale.value =
+        canvas.clientHeight / 2 / Math.tan((camera.fov * Math.PI) / 360);
+    }
     renderer.render(scene, camera);
     placeLevelChips();
   }
@@ -825,7 +935,33 @@ export function createScene3D(canvas) {
     loaded.step = step;
     buildFlights();
     buildWires();
-    frameCamera();
+    // The datum may have moved with the surface; re-place the points on it,
+    // and ask for them if this ground has not been asked about. AFTER
+    // loaded.datum is set: done before it, the points were placed on the old
+    // datum and sat 15 m under the surface at Kadzielnia after the first paint
+    // stroke -- buried, and invisible to every camera in the heat check.
+    if (cloud) buildCloud();
+    applyBacking();
+    loadCloud();
+    heightsFromRaster();
+    if (mission) reportMesh();
+    // Frame the camera once, when the ground first appears. Every later
+    // rebuild -- and the first paint stroke causes one, because it turns into
+    // a plan with its own origin -- used to re-frame too, so you zoomed in,
+    // painted, and were thrown back out to the whole site. Now the view is
+    // kept, moved by however far the origin and the datum moved, so the
+    // same ground stays under the cursor.
+    if (!viewSet) {
+      frameCamera();
+      viewSet = { lat0: frame.lat0, lon0: frame.lon0, datum };
+    } else if (viewSet.lat0 !== frame.lat0 || viewSet.lon0 !== frame.lon0 || viewSet.datum !== datum) {
+      const o = frame.toLocal(viewSet.lat0, viewSet.lon0);
+      const shift = new THREE.Vector3(o.x, viewSet.datum - datum, -o.y);
+      camera.position.add(shift);
+      controls.target.add(shift);
+      controls.update();
+      viewSet = { lat0: frame.lat0, lon0: frame.lon0, datum };
+    }
   }
 
   // Overhead lines, at the height the voltage implies, over the ground that is
@@ -1133,6 +1269,23 @@ export function createScene3D(canvas) {
   // The height of the surface a top-down view is really looking at: the
   // tallest thing tapped, which is what the map's imagery is showing the roof
   // of. Zero with nothing tapped, which is the old behaviour exactly.
+  // The ground round a point, in this view's metres: the lowest survey cell
+  // of nine across 30 m, because the survey is the TOP of everything and the
+  // ground is what the map's scale is about. Null with no survey loaded.
+  function groundNear(lat, lon) {
+    if (!loaded?.meta || loaded.datum === undefined) return null;
+    const dLat = 15 / 111320;
+    const dLon = 15 / (111320 * Math.cos((lat * Math.PI) / 180));
+    let low = Infinity;
+    for (const a of [-1, 0, 1]) {
+      for (const b of [-1, 0, 1]) {
+        const h = groundAt(loaded.meta, loaded.height, lat + a * dLat, lon + b * dLon);
+        if (h !== null && h < low) low = h;
+      }
+    }
+    return Number.isFinite(low) ? low - loaded.datum : null;
+  }
+
   function lookHeight() {
     const taps = mission?.points ?? [];
     return taps.length ? Math.max(0, ...taps.map((q) => q.height ?? 0)) : 0;
@@ -1369,12 +1522,34 @@ export function createScene3D(canvas) {
   //
   // Geometry only. What counts as too close is a clearance the user chose, and
   // that belongs to the readout in js/app.js, not here.
-  function checkMesh() {
-    if (!meshMode || !meshGroup?.children.length || !mission) return null;
-    const path = mission.exported ?? mission.waypoints ?? [];
+  //
+  // Over the LiDAR too, since 2026-10-10. It ran only in mesh mode -- one
+  // street in Wroclaw -- so everywhere else, which is everywhere, no leg was
+  // ever checked against a tree, and a painted plan over Kielce was seen
+  // flying through canopy. The raster now fills the same height grid (see
+  // heightsFromRaster), and the answer is judged against the clearance you
+  // set: a leg counts as a strike once it passes within `clearM` of anything,
+  // up or sideways -- not only once it is inside it.
+  function checkMesh(m = mission, clr = clearM) {
+    if (!heights || !m) return null;
+    const path = m.exported ?? m.waypoints ?? [];
     if (!path.length) return null;
     const t0 = performance.now();
-    const frame = mission.frame;
+    const frame = m.frame;
+    // Sideways clearance as a neighbourhood: the tallest cell within the
+    // clearance of the point. Max-of-maxes, so it only ever errs high.
+    const R = Math.max(0, Math.ceil(clr / HCELL));
+    const near = (x, z) => {
+      let top = null;
+      for (let dz = -R; dz <= R; dz++) {
+        for (let dx = -R; dx <= R; dx++) {
+          if (dx * dx + dz * dz > R * R) continue;
+          const g = groundUnder(x + dx * HCELL, z + dz * HCELL);
+          if (g !== null && (top === null || g > top)) top = g;
+        }
+      }
+      return top;
+    };
     const at = (w) => {
       const l = frame.toLocal(w.lat, w.lon);
       return new THREE.Vector3(l.x, w.alt, -l.y);
@@ -1413,10 +1588,10 @@ export function createScene3D(canvas) {
       let anyGround = false;
       for (let k = 0; k <= steps && !through; k++) {
         const f = k / steps;
-        const g2 = groundUnder(a.x + dx * f, a.z + dz * f);
+        const g2 = near(a.x + dx * f, a.z + dz * f);
         if (g2 === null) continue;
         anyGround = true;
-        if (a.y + dy * f < g2) through = true;
+        if (a.y + dy * f < g2 + clr) through = true;
       }
       // 1 hits, 2 clear, 0 not judged -- and a leg with no mesh anywhere under
       // it is NOT clear, it is unjudged. This said `through ? 1 : 2` for one
@@ -1475,7 +1650,7 @@ export function createScene3D(canvas) {
   // ring only partly seen is lifted by what can be seen of it, and the readout
   // says how much was not.
   function fitRings(clearanceM) {
-    if (!meshMode || !heights || !mission) return null;
+    if (!heights || !mission) return null;
     const rings = mission.heights?.orbit;
     if (!rings?.length) return null;
     const path = mission.exported ?? mission.waypoints ?? [];
@@ -1525,9 +1700,389 @@ export function createScene3D(canvas) {
   // geometry -- so it is a ray against y = 0, which is flat ground at the
   // datum. On a hill that is out by the slope over the distance clicked, and
   // it only has to land in the right 100 m square.
+  // The brush. Raycast against the surface -- the heightfield, or the
+  // photogrammetric mesh where one is loaded -- and mark every grid cell within
+  // the brush of the hit. The radius follows the camera distance so the brush
+  // is about the same size on screen however far out you are.
+  function paintAt(ev) {
+    const f = frameOf();
+    if (!f || !camera) return;
+    const targets = [surfaceMesh, meshGroup].filter(Boolean);
+    if (!targets.length) return;
+    const rect = canvas.getBoundingClientRect();
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2(
+      ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+      -((ev.clientY - rect.top) / rect.height) * 2 + 1,
+    ), camera);
+    const hit = ray.intersectObjects(targets, true)[0];
+    if (!hit) return;
+    const r = Math.min(12, Math.max(1.5, camera.position.distanceTo(hit.point) * 0.03));
+    // With the points drawn, the brush selects POINTS: every one within the
+    // brush of where it lands, in 3D, so a stroke across a wall takes the
+    // wall's points and not the canopy above or the floor below it.
+    if (cloud?.points && cloudOn) {
+      if (selectPoints(hit.point, r)) render();
+      return;
+    }
+    const g = f.toLatLon(hit.point.x, -hit.point.z);
+    const c = toPuwg92(g.lat, g.lon);
+    let grew = false;
+    for (let e = Math.floor((c.east - r) / PAINT_CELL); e <= Math.floor((c.east + r) / PAINT_CELL); e++) {
+      for (let n = Math.floor((c.north - r) / PAINT_CELL); n <= Math.floor((c.north + r) / PAINT_CELL); n++) {
+        const ce = (e + 0.5) * PAINT_CELL;
+        const cn = (n + 0.5) * PAINT_CELL;
+        if (Math.hypot(ce - c.east, cn - c.north) > r) continue;
+        const key = `${e},${n}`;
+        if (painted.has(key)) continue;
+        const ll = puwgToWgs84(ce, cn);
+        painted.set(key, { lat: ll.lat, lon: ll.lon, y: hit.point.y });
+        grew = true;
+      }
+    }
+    if (grew) { buildPaint(); render(); }
+  }
+
+  function endPaint() {
+    if (!painting) return;
+    painting = false;
+    selOn.value = selView ? 1 : 0;
+    if (cloud?.points && cloudOn) { onPaint(selectedCells()); return; }
+    onPaint([...painted.values()]);
+  }
+
+  // A 2 m grid over the points' local x/y, as a counting sort: `order` holds
+  // point indices bucket by bucket, `start` where each bucket begins. Built
+  // with the positions, so a brush dab looks at a few buckets and not at the
+  // whole 1.2 million.
+  const BRUSH_CELL = 2;
+  function indexCloud() {
+    const pos = cloud.pos;
+    const n = pos.length / 3;
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (let i = 0; i < n; i++) {
+      const x = pos[i * 3], y = -pos[i * 3 + 2];
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    const W = Math.floor((x1 - x0) / BRUSH_CELL) + 1;
+    const H = Math.floor((y1 - y0) / BRUSH_CELL) + 1;
+    const cell = new Int32Array(n);
+    const start = new Int32Array(W * H + 1);
+    for (let i = 0; i < n; i++) {
+      const c = Math.floor((pos[i * 3] - x0) / BRUSH_CELL)
+        + Math.floor((-pos[i * 3 + 2] - y0) / BRUSH_CELL) * W;
+      cell[i] = c;
+      start[c + 1]++;
+    }
+    for (let c = 0; c < W * H; c++) start[c + 1] += start[c];
+    const fill = start.slice(0, W * H);
+    const order = new Int32Array(n);
+    for (let i = 0; i < n; i++) order[fill[cell[i]]++] = i;
+    cloud.grid = { x0, y0, W, H, start, order };
+  }
+
+  function selectPoints(at, r) {
+    const g = cloud.grid;
+    if (!g) return false;
+    const pos = cloud.pos;
+    const sel = cloud.sel;
+    const ax = at.x, ay = -at.z, az = at.y;
+    const cx0 = Math.max(0, Math.floor((ax - r - g.x0) / BRUSH_CELL));
+    const cx1 = Math.min(g.W - 1, Math.floor((ax + r - g.x0) / BRUSH_CELL));
+    const cy0 = Math.max(0, Math.floor((ay - r - g.y0) / BRUSH_CELL));
+    const cy1 = Math.min(g.H - 1, Math.floor((ay + r - g.y0) / BRUSH_CELL));
+    const r2 = r * r;
+    let grew = false;
+    for (let cy = cy0; cy <= cy1; cy++) {
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const c = cx + cy * g.W;
+        for (let k = g.start[c]; k < g.start[c + 1]; k++) {
+          const i = g.order[k];
+          if (sel[i]) continue;
+          const dx = pos[i * 3] - ax, dy = -pos[i * 3 + 2] - ay, dz = pos[i * 3 + 1] - az;
+          if (dx * dx + dy * dy + dz * dz > r2) continue;
+          sel[i] = 1;
+          grew = true;
+        }
+      }
+    }
+    if (grew) cloud.points.geometry.getAttribute('aSel').needsUpdate = true;
+    return grew;
+  }
+
+  // The selection as the {lat, lon, y} cells paintedSite takes: thinned
+  // evenly to a few thousand, which is plenty for an outline and a relief --
+  // and the relief is now the points' own heights, top of the wall to its
+  // foot, not where a brush happened to land.
+  function selectedCells() {
+    const f = frameOf();
+    const { pos, sel } = cloud;
+    const picked = [];
+    for (let i = 0; i < sel.length; i++) if (sel[i]) picked.push(i);
+    const step = Math.max(1, Math.floor(picked.length / 5000));
+    const out = [];
+    for (let k = 0; k < picked.length; k += step) {
+      const i = picked[k];
+      const g = f.toLatLon(pos[i * 3], -pos[i * 3 + 2]);
+      out.push({ lat: g.lat, lon: g.lon, y: pos[i * 3 + 1] });
+    }
+    return out;
+  }
+
+  // Drawn as dots over everything rather than draped on the surface: on a
+  // wall or a crown a draped mark sinks into the geometry, and what you
+  // painted is worth seeing from any angle.
+  function buildPaint() {
+    if (paintDots) { scene.remove(paintDots); paintDots.geometry.dispose(); paintDots = null; }
+    // With the points up, the painted points are the mark; no dots on top.
+    if (cloud?.points && cloudOn) return;
+    const f = frameOf();
+    if (!f || !painted.size || !scene) return;
+    const pos = new Float32Array(painted.size * 3);
+    let i = 0;
+    for (const p of painted.values()) {
+      const l = f.toLocal(p.lat, p.lon);
+      pos[i++] = l.x; pos[i++] = p.y + 0.5; pos[i++] = -l.y;
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    // Pale blue, the colour of a capture point on the map, and faint: the
+    // heat layer is drawn in warm colours over the same ground, and paint in
+    // orange read as part of it.
+    paintDots = new THREE.Points(geom, new THREE.PointsMaterial({
+      color: 0x9fd8ff, size: PAINT_CELL * 0.7, sizeAttenuation: true, map: softDot(),
+      transparent: true, opacity: 0.35, depthTest: false, depthWrite: false,
+    }));
+    paintDots.renderOrder = 10;
+    scene.add(paintDots);
+  }
+
+  // The heat layer: every sampled spot of ground and wall a photo sees,
+  // coloured by how well it will reconstruct (js/views.js heatOf). A ramp from
+  // deep violet through red to pale yellow -- dark is cold, light is hot, so it
+  // still reads on the grey of a quarry and on the green of a canopy. Spots no
+  // photo sees are not drawn at all: absence is the "not captured" colour.
+  const HEAT_STOPS = HEAT_RAMP;
+  function heatColour(t) {
+    for (let i = 1; i < HEAT_STOPS.length; i++) {
+      const [t1, c1] = HEAT_STOPS[i];
+      if (t <= t1) {
+        const [t0, c0] = HEAT_STOPS[i - 1];
+        const k = (t - t0) / (t1 - t0);
+        return c0.map((v, j) => v + (c1[j] - v) * k);
+      }
+    }
+    return HEAT_STOPS.at(-1)[1];
+  }
+  let softDotTex = null;
+  function softDot() {
+    if (softDotTex) return softDotTex;
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.55, 'rgba(255,255,255,0.85)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 64, 64);
+    softDotTex = new THREE.CanvasTexture(c);
+    return softDotTex;
+  }
+  function applyBacking() {
+    const on = !!(cloud?.points && cloudOn);
+    heatU.uBacking.value = on ? 1 : 0;
+    if (!surfaceMesh) return;
+    const m = surfaceMesh.material;
+    m.polygonOffset = on;
+    m.polygonOffsetFactor = on ? 2 : 0;
+    m.polygonOffsetUnits = on ? 3000 : 0;
+    m.needsUpdate = true;
+  }
+
+  const cloudKey = (meta) => `${meta.e},${meta.n},${meta.r},${meta.count}`;
+  let pendingSel = null;
+  function applyPendingSel() {
+    if (!pendingSel || !cloud?.sel || !cloud.meta || pendingSel.key !== cloudKey(cloud.meta)) return;
+    const { runs } = pendingSel;
+    for (let k = 0; k < runs.length; k += 2) cloud.sel.fill(1, runs[k], runs[k] + runs[k + 1]);
+    cloud.points?.geometry.getAttribute('aSel') && (cloud.points.geometry.getAttribute('aSel').needsUpdate = true);
+    pendingSel = null;
+  }
+
+  async function loadCloud() {
+    const f = frameOf();
+    if (!f || meshMode) return;
+    // The points cover 150 m round where they were asked for. A new frame
+    // origin inside that -- and the first paint stroke makes one, the plan's
+    // own -- is the same ground: re-placed by buildCloud, not fetched again.
+    // Keyed on the origin, the stroke threw the points away mid-paint and the
+    // view sat on the dark backing for the length of a rebuild.
+    const here = toPuwg92(f.lat0, f.lon0);
+    if (cloud?.meta && Math.hypot(here.east - cloud.meta.e, here.north - cloud.meta.n) < 60) return;
+    const key = `${f.lat0.toFixed(4)},${f.lon0.toFixed(4)}`;
+    if (cloudFor === key) return;
+    cloudFor = key;
+    try {
+      onLoading({ stage: 'Fetching detailed points…', frac: null, minor: true });
+      const res = await poll(`/v1/points?lat=${f.lat0}&lon=${f.lon0}&r=150`, {
+        onWait: () => onLoading({ stage: 'Preparing detailed points…', minor: true, frac: null,
+          // Measured cold: 10 s over Kadzielnia (two 2025 sheets), 47 s over
+          // Stokowka (two older sheets of 120 and 240 MB).
+          detail: 'Under a minute, the first time here.', since: Date.now() }),
+      });
+      const meta = JSON.parse(res.headers.get('X-Points-Meta') ?? 'null');
+      const want = (meta?.count ?? 0) * 10;
+      const raw = new Uint8Array(await readAll(res, want, (got) => onLoading({
+        stage: 'Downloading detailed points', minor: true, frac: want ? got / want : null,
+        detail: `${(got / 1048576).toFixed(1)} of ${(want / 1048576).toFixed(1)} MB`,
+      })));
+      onLoading(null);
+      if (!meta || cloudFor !== key) return;
+      cloud = { raw, meta, points: null };
+      // On by default only where the survey has colour. Stokowka's sheets do
+      // not (point format 1), and grey points over a photo-draped surface
+      // were a worse picture than the surface alone -- so there the points
+      // wait for the button.
+      cloudOn = !!meta.hasRgb;
+      buildCloud();
+      applyPendingSel();
+      onCloud(true, cloudOn);
+      render();
+    } catch {
+      // No points -- an older service, or no survey -- and the surface stays,
+      // exactly as it was before this existed.
+      if (cloudFor === key) cloudFor = null;
+      onLoading(null);
+      onCloud(false);
+    }
+  }
+
+  function buildCloud() {
+    if (!cloud || !scene || !loaded || loaded.datum === undefined) return;
+    if (cloud.points) { scene.remove(cloud.points); cloud.points.geometry.dispose(); cloud.points = null; }
+    const f = frameOf();
+    if (!f) return;
+    const { raw, meta } = cloud;
+    const count = meta.count;
+    const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    const toLocal = puwgToLocal(f, meta.e, meta.n);
+    const pos = new Float32Array(count * 3);
+    const col = new Uint8Array(count * 3);
+    for (let i = 0; i < count; i++) {
+      const o = i * 10;
+      const l = toLocal(meta.e + dv.getInt16(o, true) / 100, meta.n + dv.getInt16(o + 2, true) / 100);
+      pos[i * 3] = l.x;
+      pos[i * 3 + 1] = meta.zBase + dv.getUint16(o + 4, true) / 100 - loaded.datum;
+      pos[i * 3 + 2] = -l.y;
+      col[i * 3] = raw[o + 6]; col[i * 3 + 1] = raw[o + 7]; col[i * 3 + 2] = raw[o + 8];
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geom.setAttribute('aColor', new THREE.BufferAttribute(col, 3, true));
+    // Round, sized in metres so they close up into a surface as you come in,
+    // tinted by the same heat texture the surface carries.
+    // Per-point heat, -1 for none: filled by setCloudHeat from the voxels the
+    // app scored. Kept across a rebuild only by the app scoring again.
+    const heatAttr = new Float32Array(count).fill(-1);
+    geom.setAttribute('aHeat', new THREE.BufferAttribute(heatAttr, 1));
+    // The selection survives a rebuild: same points, same order.
+    cloud.sel ??= new Uint8Array(count);
+    geom.setAttribute('aSel', new THREE.BufferAttribute(cloud.sel, 1));
+    cloud.pos = pos;
+    cloud.vox = null;
+    indexCloud();
+    const points = new THREE.Points(geom, new THREE.ShaderMaterial({
+      uniforms: { uSize: { value: 0.6 }, uScale: { value: 600 }, uPointHeat: pointHeatOn, uSelOn: selOn },
+      vertexShader: `
+        attribute vec3 aColor;
+        attribute float aHeat;
+        attribute float aSel;
+        uniform float uSize, uScale;
+        varying vec3 vColor;
+        varying float vHeat, vSel;
+        void main() {
+          vColor = aColor;
+          vHeat = aHeat;
+          vSel = aSel;
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          gl_Position = projectionMatrix * mv;
+          gl_PointSize = clamp(uSize * uScale / -mv.z, 2.0, 22.0);
+        }`,
+      // The points heat up themselves: each carries the heat of the voxel it
+      // falls in (setCloudHeat). A point no photo sees keeps its own colour --
+      // not highlighted is the "not captured" signal, as on the surface.
+      fragmentShader: `
+        uniform float uPointHeat, uSelOn;
+        varying vec3 vColor;
+        varying float vHeat, vSel;
+        ${HEAT_RAMP_GLSL}
+        void main() {
+          vec2 c = gl_PointCoord - 0.5;
+          if (dot(c, c) > 0.25) discard;
+          vec3 col = vColor;
+          // Painted points in the capture-point blue; the heat otherwise.
+          if (uSelOn > 0.5) {
+            if (vSel > 0.5) col = mix(col, vec3(0.42, 0.78, 1.0), 0.8);
+          } else if (uPointHeat > 0.5 && vHeat > 0.0) col = mix(col, heatRamp(vHeat), 0.85);
+          gl_FragColor = vec4(col, 1.0);
+        }`,
+    }));
+    points.visible = cloudOn;
+    cloud.points = points;
+    scene.add(points);
+    applyBacking();
+  }
+
+  // Into a texture over the samples' box, one texel per sample cell, holding
+  // the hottest sample in it -- a wall's column and the ground at its foot
+  // share a cell, and the better of the two is what that spot will get.
+  // Linear filtering does the rest: the heat blends across the terrain, and
+  // fades out softly at the edge of what is seen.
+  function buildHeat(list, size = 3) {
+    heatU.uHeat.value?.dispose?.();
+    heatU.uHeat.value = null;
+    heatU.uHeatOn.value = 0;
+    const seen = (list ?? []).filter((p) => p.heat > 0);
+    if (!seen.length) return;
+    const xs = list.map((p) => p.x);
+    const ys = list.map((p) => p.y);
+    const x0 = Math.min(...xs), y0 = Math.min(...ys);
+    const W = Math.round((Math.max(...xs) - x0) / size) + 1;
+    const H = Math.round((Math.max(...ys) - y0) / size) + 1;
+    const best = new Float32Array(W * H);
+    for (const p of seen) {
+      const i = Math.round((p.y - y0) / size) * W + Math.round((p.x - x0) / size);
+      if (p.heat > best[i]) best[i] = p.heat;
+    }
+    const data = new Uint8Array(W * H * 4);
+    for (let i = 0; i < W * H; i++) {
+      if (!best[i]) continue;
+      const c = heatColour(best[i]);
+      data[i * 4] = c[0] * 255; data[i * 4 + 1] = c[1] * 255; data[i * 4 + 2] = c[2] * 255;
+      data[i * 4 + 3] = 255;
+    }
+    const tex = new THREE.DataTexture(data, W, H, THREE.RGBAFormat);
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearFilter;
+    tex.needsUpdate = true;
+    heatU.uHeat.value = tex;
+    // Texel centres sit on the samples, so the box runs half a cell past them.
+    heatU.uHeatBox.value = new THREE.Vector4(x0 - size / 2, y0 - size / 2,
+      x0 + (W - 0.5) * size, y0 + (H - 0.5) * size);
+    heatU.uHeatOn.value = heatOn ? 1 : 0;
+  }
+
   let dragged = false;
   function meshDown(ev) {
     dragged = false;
+    if (paintOn && ev.button === 0) {
+      painting = true;
+      dragged = true;
+      selOn.value = 1;
+      paintAt(ev);
+      return;
+    }
     // A ring under the pointer takes the press; anything else is an orbit of
     // the camera, or a click on a pad, exactly as before.
     if (startRing(ev)) dragged = true;
@@ -1631,6 +2186,8 @@ export function createScene3D(canvas) {
   }
 
   function meshMove(ev) {
+    if (painting) { paintAt(ev); return; }
+    if (paintOn) { canvas.style.cursor = 'crosshair'; return; }
     if (ev.buttons) { dragged = true; return; }
     // Hovering says what a press would do, because a grip you cannot see is a
     // grip nobody finds. One projection per station per move: measured 0.28 ms
@@ -1828,6 +2385,38 @@ export function createScene3D(canvas) {
             if (top > max[at]) max[at] = top;
           }
         }
+      }
+    }
+    heights = { x0, z0, nx, nz, cell: HCELL, max, ms: Math.round(performance.now() - t0) };
+  }
+
+  // The same grid from the LiDAR raster, for everywhere there is no mesh. The
+  // raster is already the top of everything per half-metre cell, so each
+  // metre cell takes the tallest of the cells that fall in it -- the same
+  // conservative direction as the mesh version.
+  function heightsFromRaster() {
+    heights = null;
+    if (meshMode || !loaded?.meta || loaded.datum === undefined || !frameOf()) return;
+    const t0 = performance.now();
+    const { meta, height } = loaded;
+    const N = meta.grid;
+    const cell = meta.cellMetres;
+    const { c0, c1, r0, r1 } = loaded.crop;
+    const toLocal = puwgToLocal(frameOf(), meta.origin.east, meta.origin.north);
+    // puwgToLocal takes absolute PUWG92 metres; row 0 is the north edge.
+    const at = (c, r) => toLocal(meta.origin.east + c * cell, meta.origin.north + meta.tileMetres - r * cell);
+    const corners = [[c0, r0], [c1, r0], [c0, r1], [c1, r1]].map(([c, r]) => at(c, r));
+    const x0 = Math.floor(Math.min(...corners.map((p) => p.x))) - 1;
+    const z0 = Math.floor(Math.min(...corners.map((p) => -p.y))) - 1;
+    const nx = Math.ceil(Math.max(...corners.map((p) => p.x)) - x0) + 2;
+    const nz = Math.ceil(Math.max(...corners.map((p) => -p.y)) - z0) + 2;
+    const max = new Float32Array(nx * nz).fill(-Infinity);
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        const l = at(c + 0.5, r + 0.5);
+        const i = Math.floor(-l.y - z0) * nx + Math.floor(l.x - x0);
+        const v = meta.base + height[r * N + c] / 100 - loaded.datum;
+        if (v > max[i]) max[i] = v;
       }
     }
     heights = { x0, z0, nx, nz, cell: HCELL, max, ms: Math.round(performance.now() - t0) };
@@ -2658,21 +3247,37 @@ export function createScene3D(canvas) {
       const flownOne = isFlown(t);
       const which = building > 1 && flownOne ? ` (${i + 1} of ${building})` : '';
       onStatus(`Asking for the survey${which}…`);
+      onLoading({ stage: `Asking for the survey${which}…`, frac: null });
       try {
         // `peek=1` for context: it answers 404 for a tile nobody has built and
         // does not start building it.
         const metaRes = await poll(`/v1/scene/${t.tn}/${t.te}.json${flownOne ? '' : '?peek=1'}`, {
           signal,
-          onWait: () => onStatus(
-            `First look at this ground${which} — building it from the LiDAR. `
-            + 'A few minutes and a few hundred megabytes.',
-          ),
+          onWait: () => {
+            onStatus(
+              `First look at this ground${which} — building it from the LiDAR. `
+              + 'A few minutes and a few hundred megabytes.',
+            );
+            {
+              onLoading({ stage: `Building the survey for this ground${which}`,
+                detail: 'First visit here: the national LiDAR is downloaded and processed. '
+                  + 'A few minutes, once — after that it opens instantly.',
+                frac: null, since: Date.now() });
+            }
+          },
         });
         const m = await metaRes.json();
         if (m.empty) continue;
         onStatus(`Downloading the surface${which}…`);
-        const buf = await poll(`/v1/scene/${t.tn}/${t.te}`, { signal }).then((r) => r.arrayBuffer());
         const g = m.grid;
+        // Two bytes of height and one of class per cell, decompressed -- the
+        // header length is the gzipped size and would overrun (see readAll).
+        const want = g * g * 3;
+        const buf = await poll(`/v1/scene/${t.tn}/${t.te}`, { signal })
+          .then((r) => readAll(r, want, (got) => {
+            onLoading({ stage: `Downloading the survey${which}`, frac: got / want,
+              detail: `${(got / 1048576).toFixed(1)} of ${(want / 1048576).toFixed(1)} MB` });
+          }));
         parts.push({
           t,
           meta: m,
@@ -2739,6 +3344,7 @@ export function createScene3D(canvas) {
     // The alignment worry that justified preferring it was tested rather than
     // asserted -- see basemapTexture -- and the two agree to under a metre.
     onStatus('Draping the map…');
+    onLoading({ stage: 'Draping the map imagery…', frac: null });
     try {
       const got = await basemapTexture(meta);
       next.ortho = got?.tex ?? null;
@@ -2810,6 +3416,9 @@ export function createScene3D(canvas) {
       if (m) anchor = null; else if (was) anchor = was;
       hazard = h;
       if (!renderer) return;
+      // The paint is kept in lat/lon; redraw it in whichever frame is now in
+      // charge, or the first stroke's own plan moves it off what was painted.
+      if (moved) { buildPaint(); buildCloud(); }
       // No flight: take the flight away. This used to `return` here with the
       // mission already nulled, so Clear left the last plan's orbits, its
       // chips and its camera wedges drawn over the mesh -- and every one of
@@ -2844,7 +3453,9 @@ export function createScene3D(canvas) {
       // buildMission first was drawing it twice; and buildWires was not called
       // at all, so wires kept the heights of the plan before last.
       if (meshTiles.size) { reportMesh(); buildWires(); render(); return; }
-      if (moved) buildSurface(); else { buildFlights(); render(); }
+      // buildSurface reports when it finishes; an unmoved replan reports here,
+      // because every replan can fly into something the last one did not.
+      if (moved) buildSurface(); else { reportMesh(); render(); }
     },
 
     // The same list the map draws, so the two pictures cannot disagree about
@@ -2871,8 +3482,146 @@ export function createScene3D(canvas) {
       if (mission || !Number.isFinite(lat) || !Number.isFinite(lon)) return false;
       if (anchor && Math.abs(anchor.lat0 - lat) < 1e-7 && Math.abs(anchor.lon0 - lon) < 1e-7) return false;
       if (anchor) { dropMesh(); meshMode = false; framedMesh = false; onMesh(null); }
+      // Somewhere else entirely: that ground gets framed when it arrives.
+      viewSet = null;
       anchor = frame(lat, lon);
+      if (scene) buildPaint();
       return true;
+    },
+
+    // Paint mode: a left-drag paints instead of orbiting. The wheel still
+    // zooms and a right-drag still pans, so you can move about mid-paint.
+    setPaint(on) {
+      paintOn = !!on;
+      if (controls) controls.mouseButtons.LEFT = paintOn ? null : THREE.MOUSE.ROTATE;
+      if (!paintOn) canvas.style.cursor = '';
+    },
+    clearPaint() {
+      painted.clear();
+      if (cloud?.sel) {
+        cloud.sel.fill(0);
+        cloud.points?.geometry.getAttribute('aSel') && (cloud.points.geometry.getAttribute('aSel').needsUpdate = true);
+      }
+      if (scene) { buildPaint(); render(); }
+    },
+    // What was painted, to keep across a reload: the selected points as runs
+    // of indices into THIS point set -- the service thins deterministically,
+    // so the same request returns the same points in the same order, and the
+    // key says which request that was -- plus nothing else; the painted
+    // surface cells live in the app's own list.
+    selectionState() {
+      if (!cloud?.sel || !cloud.meta) return null;
+      const runs = [];
+      const sel = cloud.sel;
+      for (let i = 0; i < sel.length; i++) {
+        if (!sel[i]) continue;
+        let j = i;
+        while (j + 1 < sel.length && sel[j + 1]) j++;
+        runs.push(i, j - i + 1);
+        i = j;
+      }
+      return runs.length ? { key: cloudKey(cloud.meta), runs } : null;
+    },
+    // And back: surface cells now, the point selection whenever points
+    // matching its key arrive (now, if they already have).
+    restorePaint({ cells = [], selection = null } = {}) {
+      painted.clear();
+      for (const c of cells) {
+        const q = toPuwg92(c.lat, c.lon);
+        painted.set(`${Math.floor(q.east / PAINT_CELL)},${Math.floor(q.north / PAINT_CELL)}`, c);
+      }
+      pendingSel = selection;
+      applyPendingSel();
+      if (scene) { buildPaint(); render(); }
+    },
+    // 'painted': the points show what was selected. 'captured': the heat.
+    setPaintView(view) {
+      selView = view === 'painted';
+      selOn.value = selView ? 1 : 0;
+      render();
+    },
+    onPaint(fn) { onPaint = fn ?? (() => {}); },
+
+    // Points or surface. Only offered once the points have arrived: onCloud
+    // says whether this ground has them.
+    setCloud(on) {
+      cloudOn = !!on;
+      if (cloud?.points) cloud.points.visible = cloudOn;
+      applyBacking();
+      render();
+    },
+    onCloud(fn) { onCloud = fn ?? (() => {}); },
+    onLoading(fn) { onLoading = fn ?? (() => {}); },
+    onViewMove(fn) { onViewMove = fn ?? (() => {}); },
+
+    // The loaded survey as heights over the mission's local metres, above the
+    // same zero the waypoints fly from -- for js/views.js. Null with no survey
+    // loaded, or in the photogrammetric-mesh mode, which has no raster.
+    sampler() {
+      const f = frameOf();
+      if (!loaded?.meta || loaded.datum === undefined || !f || meshMode) return null;
+      return localSampler(loaded.meta, loaded.height, f, loaded.datum);
+    },
+    // [{ x, y, z, nx, ny, nz, heat }] in local metres; heat 0..1.
+    // `size` is the sample spacing in metres: each dot is drawn a little
+    // larger, so neighbouring soft dots meet and read as a surface.
+    setHeat(list, { size = 3 } = {}) {
+      if (!scene) return;
+      buildHeat(list, size);
+      render();
+    },
+    setHeatVisible(on) {
+      heatOn = !!on;
+      heatU.uHeatOn.value = heatOn && heatU.uHeat.value ? 1 : 0;
+      pointHeatOn.value = heatOn && cloud?.vox ? 1 : 0;
+      render();
+    },
+
+    // Whether the picture is the points, so the app scores what is drawn.
+    cloudShown() { return !!(cloud?.points && cloudOn); },
+
+    // The points as voxels for scoring: one sample per occupied cube of side
+    // `step` inside the box, placed at the first point that fell in it, with
+    // no normal (js/views.js judges those by sight line alone). Every point in
+    // the box remembers its voxel, so the heat can come back to all of them.
+    voxelSamples({ x0, x1, y0, y1, step }) {
+      if (!cloud?.pos) return null;
+      const pos = cloud.pos;
+      const n = pos.length / 3;
+      const idx = new Int32Array(n).fill(-1);
+      const keys = new Map();
+      const samples = [];
+      let anySel = false;
+      for (let i = 0; i < n; i++) {
+        const x = pos[i * 3];
+        const z = pos[i * 3 + 1];
+        const y = -pos[i * 3 + 2];
+        if (x < x0 || x > x1 || y < y0 || y > y1) continue;
+        const key = `${Math.floor(x / step)},${Math.floor(y / step)},${Math.floor(z / step)}`;
+        let k = keys.get(key);
+        if (k === undefined) {
+          k = samples.length;
+          keys.set(key, k);
+          samples.push({ x, y, z, nx: 0, ny: 0, nz: 0, painted: false, wall: false });
+        }
+        idx[i] = k;
+        // A voxel is painted if any point in it was.
+        if (cloud.sel?.[i]) { samples[k].painted = true; anySel = true; }
+      }
+      cloud.vox = { idx, count: samples.length };
+      samples.selAware = anySel;
+      return samples;
+    },
+
+    // Heat per voxel sample, 0..1, in the order voxelSamples returned them.
+    setCloudHeat(heat) {
+      if (!cloud?.points || !cloud.vox || heat?.length !== cloud.vox.count) return;
+      const attr = cloud.points.geometry.getAttribute('aHeat');
+      const { idx } = cloud.vox;
+      for (let i = 0; i < idx.length; i++) attr.array[i] = idx[i] < 0 ? -1 : heat[idx[i]];
+      attr.needsUpdate = true;
+      pointHeatOn.value = heatOn ? 1 : 0;
+      render();
     },
 
     // Whether to draw what each camera is pointed at.
@@ -2933,6 +3682,18 @@ export function createScene3D(canvas) {
     // Paint the flight by whether it can be flown rather than by what pass it
     // is. Rebuilt rather than recoloured, because the two pictures group the
     // legs differently: one by pass, one by verdict.
+    // The clearance the flight check holds every leg to.
+    setClearance(m) {
+      clearM = Math.max(0, Number(m) || 0);
+      if (renderer && mission && heights) { reportMesh(); render(); }
+    },
+    // Would this plan -- not necessarily the one drawn -- fly within `clr` of
+    // anything the survey measured? For the app's search to rule a candidate
+    // out before it is ever shown. Null without a survey loaded.
+    checkFlight(m, clr = clearM) {
+      return checkMesh(m, clr);
+    },
+
     setCollision(on) {
       collisionMode = !!on;
       if (!renderer || !mission) return;
@@ -2972,6 +3733,7 @@ export function createScene3D(canvas) {
         // before the LiDAR rather than instead of it, so the fallback costs one
         // small request and not a heightfield built and thrown away.
         onStatus('Looking for a photogrammetric mesh…');
+        if (!loaded) onLoading({ stage: 'Looking for a detailed model…', frac: null });
         const mesh = await loadMeshTile(c.lat0, c.lon0, { signal: ctl.signal })
           .catch(() => ({ ok: false, why: 'the mesh service did not answer' }));
         if (mesh.ok) {
@@ -2984,6 +3746,7 @@ export function createScene3D(canvas) {
           // reset the camera, so any trip to the map to click something cost
           // you the angle you had lined up.
           if (first) { frameCamera(); framedMesh = true; }
+          onLoading(null);
           render();
           sayMesh();
           // And then the neighbours you had last time, on top of the picture
@@ -3010,7 +3773,9 @@ export function createScene3D(canvas) {
         onMesh(null);
         onStatus('No mesh here — building the LiDAR surface instead…');
         await loadFor(c.lat0, c.lon0, { signal: ctl.signal });
+        onLoading({ stage: 'Building the 3D surface…', frac: 1 });
         buildSurface();
+        onLoading(null);
         const n = loaded.meta.tiles?.length ?? 1;
         onStatus(`${loaded.meta.sources?.[0]?.year ?? 'LiDAR'} survey, `
           + `${loaded.meta.cellMetres * loaded.step} m cells, `
@@ -3032,6 +3797,7 @@ export function createScene3D(canvas) {
         render();
       } catch (e) {
         if (e.name !== 'AbortError') onStatus(`No surface — ${e.message}`);
+        onLoading(null);
       } finally {
         opening = false;
       }
@@ -3085,9 +3851,15 @@ export function createScene3D(canvas) {
       // at the requested span instead of the ground's. Roofs then line up and
       // the ground beside them is the thing that is slightly off, which is the
       // right way round: what you tapped is what you are comparing.
+      // Measured from the GROUND at the target, not from this view's zero.
+      // With no plan the zero is a corner of the loaded crop -- see the datum
+      // in buildSurface -- and over Kielce's slopes the ground at the target
+      // sat tens of metres under it, so the camera was that much too high
+      // and the linked 3D showed about twice the map's width of ground.
+      const base = groundNear(lat, lon) ?? 0;
       const dist = Math.max(20, (spanM / 2) / tanAcross()) + lookHeight();
-      controls.target.set(l.x, 0, -l.y);
-      camera.position.set(l.x, dist, -l.y + dist * 0.001);
+      controls.target.set(l.x, base, -l.y);
+      camera.position.set(l.x, base + dist, -l.y + dist * 0.001);
       controls.update();
       render();
     },

@@ -14,6 +14,7 @@
 import { app, BrowserWindow, shell, dialog } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { spawn } from 'node:child_process';
 import { serve } from '../tools/serve.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -23,7 +24,40 @@ const ROOT = join(HERE, '..');
 // on 8123 -- you can have both open, which is what developing on it looks like.
 let port = null;
 
+// The heights service, on this machine. The desktop build used to talk to the
+// hosted one, which meant every service feature waited on a deploy to the
+// home box before the desktop could show it -- the LiDAR points were built,
+// tested and visible in the browser, and absent in the window. So the desktop
+// runs the service itself, from the same server/ the browser's dev setup runs,
+// with the same data directory: one that is already up on :8130 (npm start in
+// server/) is used as it is, otherwise one is started and stopped with the
+// app. The cost is that this laptop downloads the LiDAR for wherever it looks.
+const SERVICE_PORT = 8130;
+let service = null;
+async function serviceUp() {
+  try {
+    const res = await fetch(`http://127.0.0.1:${SERVICE_PORT}/v1/health`);
+    return res.status === 200 || res.status === 401;   // 401: up, wants a key
+  } catch {
+    return false;
+  }
+}
+async function startService() {
+  if (await serviceUp()) return;
+  // Electron's own binary, told to behave as plain Node: no second runtime to
+  // install, and laz-perf's WASM loads the same as under `npm start`.
+  service = spawn(process.execPath, [join(ROOT, 'server', 'src', 'server.js')], {
+    cwd: join(ROOT, 'server'),
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PORT: String(SERVICE_PORT) },
+    stdio: 'inherit',
+  });
+  service.on('exit', () => { service = null; });
+  for (let i = 0; i < 40 && !(await serviceUp()); i++) await new Promise((r) => setTimeout(r, 100));
+}
+app.on('quit', () => service?.kill());
+
 async function start() {
+  await startService();
   try {
     ({ port } = await serve({ root: ROOT, port: 0 }));
   } catch (e) {

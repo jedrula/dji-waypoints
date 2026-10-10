@@ -1,5 +1,5 @@
 import { mergeRecords } from '../sync/protocol.js';
-import { serviceUrl, serviceHeaders } from './service.js';
+import { syncUrl, serviceHeaders } from './service.js';
 // One person, a few devices, and a list of things worth keeping. Plans were the
 // first such list; the obstacles you draw on the map are the second, and the
 // rule for keeping them in step is the same one -- local first, last write wins
@@ -61,7 +61,7 @@ export function createSyncedStore({
   };
   const writeAll = (records) => store.setItem(storageKey, JSON.stringify(records));
 
-  const url = () => endpoint ?? serviceUrl();
+  const url = () => endpoint ?? syncUrl();
 
   return {
     // Tombstones are storage, not list entries.

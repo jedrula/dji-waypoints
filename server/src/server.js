@@ -34,6 +34,8 @@ import { createOrthoStore, ORTHO_PX } from './ortho.js';
 import { createBdotStore } from './bdot.js';
 import { createBuildingStore } from './buildings.js';
 import { createMeshStore } from './mesh.js';
+import { createPointSet, keepFor, MAX_RADIUS_M } from './points.js';
+import { forEachPoint, readHeader } from './laz.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = process.env.DATA_DIR ?? path.join(HERE, '..', 'var');
@@ -229,6 +231,57 @@ async function buildScene(tn, te) {
   await rename(tmp, scenePath(tn, te));
   await writeFile(sceneMetaPath(tn, te), JSON.stringify(meta));
   return { body, meta };
+}
+
+// ------------------------------------------------------------- the points
+// The survey as points round a spot, for the app's 3D view to draw instead of
+// the raster -- see src/points.js for why. Snapped to a 25 m grid so nearby
+// requests share a cache entry; built from the same LAZ sheets the tiles were.
+const POINTS_DIR = path.join(ROOT, 'points');
+const POINTS_BUDGET = 1_200_000;
+const pointsJobs = new Map();
+const pointsFailed = new Map();   // key -> why, read once by the next poll
+const pointsPath = (e, n, r) => path.join(POINTS_DIR, `${e}_${n}_${r}`);
+
+async function cachedPoints(e, n, r) {
+  try {
+    const [body, meta] = await Promise.all([
+      readFile(`${pointsPath(e, n, r)}.bin.gz`),
+      readFile(`${pointsPath(e, n, r)}.json`, 'utf8').then(JSON.parse),
+    ]);
+    return { body, meta };
+  } catch {
+    return null;
+  }
+}
+
+async function buildPoints(e, n, r) {
+  const sources = await findTiles({ e0: e - r, n0: n - r, e1: e + r, n1: n + r });
+  if (!sources.length) throw new Error('no LiDAR coverage here');
+  const bufs = [];
+  for (const src of sources) {
+    const { file } = await lazStore.fetchLaz(src.url);
+    bufs.push(await readFile(file));
+  }
+  const keep = keepFor(bufs.map(readHeader), { e, n, r, maxPoints: POINTS_BUDGET });
+  const set = createPointSet({ e, n, r, keep });
+  for (const b of bufs) await forEachPoint(b, set.addPoint, { rgb: true });
+  const done = set.finish();
+  const body = gzipSync(done.body, { level: 6 });
+  const meta = { ...done.meta, sources: sources.map((s2) => ({ year: s2.year, density: s2.density })), builtAt: Date.now() };
+  await mkdir(POINTS_DIR, { recursive: true });
+  await writeFile(`${pointsPath(e, n, r)}.bin.gz.part`, body);
+  await rename(`${pointsPath(e, n, r)}.bin.gz.part`, `${pointsPath(e, n, r)}.bin.gz`);
+  await writeFile(`${pointsPath(e, n, r)}.json`, JSON.stringify(meta));
+  return { body, meta };
+}
+
+function requestPoints(e, n, r) {
+  const key = `${e}_${n}_${r}`;
+  if (pointsJobs.has(key)) return pointsJobs.get(key);
+  const job = throttle(() => buildPoints(e, n, r)).finally(() => pointsJobs.delete(key));
+  pointsJobs.set(key, job);
+  return job;
 }
 
 // Why a failure has to be remembered: the build runs detached from the request
@@ -455,6 +508,35 @@ const server = http.createServer(async (req, res) => {
         'Content-Encoding': 'gzip',
         'Cache-Control': 'public, max-age=31536000, immutable',
         'X-Scene-Meta': JSON.stringify(entry.meta).slice(0, 3900),
+      }));
+      return res.end(entry.body);
+    }
+
+    if (url.pathname === '/v1/points') {
+      const lat = Number(q.get('lat')); const lon = Number(q.get('lon'));
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return send(res, 400, { error: 'lat and lon required' }, origin);
+      if (!inPoland(lat, lon)) return send(res, 404, { error: 'outside Poland' }, origin);
+      const r = Math.max(20, Math.min(MAX_RADIUS_M, Math.round(Number(q.get('r')) || 150)));
+      const { east, north } = toPuwg92(lat, lon);
+      const e = Math.round(east / 25) * 25;
+      const n = Math.round(north / 25) * 25;
+      // Built detached and polled for, like the scene: a first build over new
+      // ground downloads the sheets, which is minutes, and the tunnel in front
+      // of the hosted service cuts a held request at about 100 s.
+      const key = `${e}_${n}_${r}`;
+      const entry = await cachedPoints(e, n, r);
+      if (!entry) {
+        const failed = pointsFailed.get(key);
+        if (failed) { pointsFailed.delete(key); return send(res, 404, { error: failed }, origin); }
+        requestPoints(e, n, r).catch((err) => pointsFailed.set(key, String(err.message ?? err)));
+        return send(res, 202, { status: 'building' }, origin, { 'Retry-After': '5' });
+      }
+      res.writeHead(200, headers(origin, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Encoding': 'gzip',
+        'Cache-Control': 'public, max-age=31536000, immutable',
+        'Access-Control-Expose-Headers': 'X-Points-Meta',
+        'X-Points-Meta': JSON.stringify(entry.meta).slice(0, 3900),
       }));
       return res.end(entry.body);
     }

@@ -41,10 +41,18 @@ export function readHeader(buf) {
 const classOffset = (format) => (format >= 6 ? 16 : 15);
 const classMask = (format) => (format >= 6 ? 0xff : 0x1f);
 
-// Calls `visit(east, north, z, classification)` for every point. One pass, no
-// arrays built -- a tile is six million points and the caller only ever wants
-// them binned.
-export async function forEachPoint(buf, visit) {
+// Where a format keeps its colour, or null for the formats that have none.
+// 2 puts it straight after the 20-byte core; 3 and 5 after the GPS time; 7, 8
+// and 10 after the 30-byte core of the 1.4 formats. Values are 16-bit, and
+// most writers scale 8-bit colour up into them -- the caller looks at the
+// largest it saw before deciding.
+export const rgbOffset = (format) => ({ 2: 20, 3: 28, 5: 28, 7: 30, 8: 30, 10: 30 }[format] ?? null);
+
+// Calls `visit(east, north, z, classification)` for every point -- and the
+// colour as three more arguments when `rgb` is asked for and the format has
+// it. One pass, no arrays built: a tile is six million points and the caller
+// only ever wants them binned.
+export async function forEachPoint(buf, visit, { rgb = false } = {}) {
   const L = await lazPerf();
   const h = readHeader(buf);
   const ptr = L._malloc(buf.length);
@@ -57,6 +65,7 @@ export async function forEachPoint(buf, visit) {
     const [ox, oy, oz] = h.offset;
     const co = classOffset(h.format);
     const cm = classMask(h.format);
+    const ro = rgb ? rgbOffset(h.format) : null;
     // The decompressor allocates as it goes, and when the WASM heap grows the
     // old ArrayBuffer is DETACHED -- every DataView onto it throws from that
     // point on. Whether it happens depends on how much headroom the heap had,
@@ -71,12 +80,22 @@ export async function forEachPoint(buf, visit) {
         heap = L.HEAPU8.buffer;
         view = new DataView(heap, pointPtr, h.pointSize);
       }
-      visit(
-        view.getInt32(0, true) * sx + ox,
-        view.getInt32(4, true) * sy + oy,
-        view.getInt32(8, true) * sz + oz,
-        view.getUint8(co) & cm,
-      );
+      if (ro === null) {
+        visit(
+          view.getInt32(0, true) * sx + ox,
+          view.getInt32(4, true) * sy + oy,
+          view.getInt32(8, true) * sz + oz,
+          view.getUint8(co) & cm,
+        );
+      } else {
+        visit(
+          view.getInt32(0, true) * sx + ox,
+          view.getInt32(4, true) * sy + oy,
+          view.getInt32(8, true) * sz + oz,
+          view.getUint8(co) & cm,
+          view.getUint16(ro, true), view.getUint16(ro + 2, true), view.getUint16(ro + 4, true),
+        );
+      }
     }
   } finally {
     zip.delete?.();

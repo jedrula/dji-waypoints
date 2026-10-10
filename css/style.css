@@ -264,8 +264,11 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
    controls: on the right of the map under the basemap picker, on the right of
    the 3D under the ground picker. The left stack was seven buttons deep with
    these in it, and on a short window the bottom two fell off the pane. */
-#syncTo3d, #syncToMap { top: 82px; left: auto; right: 10px; }
-#stage.split #syncTo3d { right: calc(100% - var(--split) + 10px); }
+/* The link sits ON the divider in a split -- it ties the two panes, so it
+   belongs to neither -- and under the view tabs otherwise. */
+#linkBtn { top: 82px; left: auto; right: 10px; }
+#stage.split #linkBtn { top: 10px; right: auto; left: var(--split); transform: translateX(-50%); }
+#linkBtn.on { color: var(--accent); border-color: var(--accent); }
 /* Under the two sync buttons on the 3D pane's own right-hand stack, because it
    acts on the 3D and nothing else. */
 #looksBtn { top: 118px; left: auto; right: 10px; }
@@ -276,6 +279,13 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 /* The lift-the-rings fix, under the collision switch. It is only ever on
    screen when there is something wrong, so it is coloured like the news. */
 #liftBtn { top: 190px; left: auto; right: 10px; }
+/* Paint, at the foot of the 3D stack. Lit while a drag paints rather than
+   orbits, because the two feel the same until you look at the button. */
+#paintBtn { top: 226px; left: auto; right: 10px; }
+#paintBtn.on { color: var(--accent2); border-color: #6d5a35; }
+#heatBtn { top: 262px; left: auto; right: 10px; }
+#heatBtn.on { color: #ff8a4d; border-color: #6a4a3a; }
+#cloudBtn { top: 298px; left: auto; right: 10px; }
 .maptoggle.danger { color: #ff6b6b; border-color: #6a3a3a; }
 /* Wires belong to both views at once -- they are a hazard, not a backdrop --
    so this is the one .maptoggle that stays put when the 3D comes up. */
@@ -285,10 +295,13 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
    know anything else -- so the box is always open, beside the zoom control.
    It was an icon that unfolded a bar, and the icon was not found. The plugin
    brings its own light theme; these rules only make it this app's. Its width
-   leaves room for the Map / Split / 3D tabs at the right, phone included. */
+   is a share of the MAP pane, not the window (hence the container on #map):
+   in a split the basemap tabs move up to the pane's top-right corner, and a
+   box sized to the window ran into them. */
+#map { container-type: inline-size; }
 .leaflet-top.leaflet-left .leaflet-control-geocoder {
   position: absolute; top: 0; left: 50px; margin: 10px 0 0 0;
-  width: min(380px, calc(100vw - 236px)); border-radius: 8px;
+  width: min(380px, calc(100cqw - 260px)); border-radius: 8px;
   background: rgba(16,20,24,0.94); border: 1px solid var(--line); box-shadow: none;
   color: var(--text); display: flex; flex-wrap: wrap; align-items: center; }
 .leaflet-control-geocoder.leaflet-control-geocoder-expanded .leaflet-control-geocoder-form {
@@ -453,8 +466,7 @@ code { background: var(--panel2); border-radius: 4px; padding: 1px 5px; font-siz
                         border-left: 0; border-top: 1px solid var(--line); }
   #stage.split #basetabs { right: 10px; }
   /* Stacked panes: the map is on top, so its control keeps the top-right. */
-  #stage.split #syncTo3d { right: 10px; }
-  #stage.split #syncToMap { top: calc(var(--split) + 36px); }
+  #stage.split #linkBtn { top: var(--split); left: 50%; transform: translate(-50%, -50%); }
   #splitter { inset: var(--split) 0 auto 0; width: auto; height: 24px;
               margin: -12px 0 0 0; cursor: row-resize; }
   #splitter::after { inset: 11px 0; }
@@ -506,3 +518,42 @@ code { background: var(--panel2); border-radius: 4px; padding: 1px 5px; font-siz
 #empty3d button { margin-top: 8px; pointer-events: auto; }
 #stage.split #empty3d { left: var(--split); }
 @media (max-width: 720px) { #stage.split #empty3d { left: 0; top: var(--split); } }
+
+/* The survey's loading state. A card in the middle of the 3D pane while there
+   is nothing to see, a pill in its corner when the wait does not block the
+   picture. The bar is a real fraction when bytes are counted and a sweep when
+   only time is. */
+#load3d { position: absolute; inset: 0; z-index: 450; display: flex; align-items: center;
+          justify-content: center; pointer-events: none; background: rgba(11,14,17,0.55); }
+#load3d[hidden] { display: none; }
+#stage.split #load3d { left: var(--split); }
+@media (max-width: 720px) { #stage.split #load3d { left: 0; top: var(--split); } }
+#load3d .lcard { width: min(340px, calc(100% - 32px)); padding: 16px 18px 14px; border-radius: 12px;
+                 background: rgba(16,20,24,0.94); border: 1px solid var(--line);
+                 box-shadow: 0 12px 40px rgba(0,0,0,0.45); }
+#load3d .lstage { font-size: 14px; font-weight: 600; color: var(--text); }
+#load3d .ldetail { margin-top: 8px; font-size: 12px; color: var(--dim); line-height: 1.4; }
+#load3d .ldetail:empty { display: none; }
+#load3d .lbar { margin-top: 12px; height: 4px; border-radius: 2px; background: var(--panel2); overflow: hidden; }
+#load3d .lbar i { display: block; height: 100%; width: 0; border-radius: 2px;
+                  background: linear-gradient(90deg, var(--accent), #8fd0ff); transition: width 0.2s; }
+#load3d .lbar.sweep i { width: 35%; animation: load3dSweep 1.3s ease-in-out infinite; }
+@keyframes load3dSweep { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+#load3d.minor { background: none; align-items: flex-end; justify-content: flex-start; padding: 0 0 14px 14px; }
+#load3d.minor .lcard { width: 260px; padding: 10px 12px; box-shadow: none; }
+#load3d.minor .lstage { font-size: 12px; }
+#load3d.minor .ldetail { margin-top: 4px; font-size: 11px; }
+#load3d.minor .lbar { margin-top: 8px; height: 3px; }
+
+/* Painted / Will be captured, bottom-centre of the 3D pane: the same kind of
+   two-way choice as the Map / Split / 3D tabs, so it looks like them. */
+#paintView { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 500;
+             display: flex; background: rgba(16,20,24,0.92); border: 1px solid var(--line);
+             border-radius: 8px; overflow: hidden; }
+#paintView[hidden] { display: none; }
+#stage.split #paintView { left: calc(var(--split) + (100% - var(--split)) / 2); }
+#paintView button { border: 0; border-radius: 0; background: transparent; color: var(--dim);
+                    padding: 7px 14px; font-size: 12.5px; min-height: 0; }
+#paintView button.on { background: var(--panel2); color: var(--text); font-weight: 600; }
+#paintView button[data-view="painted"].on { color: #9fd8ff; }
+#paintView button[data-view="captured"].on { color: #ffb84d; }

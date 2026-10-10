@@ -70,6 +70,34 @@ export function puwgToLocal(frame, e0, n0) {
   });
 }
 
+// The surface as a function of the mission's local metres: metres above the
+// takeoff datum at (x, y), or null off the tile. The inverse of puwgToLocal's
+// affine map, built once, because js/views.js asks this millions of times a
+// check -- an inverse projection per call would be most of the cost.
+export function localSampler(meta, height, frame, datum) {
+  const e0 = meta.origin.east;
+  const n0 = meta.origin.north;
+  const fwd = puwgToLocal(frame, e0, n0);
+  const o = fwd(e0, n0);
+  const ex = fwd(e0 + 1, n0);
+  const nn = fwd(e0, n0 + 1);
+  const a = ex.x - o.x, b = nn.x - o.x, c = ex.y - o.y, d = nn.y - o.y;
+  const det = a * d - b * c;
+  const top = n0 + meta.tileMetres;
+  const cell = meta.cellMetres;
+  const N = meta.grid;
+  return (x, y) => {
+    const dx = x - o.x;
+    const dy = y - o.y;
+    const e = (d * dx - b * dy) / det;
+    const n = (-c * dx + a * dy) / det;
+    const col = Math.round(e / cell);
+    const row = Math.round((top - (n + n0)) / cell);
+    if (row < 0 || col < 0 || row >= N || col >= N) return null;
+    return meta.base + height[row * N + col] / 100 - datum;
+  };
+}
+
 // One raster out of several tiles.
 //
 // The survey grid is 500 m squares that know nothing about where anybody flies,

@@ -47,6 +47,8 @@
     </div>
 
     <div id="readout" class="readout"></div>
+    <!-- The survey says the plan flies too close to something. -->
+    <div id="hazardWarn" class="warn" hidden></div>
 
     <div class="barrow foot">
       <button id="openAdv" type="button">Advanced</button>
@@ -65,6 +67,22 @@
     <div id="toast" hidden></div>
     <!-- The 3D view with no plan used to be a black pane, and clicking 3D read as
          a dead button. Shown over the 3D pane only while it has nothing to draw. -->
+    <!-- What the survey view is waiting for: a card over the pane while there
+         is nothing to look at, a pill in its corner while the detail streams in
+         over a picture that is already up. See onLoading in js/scene3d.js. -->
+    <div id="load3d" hidden>
+      <div class="lcard">
+        <div class="lstage" id="loadStage"></div>
+        <div class="lbar"><i id="loadBar"></i></div>
+        <div class="ldetail" id="loadDetail"></div>
+      </div>
+    </div>
+    <!-- After a stroke, over the points: what you painted, or what the plan
+         will capture -- always more than was painted. -->
+    <div id="paintView" hidden>
+      <button type="button" data-view="painted">Painted</button>
+      <button type="button" data-view="captured" class="on">Will be captured</button>
+    </div>
     <div id="empty3d" hidden>
       <p>Nothing to show in 3D yet.</p>
       <p class="hint">Tap the map on what you want captured and the flight appears here —
@@ -122,24 +140,17 @@
         </svg>
       </button>
     </div>
-    <!-- The two views are deliberately not tied together -- you pan the map to
-         find the next thing while the 3D stays on what you are working on --
-         so this is how you tie them when you want to. One button per
-         direction, and each is only there when the view it reads from is. -->
-    <button id="syncTo3d" type="button" class="maptoggle"
-            title="Point the 3D view at what the map is showing">
+    <!-- Link the two views: on, either one moving moves the other to the same
+         ground at the same scale, straight down and north up like the map. Off,
+         they are independent -- you can pan the map to the next thing while
+         the 3D stays put. Replaces the two one-shot "point the other view"
+         buttons, which were this done by hand, once per press. -->
+    <button id="linkBtn" type="button" class="maptoggle"
+            title="Link the views: moving either one moves the other to the same ground">
       <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
-           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="2.5" y="6" width="8" height="12" rx="1.5"/>
-        <path d="M13.5 12h7M17.5 9l3 3-3 3"/>
-      </svg>
-    </button>
-    <button id="syncToMap" type="button" class="maptoggle" hidden
-            title="Point the map at what the 3D view is showing">
-      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
-           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="13.5" y="6" width="8" height="12" rx="1.5"/>
-        <path d="M10.5 12h-7M6.5 9l-3 3 3 3"/>
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/>
+        <path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>
       </svg>
     </button>
 
@@ -182,6 +193,39 @@
         <circle cx="12" cy="4.5" r="2"/>
         <path d="M10.6 6.2 4 19.5M13.4 6.2 20 19.5"/>
         <path d="M4 19.5 20 19.5"/>
+      </svg>
+    </button>
+
+    <!-- Paint what you want captured, on the survey. Only on the survey, because
+         it is the one view with ground to paint on before a plan exists. -->
+    <button id="paintBtn" type="button" class="maptoggle" hidden
+            title="Paint what you want captured — drag over it; right-drag still pans">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14.5 4.5l5 5L10 19l-5 1 1-5z"/>
+        <path d="M12.5 6.5l5 5"/>
+      </svg>
+    </button>
+
+    <!-- How well each spot of the survey will reconstruct, as heat: hot is seen
+         often, from close, from angles far enough apart; unseen is not drawn. -->
+    <button id="heatBtn" type="button" class="maptoggle on" hidden
+            title="Heat: how well each spot will reconstruct — hot is seen often, close and from wide angles">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+           stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3c1 3.5 5 5.5 5 10a5 5 0 0 1-10 0c0-2.5 1.5-4 2.5-5 .3 1.6 1 2.6 2 3 0-3 .2-5.5.5-8z"/>
+      </svg>
+    </button>
+
+    <!-- The survey as its own coloured points, or as the smooth surface. Points
+         are the sharper picture -- real rock faces, real trees -- where the
+         service has them; the surface is what is there everywhere. -->
+    <button id="cloudBtn" type="button" class="maptoggle on" hidden
+            title="Points: draw the survey as its own coloured LiDAR points instead of a surface">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+        <circle cx="6" cy="7" r="1.6"/><circle cx="12" cy="5" r="1.6"/><circle cx="18" cy="8" r="1.6"/>
+        <circle cx="8" cy="13" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="5" cy="18" r="1.6"/>
+        <circle cx="11" cy="19" r="1.6"/><circle cx="18" cy="17" r="1.6"/>
       </svg>
     </button>
 

@@ -121,7 +121,15 @@ export const serviceHeaders = (extra = {}) => ({ 'X-Sync-Key': serviceKey(), ...
 // preload rather than being guessed at. Still one rule you can read: the
 // address decides, unless the thing at that address tells you it is the app in
 // a window.
+// The desktop app runs the service next to itself (electron/main.mjs), so it
+// is "a page from this machine" too, whatever address its own server took.
 export const serviceUrl = () => {
-  if (globalThis.dji?.desktop) return HOSTED;
+  if (globalThis.dji?.desktop) return LOCAL;
   return LOCAL_HOSTS.has(globalThis.location?.hostname ?? '') && globalThis.location ? LOCAL : HOSTED;
 };
+
+// Where the plan library syncs. The same service everywhere but one place:
+// the desktop app measures heights against its own copy, and a library
+// synced THERE would reach no other device -- the phone that flies the plan
+// talks to the hosted one. So the desktop measures locally and syncs hosted.
+export const syncUrl = () => (globalThis.dji?.desktop ? HOSTED : serviceUrl());

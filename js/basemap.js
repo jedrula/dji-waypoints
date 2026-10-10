@@ -64,6 +64,7 @@ export function createBasemaps({ map, onChange = () => {} }) {
       // get closer than the imagery goes, and placing a point by eye needs it.
       { maxZoom: 23, maxNativeZoom: spec.maxNative, attribution: spec.attribution },
     );
+    capZoom();
     if (current !== layers[active]) {
       if (current) map.removeLayer(current);
       current = layers[active];
@@ -89,9 +90,59 @@ export function createBasemaps({ map, onChange = () => {} }) {
     $('basetabs').append(b);
   }
 
+  // No zooming past the imagery. Past the deepest real tile Leaflet blew the
+  // last one up, and the map went on zooming into mush -- "zooming more than
+  // what is available should not be possible". How deep is per place (zoom
+  // 21 over Wroclaw, not over rural Mazowieckie -- see tilemapUrl), so the
+  // tilemap is asked about the tile under the centre, deepest first, and the
+  // map's limit follows. Cached per neighbourhood; a probe that fails leaves
+  // the declared maxNative standing, which is the limit there was before.
+  const deepest = new Map();
+  const tileOf = (lat, lon, z) => {
+    const n = 2 ** z;
+    const r = (lat * Math.PI) / 180;
+    return {
+      x: Math.floor(((lon + 180) / 360) * n),
+      y: Math.floor(((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * n),
+    };
+  };
+  async function deepestHere(lat, lon) {
+    const spec = BASEMAPS[active];
+    const t16 = tileOf(lat, lon, 16);
+    const key = `${spec.url}|${t16.x}|${t16.y}`;
+    if (!deepest.has(key)) {
+      deepest.set(key, (async () => {
+        for (let z = spec.maxNative; z >= 16; z--) {
+          const t = tileOf(lat, lon, z);
+          try {
+            const res = await fetch(tilemapUrl(spec.url)(z, t.x, t.y, 1, 1));
+            const j = res.ok ? await res.json() : null;
+            if (!Array.isArray(j?.data)) return spec.maxNative;
+            if (j.data[0]) return z;
+          } catch {
+            return spec.maxNative;
+          }
+        }
+        return 16;
+      })());
+    }
+    return deepest.get(key);
+  }
+  let capAt = 0;
+  async function capZoom() {
+    const at = ++capAt;
+    const c = map.getCenter();
+    const z = await deepestHere(c.lat, c.lng);
+    if (at !== capAt) return;
+    map.setMaxZoom(z);
+    if (map.getZoom() > z) map.setZoom(z, { animate: false });
+  }
+  map.on('moveend', capZoom);
+
   let saved = null;
   try { saved = localStorage.getItem(KEY); } catch { /* private window */ }
   set(saved ?? 'satellite');
+
 
   return {
     set,

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>3DGS Mission Planner — DJI Mini 5 Pro</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder@4.0.0/dist/Control.Geocoder.css">
 <link rel="stylesheet" href="css/style.css">
 <!-- three.js, pinned, from the CDN Leaflet already comes from. Nothing here is
      fetched until js/scene3d.js is first imported, which is when the LiDAR view
@@ -31,7 +32,19 @@
       </div>
     </div>
 
-    <p class="tip" id="tip">Tap the map on what you want captured.</p>
+    <!-- How to start, while there is nothing to plan. "Tap the map" alone was
+         the whole instruction, in 12 px grey, and the first question asked of
+         the app was how to start planning. Hidden from the first tap on. -->
+    <div class="tip" id="tip">
+      <b>Plan a capture</b>
+      <ol>
+        <li><span>Find the place</span> — search on the map, or paste coordinates.</li>
+        <li><span>Tap each thing you want captured</span> — a building, a rock face, a tree.
+          A flight is proposed straight away.</li>
+        <li><span>Set how tall it is</span> in the bar under the map, so the rings clear it.</li>
+        <li><span>Check it in 3D</span>, then <span>Save</span>, and <span>Fly</span> puts it on the controller.</li>
+      </ol>
+    </div>
 
     <div id="readout" class="readout"></div>
 
@@ -50,6 +63,14 @@
          one of them is ever on screen. -->
     <canvas id="lidar" hidden></canvas>
     <div id="toast" hidden></div>
+    <!-- The 3D view with no plan used to be a black pane, and clicking 3D read as
+         a dead button. Shown over the 3D pane only while it has nothing to draw. -->
+    <div id="empty3d" hidden>
+      <p>Nothing to show in 3D yet.</p>
+      <p class="hint">Tap the map on what you want captured and the flight appears here —
+        or look at the ground first in the LiDAR survey.</p>
+      <button id="empty3dSurvey" type="button">Show the survey here</button>
+    </div>
     <div id="splitter" hidden></div>
     <div id="viewtabs">
       <button type="button" class="on" data-view="map">Map</button>
@@ -176,18 +197,6 @@
         <path d="M5 12c4.7 2.6 9.3 2.6 14 0"/>
       </svg>
     </button>
-    <button id="findplace" type="button" class="maptoggle" title="Go to an address or coordinates">
-      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
-           stroke-width="1.9" stroke-linecap="round">
-        <circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/>
-      </svg>
-    </button>
-    <form id="placebar" class="placebar" hidden>
-      <input id="place" type="text" autocomplete="off" spellcheck="false"
-             placeholder="Cybulskiego 22, Wrocław — or 51.1103, 17.0553">
-      <button id="placeGo" type="submit" class="primary">Go</button>
-      <button id="placeClose" type="button" class="px" aria-label="Close">&times;</button>
-    </form>
     <button id="recentre" type="button" class="maptoggle" hidden
             title="Back to the points you have placed">
       <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
@@ -457,6 +466,7 @@
 </section>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-control-geocoder@4.0.0/dist/Control.Geocoder.js"></script>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>

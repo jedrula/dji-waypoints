@@ -218,7 +218,16 @@ function applyViewCanvases() {
   // The same for the flat canvas: it had no client size while hidden, so
   // whatever it drew last was drawn at the wrong size or not at all.
   if (show3d && !survey) view3d.draw();
+  renderEmpty3d();
 }
+
+// The flat 3D view draws the flight and the ground under it, so with no plan
+// it drew nothing at all, and pressing 3D read as a dead button. Say so, and
+// offer the survey, which does have something to show before a plan exists.
+function renderEmpty3d() {
+  $('empty3d').hidden = activeView === 'map' || groundMode === 'survey' || !!state.mission;
+}
+$('empty3dSurvey').addEventListener('click', () => setGround('survey'));
 
 
 
@@ -245,8 +254,6 @@ function setView(name) {
   $('looksBtn').hidden = !show3d;
   $('collideBtn').hidden = !show3d;
   $('liftBtn').hidden = !show3d || !pendingFit;
-  $('findplace').hidden = !showMap;
-  if (!showMap) openPlace(false);
   showRecentre();
   if (name === 'split') setSplit(splitPct, { store: false });
   if (showMap) map.invalidateSize();
@@ -388,67 +395,63 @@ function showRecentre() {
 }
 
 /* ---------- going somewhere ---------- */
-// A mission usually starts from an address: you know where the job is before
-// you know anything else about it. Two ways in, because both are how people
-// actually have a place to hand -- a name, or a pair of numbers off a phone.
-
-// Coordinates first, and offline: "51.1103, 17.0553" is not a question for a
-// geocoder, and a pasted pair should not need the network or wait on it.
-function asCoords(text) {
-  const m = String(text).trim().match(/^(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)$/);
-  if (!m) return null;
-  const lat = Number(m[1]);
-  const lon = Number(m[2]);
-  return Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? { lat, lon } : null;
-}
-
-function openPlace(on) {
-  $('placebar').hidden = !on;
-  $('findplace').classList.toggle('on', on);
-  if (on) $('place').focus();
-}
-$('findplace').addEventListener('click', () => openPlace($('placebar').hidden));
-$('placeClose').addEventListener('click', () => openPlace(false));
-window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('placebar').hidden) openPlace(false); });
-
-$('placebar').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const q = $('place').value.trim();
-  if (!q) return;
-
-  const here = asCoords(q);
-  if (here) {
-    map.setView([here.lat, here.lon], Math.max(map.getZoom(), 19), { animate: false });
-    openPlace(false);
-    toast(`At ${here.lat.toFixed(5)}, ${here.lon.toFixed(5)}.`);
-    return;
+// A mission usually starts from an address, so the search box is always on the
+// map rather than behind an icon -- behind an icon, it was not found.
+//
+// The ranking is someone else's, on purpose. This was a hand-rolled Nominatim
+// call taking the top hit, and "Kadzielnia, Kielce" landed on Kielce Główne
+// station, 1.4 km off: Nominatim ranks by importance, and the station's
+// ADDRESS matches. Patching that with our own name-matching rule is how a
+// geocoder gets reinvented badly. Photon (komoot, OSM data) is built for
+// search-as-you-type and biases results to the map's centre and zoom -- it
+// put the Kadzielnia peak first, and over Kielce, Kielce's Kadzielnia before
+// Pabianice's -- and leaflet-control-geocoder shows the list, so a wrong first
+// guess is one click from the right one instead of a wrong place.
+//
+// A pasted pair is still answered offline, before anything goes to Photon:
+// "50.8612, 20.6167" is not a question for a geocoder.
+const coords = L.Control.Geocoder.latLng();
+// Native names ("Świętokrzyskie", not "Holy Cross Voivodeship") and a list
+// short enough to read: it was fifteen long.
+const photon = L.Control.Geocoder.photon({ geocodingQueryParams: { lang: 'default', limit: 6 } });
+// Both paths go through geocode(), because the plugin's Photon suggest() drops
+// the map context -- so the list shown while typing had no location bias, and
+// "Kadzielnia" typed over Kielce opened with a village in Mazovia.
+//
+// Each row also says WHAT it is: "Kadzielnia, Kielce" came back three times --
+// the peak, the district and a street -- and three identical rows is a guess.
+const esc = (t) => String(t).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const kindOf = (r) => (r.properties?.osm_value ?? '').replace(/_/g, ' ');
+const labelled = (rs) => rs.map((r) => ({
+  ...r,
+  html: kindOf(r)
+    ? `${esc(r.name)} <span class="leaflet-control-geocoder-address-detail">${esc(kindOf(r))}</span>`
+    : esc(r.name),
+}));
+const lookup = async (q, ctx) => {
+  const here = await coords.geocode(q, ctx);
+  return here.length ? here : labelled(await photon.geocode(q, ctx));
+};
+const either = { geocode: lookup, suggest: lookup };
+const search = L.Control.geocoder({
+  geocoder: either,
+  position: 'topleft',
+  collapsed: false,
+  defaultMarkGeocode: false,
+  placeholder: 'Search a place, or paste lat, lon',
+  errorMessage: 'Nothing found.',
+}).on('markgeocode', ({ geocode: g }) => {
+  // Zoom to the thing rather than to a fixed level: a box is a street or a
+  // city depending on what was found, and 19 over a city is a rooftop
+  // somewhere near the middle of it. A point (a pasted pair) gets 19.
+  const b = g.bbox;
+  if (b && !b.getNorthEast().equals(b.getSouthWest())) {
+    map.fitBounds(b, { animate: false, maxZoom: 19 });
+  } else {
+    map.setView(g.center, Math.max(map.getZoom(), 19), { animate: false });
   }
-
-  $('placeGo').disabled = true;
-  $('placeGo').textContent = '…';
-  try {
-    const r = await fetch('https://nominatim.openstreetmap.org/search'
-      + `?format=json&limit=1&q=${encodeURIComponent(q)}`);
-    const [hit] = await r.json();
-    if (!hit) { toast(`Nothing found for “${q}”.`); return; }
-    // Zoom to the thing rather than to a fixed level: a boundingbox is a
-    // street or a city depending on what was asked for, and 19 over a city is
-    // a rooftop somewhere near the middle of it.
-    const bb = hit.boundingbox?.map(Number);
-    if (bb && bb.every(Number.isFinite)) {
-      map.fitBounds(L.latLngBounds([bb[0], bb[2]], [bb[1], bb[3]]), { animate: false, maxZoom: 19 });
-    } else {
-      map.setView([+hit.lat, +hit.lon], 18, { animate: false });
-    }
-    openPlace(false);
-    toast(hit.display_name.split(',').slice(0, 3).join(',').trim());
-  } catch {
-    toast('Search is unavailable — pan the map, or paste coordinates.');
-  } finally {
-    $('placeGo').disabled = false;
-    $('placeGo').textContent = 'Go';
-  }
-});
+  toast(g.name.split(',').slice(0, 3).join(',').trim());
+}).addTo(map);
 
 $('recentre').addEventListener('click', () => {
   const b = siteBounds();
@@ -1216,6 +1219,13 @@ function renderPreflight() {
 function renderReadout() {
   const box = $('readout');
   const m = state.mission;
+  renderEmpty3d();
+  // With nothing tapped there is nothing to clear or save, and a bright Save
+  // over an empty plan reads as the next step. Both said so in a toast after
+  // the press; now they say it before.
+  const empty = !site.capture().length;
+  $('clearMode').disabled = empty;
+  $('savePlan').disabled = empty;
   if (!m) {
     box.className = 'readout empty';
     box.innerHTML = '';
@@ -2280,3 +2290,55 @@ window.__state = state;
 window.__site = site;
 window.__map = map;
 window.__view3d = view3d;
+
+/* ---------- tooltips ---------- */
+// Every map control is an icon, and the browser's own tooltip is a second's
+// hover away -- long enough that nobody finds out what an icon does. One tip,
+// shown at once, reading the control's own `title`, so the titles the code
+// already rewrites ("Hide the flight" / "Show the flight") stay the source of
+// truth. The title is parked while the tip is up so the native one does not
+// appear on top of it a second later.
+const tipEl = document.createElement('div');
+tipEl.id = 'hovertip';
+tipEl.hidden = true;
+document.body.append(tipEl);
+let tipFor = null;
+function hideTip() {
+  if (tipFor?.dataset.tip !== undefined) {
+    tipFor.title = tipFor.dataset.tip;
+    delete tipFor.dataset.tip;
+  }
+  tipFor = null;
+  tipEl.hidden = true;
+}
+$('stage').addEventListener('pointerover', (e) => {
+  if (e.pointerType === 'touch') return;
+  const el = e.target.closest('[title]');
+  if (!el || el === tipFor || !$('stage').contains(el)) return;
+  hideTip();
+  const text = el.title;
+  if (!text) return;
+  tipFor = el;
+  el.dataset.tip = text;
+  el.removeAttribute('title');
+  tipEl.textContent = text;
+  tipEl.hidden = false;
+  // Beside the control, on whichever side has the room: the left stack's tips
+  // go right, the right stack's go left. A button in a row of buttons gets
+  // its tip underneath, because beside it would cover its neighbours.
+  const r = el.getBoundingClientRect();
+  const t = tipEl.getBoundingClientRect();
+  if (el.closest('#groundtabs, #basetabs, #viewtabs')) {
+    const x = Math.min(window.innerWidth - t.width - 4, Math.max(4, r.left + r.width / 2 - t.width / 2));
+    tipEl.style.left = `${x}px`;
+    tipEl.style.top = `${r.bottom + 6}px`;
+    return;
+  }
+  const right = r.left + r.width / 2 < window.innerWidth / 2;
+  tipEl.style.left = `${right ? r.right + 8 : r.left - 8 - t.width}px`;
+  tipEl.style.top = `${Math.max(4, r.top + r.height / 2 - t.height / 2)}px`;
+});
+$('stage').addEventListener('pointerout', (e) => {
+  if (tipFor && !tipFor.contains(e.relatedTarget)) hideTip();
+});
+window.addEventListener('pointerdown', hideTip, true);

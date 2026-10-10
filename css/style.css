@@ -1,7 +1,10 @@
 /* The page is a map with a band of controls on top of it. That split is the
    whole layout: everything that is not one of the six things you touch while
    planning lives in a sheet that slides up over the map and goes away again.
-   One layout, phone and laptop alike -- there is no second one to keep in step. */
+   On a wide window the same band stands up as a column on the left -- same
+   DOM, same order, one media query at the bottom of the band rules -- because
+   a band across 1440 px spent a third of a laptop's height on six buttons
+   stretched to 500 px each, and the desktop build is a laptop window. */
 :root {
   --bg: #101418;
   --panel: #171c22;
@@ -36,6 +39,11 @@ body {
    long alert flattened the numbers above it to a nine-pixel stripe -- content
    still there, nothing readable. */
 #bar > * { flex-shrink: 0; }
+@media (min-width: 1000px) {
+  #app { flex-direction: row; }
+  #bar { flex: 0 0 320px; min-height: 0; max-height: none; height: 100dvh;
+         border-bottom: 0; border-right: 1px solid var(--line); gap: 12px; }
+}
 #stage { flex: 1 1 auto; position: relative; min-height: 0; }
 #map { position: absolute; inset: 0; background: #0b0e11; }
 #map[hidden] { display: none; }
@@ -62,8 +70,13 @@ body {
        border: 1px solid var(--line); border-radius: 999px; padding: 0 5px; }
 .tag.ok { color: var(--ok); border-color: transparent; font-size: 13px; padding: 0; }
 
-.tip { margin: 0; color: var(--dim); font-size: 12px; }
+.tip { margin: 0; color: var(--dim); font-size: 12.5px; }
 .tip[hidden] { display: none; }
+.tip b { display: block; color: var(--text); font-size: 13px; font-weight: 650; margin-bottom: 6px; }
+.tip ol { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+.tip li { line-height: 1.4; }
+.tip li::marker { color: var(--accent); font-weight: 650; }
+.tip li span { color: var(--text); }
 
 /* Four numbers, because a plan is four questions: is it worth flying, will it
    fit a battery, how sharp is it, and does it see everything. */
@@ -74,6 +87,10 @@ body {
 .readout span { display: block; font-size: 9.5px; text-transform: uppercase;
                 letter-spacing: 0.06em; color: var(--dim); margin-top: 1px; }
 .readout.empty { display: block; padding: 14px; text-align: center; color: var(--dim); font-size: 12.5px; }
+/* renderReadout hides the empty box, and `display: block` above was beating
+   the hidden attribute -- so a fresh plan opened with a grey stripe saying
+   nothing under the tip. */
+.readout[hidden] { display: none; }
 
 .readout b.bad { color: var(--warn); }
 .readout b.ok { color: var(--ok); }
@@ -133,6 +150,14 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 .leaflet-control-attribution { background: rgba(16,20,24,0.8) !important; color: var(--dim) !important;
                                font-size: 10px !important; }
 .leaflet-control-attribution a { color: var(--dim) !important; }
+/* Leaflet's zoom buttons are white; every other control on the map is this
+   panel colour, so the one white box read as a different app. */
+.leaflet-bar { border: 1px solid var(--line) !important; border-radius: 8px !important;
+               box-shadow: none !important; overflow: hidden; }
+.leaflet-bar a, .leaflet-bar a:hover { background: rgba(16,20,24,0.9); color: var(--dim);
+               border-bottom-color: var(--line); width: 38px; height: 34px; line-height: 34px; }
+.leaflet-bar a:hover { color: var(--text); }
+.leaflet-bar a.leaflet-disabled { background: rgba(16,20,24,0.9); color: #3d4753; }
 #map.placing { cursor: crosshair; }
 
 /* A tapped point. The ring is the thing itself; the number is how tall you said
@@ -234,8 +259,7 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 #groundtabs button.on { background: var(--panel2); color: var(--accent); }
 /* Third in the left stack, and only there when you have lost the site: a
    control offering to take you somewhere you already are is just clutter. */
-#recentre { top: 272px; }
-#findplace { top: 226px; }
+#recentre { top: 226px; }
 /* Each sync belongs to the pane it READS from, so it sits with that pane's own
    controls: on the right of the map under the basemap picker, on the right of
    the 3D under the ground picker. The left stack was seven buttons deep with
@@ -258,16 +282,34 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 #wiresBtn { top: 180px; }
 
 /* Searching is how a mission usually starts -- you know the address before you
-   know anything else -- so it lives on the map rather than behind a sheet, and
-   folds back to an icon once you have arrived. */
-.placebar { position: absolute; top: 10px; left: 60px; right: 10px; z-index: 540;
-            display: flex; gap: 6px; align-items: center; }
-.placebar[hidden] { display: none; }
-.placebar input { flex: 1; min-width: 0; background: rgba(16,20,24,0.96);
-                  border-color: var(--hair); }
-.placebar button { flex: none; background: rgba(16,20,24,0.96); }
-.placebar button.primary { background: var(--accent); }
-@media (min-width: 720px) { .placebar { right: auto; width: 420px; } }
+   know anything else -- so the box is always open, beside the zoom control.
+   It was an icon that unfolded a bar, and the icon was not found. The plugin
+   brings its own light theme; these rules only make it this app's. Its width
+   leaves room for the Map / Split / 3D tabs at the right, phone included. */
+.leaflet-top.leaflet-left .leaflet-control-geocoder {
+  position: absolute; top: 0; left: 50px; margin: 10px 0 0 0;
+  width: min(380px, calc(100vw - 236px)); border-radius: 8px;
+  background: rgba(16,20,24,0.94); border: 1px solid var(--line); box-shadow: none;
+  color: var(--text); display: flex; flex-wrap: wrap; align-items: center; }
+.leaflet-control-geocoder.leaflet-control-geocoder-expanded .leaflet-control-geocoder-form {
+  display: block; flex: 1; min-width: 0; }
+.leaflet-control-geocoder-form input {
+  width: 100%; height: 34px; padding: 0 10px; font: inherit; font-size: 13px;
+  background: transparent; color: var(--text); border: 0; outline: none; }
+.leaflet-control-geocoder-form input::placeholder { color: var(--dim); }
+.leaflet-control-geocoder .leaflet-control-geocoder-icon { flex: none; width: 34px; height: 34px;
+  background-color: transparent; filter: invert(0.7); }
+.leaflet-control-geocoder-alternatives { width: 100%; margin: 0; padding: 0; list-style: none;
+  border-top: 1px solid var(--line); }
+.leaflet-control-geocoder-alternatives li { padding: 7px 10px; border-bottom: 1px solid var(--line);
+  white-space: normal; line-height: 1.35; }
+.leaflet-control-geocoder-alternatives li:last-child { border-bottom: 0; }
+.leaflet-control-geocoder-alternatives a { color: var(--text); text-decoration: none; }
+.leaflet-control-geocoder-alternatives li:hover,
+.leaflet-control-geocoder-selected { background: var(--panel2); }
+.leaflet-control-geocoder-address-detail { color: var(--dim); font-size: 12px; }
+.leaflet-control-geocoder-error { width: 100%; padding: 7px 10px; color: var(--dim); margin: 0; }
+.leaflet-control-geocoder-throbber .leaflet-control-geocoder-form input { color: var(--dim); }
 #recentre.on, #recentre:hover { color: var(--capture); }
 .maptoggle:hover { color: var(--text); }
 
@@ -447,3 +489,20 @@ code { background: var(--panel2); border-radius: 4px; padding: 1px 5px; font-siz
 /* The map pane owns the left edge in split view -- and its buttons with it --
    so there the chips sit just inside the survey pane with nothing to clear. */
 #stage.split #levelchips { left: calc(var(--split) + 12px); }
+
+/* The one hover tip for every icon control; see "tooltips" in app.js. */
+#hovertip { position: fixed; z-index: 2000; pointer-events: none; max-width: 260px;
+            background: #0b0e11; color: var(--text); border: 1px solid var(--line);
+            border-radius: 6px; padding: 5px 8px; font-size: 12px; line-height: 1.35; }
+#hovertip[hidden] { display: none; }
+
+/* Over the 3D pane while it has nothing to draw. In a split it sits over the
+   3D half only, which is the right half on a laptop and the bottom on a phone. */
+#empty3d { position: absolute; inset: 0; z-index: 400; display: flex; flex-direction: column;
+           align-items: center; justify-content: center; gap: 6px; padding: 24px;
+           text-align: center; pointer-events: none; }
+#empty3d[hidden] { display: none; }
+#empty3d p { margin: 0; max-width: 320px; }
+#empty3d button { margin-top: 8px; pointer-events: auto; }
+#stage.split #empty3d { left: var(--split); }
+@media (max-width: 720px) { #stage.split #empty3d { left: 0; top: var(--split); } }

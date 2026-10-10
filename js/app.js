@@ -1093,6 +1093,7 @@ function settleSoon() {
     if (!state.mission) return;
     if (!tuned) autoFit();
     if (!state.mission) return;
+    ensureClear();
     // Convex pieces, not whole solids: what blocks a camera is worked out by
     // clipping a ray against a convex thing, and an L is not one.
     const boxes = wireHazards().flatMap((o) => localPrisms(o, state.mission.frame));
@@ -1173,6 +1174,7 @@ function computePlan() {
 
   const p = paramsFromUi(uiValues());
   p.subjectClearance = clearance();
+  p.surfaceFloor = surveyFloor();
   const hazards = wireHazards();
 
   try {
@@ -1649,21 +1651,30 @@ function partsFromMission(mission, profile, label) {
 function missionFromCode(code) {
   const plan = decodePlan(code);
   if (!plan) return null;
+  // The plan on screen is installed AS DRAWN. Rebuilt from its code it lost
+  // everything the survey adds -- the stations lifted over crowns, the tight
+  // ring, the shots between non-overlapping photos -- so the Fly pane showed
+  // 97 waypoints for a plan the readout called 118, and would have written a
+  // different flight from the one that was checked.
+  // (encodePlan direct rather than planCode(): this can run during startup,
+  // before that const is defined.)
+  if (state.mission && site.capture().length && code === encodePlan(siteForPlanner(), uiValues())) {
+    return { plan, mission: state.mission, hits: state.mesh?.hits ?? 0 };
+  }
   try {
-    let mission = planMission({ points: plan.points, shape: plan.shape }, paramsFromUi(plan.ui), cam);
-    // The shots surveyCheck adds between non-overlapping photos are not in
-    // the code -- they are derived, like everything else -- so a plan rebuilt
-    // for installing has to derive them again, or the controller gets the
-    // flight without them. Only for the plan the survey is loaded under: its
-    // heights are measured from THAT plan's takeoff ground, and another
-    // plan's altitudes are measured from its own.
+    const p = paramsFromUi(plan.ui);
+    p.subjectClearance = clearance();
+    p.surfaceFloor = surveyFloor();
+    let mission = planMission({ points: plan.points, shape: plan.shape }, p, cam);
+    // The shots surveyCheck adds between non-overlapping photos are derived,
+    // so a rebuilt plan derives them again -- only under the survey it was
+    // loaded for, whose heights are measured from that plan's takeoff.
     const here = state.mission?.frame;
     const same = here && here.lat0 === mission.frame.lat0 && here.lon0 === mission.frame.lon0;
     const yAt = same ? lidar?.sampler?.() : null;
-    if (yAt) {
-      mission = bridgeMission(mission, surveySamples(mission, yAt, null), yAt).mission;
-    }
-    return { plan, mission };
+    if (yAt) mission = bridgeMission(mission, surveySamples(mission, yAt, null), yAt).mission;
+    const chk = lidar?.checkFlight?.(mission, clearance());
+    return { plan, mission, hits: chk?.hits ?? 0 };
   } catch {
     return null;
   }
@@ -1941,6 +1952,20 @@ async function point3dAtMap() {
   // The flat view draws the plan, so with no plan it has nowhere to stand;
   // the survey can show any ground, plan or not.
   if (!state.mission && groundMode !== 'survey') await setGround('survey');
+  // And the survey only has the ground it loaded: a search two kilometres
+  // away (Kadzielnia to Emilii Plater) pointed its camera at empty space and
+  // the pane went black. With no plan to hold it in place, ground more than
+  // 150 m from what is loaded -- well inside the 200 m the crop reaches --
+  // moves the survey there and loads it before the camera goes.
+  if (!state.mission && groundMode === 'survey' && lidar) {
+    const c = map.getCenter();
+    const o = lidar.origin();
+    const far = !o || Math.hypot((c.lat - o.lat) * mPerDegLat(c.lat), (c.lng - o.lon) * mPerDegLon(c.lat)) > 150;
+    if (far) {
+      lidar.setAnchor({ lat: c.lat, lon: c.lng });
+      await lidar.open();
+    }
+  }
   const v = active3d();
   if (!v?.lookAt) return;
   const c = map.getCenter();
@@ -1952,7 +1977,11 @@ function pointMapAt3d() {
   // A scale back to a zoom, fractional so the two match rather than land on
   // the nearest power of two: the zoom whose ground-per-pixel is the 3D's.
   const want = at.spanM / view3dWidth();
-  const z = Math.max(3, Math.min(21, Math.log2(mPerPx(at.lat, 0) / want)));
+  // Tilted, the map follows where the 3D is looking and keeps its zoom: the
+  // camera's distance only means "this much ground" looking straight down.
+  // (The flat 3D view does not say, and is treated as straight down.)
+  const z = at.topDown === false ? map.getZoom()
+    : Math.max(3, Math.min(21, Math.log2(mPerPx(at.lat, 0) / want)));
   // Unanimated, Leaflet fires moveend inside setView, so the flag only has
   // to last the call. Left for moveend to clear, a setView that changed
   // nothing fired no moveend, and the flag swallowed your next real pan.
@@ -1967,8 +1996,21 @@ function threeDMoved() {
   threeDMoveTimer = setTimeout(() => { threeDMoveTimer = null; pointMapAt3d(); }, 80);
 }
 view3d.onViewMove(threeDMoved);
+// The map pushes the 3D only when YOU moved the map. Its own adjustments --
+// the zoom cap snapping it back to the deepest imagery, a fit, the 3D moving
+// it -- fire moveend too, and each one pointed the 3D at the map's zoom. The
+// 3D can come closer than the map's imagery goes, so painting up close kept
+// getting thrown back out to the map's coarser zoom mid-stroke.
+let mapTouchedAt = 0;
+const touchedMap = () => { mapTouchedAt = performance.now(); };
+for (const t of ['pointerdown', 'wheel', 'keydown', 'touchstart']) {
+  map.getContainer().addEventListener(t, touchedMap, { passive: true, capture: true });
+}
+// (The search box is a control INSIDE the map's container, so picking a
+// result is a pointerdown or a keydown there and counts already.)
 map.on('moveend', () => {
   if (moveFromThreeD) return;
+  if (performance.now() - mapTouchedAt > 1500) return;
   if (linked && activeView !== 'map') point3dAtMap();
 });
 function setLinked(on) {
@@ -2134,7 +2176,15 @@ const bridge = initInstall({
   partsForPlan: (saved) => {
     const built = missionFromCode(saved.code);
     if (!built) return null;
-    return partsFromMission(built.mission, built.plan.ui.profile ?? $('profile').value, saved.name);
+    const parts = partsFromMission(built.mission, built.plan.ui.profile ?? $('profile').value, saved.name);
+    // Never onto the controller with legs the survey says pass too close to
+    // something. The panel shows why, and install.js refuses blocked parts.
+    if (built.hits) {
+      return parts.map((part) => ({ ...part, blocked: true,
+        detail: `${built.hits} leg${built.hits === 1 ? '' : 's'} within ${clearance()} m of the survey — `
+          + 'open it so it can adjust, then save' }));
+    }
+    return parts;
   },
 });
 
@@ -2514,16 +2564,21 @@ async function paintToSite(cells) {
   if (!got) return;
   detailBaseAlt = null;
   state.paint = cells;
-  // Saved after the plan is set, below, so it is keyed to the right points.
   site.setCapture(got.points);
   state.selected = null;
   renderPointBar();
-  history.commit();
+  // Adjusted NOW, from the painted points' own relief. It used to wait for
+  // the survey lookup below first, so the plan appeared unadjusted -- often
+  // drawn red through the trees -- and jumped to the adjusted one about four
+  // seconds later, measured at Emilii Plater. The lookup only ever raises the
+  // height, so when it does, the plan is adjusted once more.
+  fitToPaint();
+  savePaint();
   // The survey's own height-above-ground, over the painted outline, when that
   // is taller than the relief the brush saw -- a canopy painted only on its
   // top has no relief at all. Upgrade-only, like probeHeight: no service, no
   // change, and the relief stands.
-  let height = got.points[0].height;
+  const height = got.points[0].height;
   try {
     const { measure } = await import('./heights.js');
     const lats = got.poly.map((p) => p.lat);
@@ -2535,16 +2590,15 @@ async function paintToSite(cells) {
       height, assumed: true,
     }]);
     const m = res.obstacles[0];
-    if (m?.measured && m.height > height) {
-      height = m.height;
-      site.setCapture(got.points.map((p) => ({ ...p, height })));
-      history.commit();
+    // Only while this stroke's plan is still the one up: a second stroke in
+    // those seconds has replaced it, and its own lookup will answer for it.
+    if (m?.measured && m.height > height && state.paint === cells) {
+      detailBaseAlt = null;
+      site.setCapture(got.points.map((p) => ({ ...p, height: m.height })));
+      fitToPaint();
+      savePaint();
     }
   } catch { /* the relief stands */ }
-  savePaint();
-  toast(`Painted ${Math.round(got.areaM2)} m² — planning for ${height} m tall…`, { sticky: true });
-  // Let the toast paint before the search takes the thread.
-  setTimeout(fitToPaint, 30);
 }
 
 /* ---------- checking the plan against the survey ---------- */
@@ -2665,7 +2719,14 @@ function surveyCheck() {
 function planWith(v) {
   const p = paramsFromUi(v);
   p.subjectClearance = clearance();
+  p.surfaceFloor = surveyFloor();
   return planMission(siteForPlanner(), p, cam);
+}
+// The survey as the planner's floor, when the survey view has it loaded.
+function surveyFloor() {
+  if (!lidar?.floorAt) return null;
+  const clr = clearance();
+  return (lat, lon) => lidar.floorAt(lat, lon, clr);
 }
 const GRID_PASSES = new Set(['nadir', 'oblique', 'establish', 'surround', 'context', 'transit', 'bridge']);
 function liftToClear(v0) {
@@ -2808,6 +2869,23 @@ function applyDetail(level) {
   if (safe.cost - Math.abs(safe.sideways ?? 0) > 0) bits.push(`raised up to ${Math.round(safe.cost - Math.abs(safe.sideways ?? 0))} m where it clipped`);
   if (bits.length) toast(`Adjusted to stay ${clearance()} m clear of what the survey measured: ${bits.join(', ')}.`);
 }
+// Any plan that settles flying too close to the survey is adjusted, not only
+// painted ones. Tapped points went straight from auto-fit -- which knows
+// nothing of trees -- to the screen: a single tap at Emilii Plater came out as
+// 5 m rings drawn red through the courtyard. Same adjuster as the detail
+// notches (safePlan), applied to the settings as they stand.
+function ensureClear() {
+  const check = lidar?.checkFlight?.(state.mission, clearance());
+  if (!check?.hits) return;
+  const safe = safePlan(uiValues());
+  if (!safe || safe.unchecked) return;
+  controls.orbitStandoff.el.value = safe.v.orbitStandoff;
+  $('altitude').value = safe.v.altitude;
+  pinned = { orbitHeights: safe.v.orbitHeights ?? null, transectHeights: safe.v.transectHeights ?? null };
+  readOuts();
+  computePlan();
+}
+
 $('detail').addEventListener('input', () => {
   $('detailOut').textContent = DETAIL[+$('detail').value].label;
 });
@@ -2820,10 +2898,11 @@ function fitToPaint() {
   if (!tuned) autoFit();
   const { level, custom } = detailNow();
   applyDetail(custom ? DETAIL_DEFAULT : level);
-  surveyCheck();
-  renderReadout();
   setPaintView('captured');
   $('toast').hidden = true;
+  // The heat after the plan has drawn, not before: scoring every voxel took
+  // the page 1.4 s at Emilii Plater, and the stroke looked frozen meanwhile.
+  setTimeout(() => { surveyCheck(); renderReadout(); }, 0);
 }
 $('cloudBtn').addEventListener('click', () => {
   const on = !$('cloudBtn').classList.contains('on');

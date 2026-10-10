@@ -1902,6 +1902,27 @@ console.log('\nwhat the photos see of the survey');
   ok('and every added shot is on the leg already flown', onLeg);
 }
 
+console.log('\nthe survey as a floor under the rings');
+{
+  const { planMission } = await import('../js/planner.js');
+  const { CAMERAS } = await import('../js/camera.js');
+  // One 3 m thing; a 16 m crown stands east of it, so the floor there is 19 m
+  // (16 + 3 clearance) and nothing anywhere else.
+  const lat0 = 50.8517, lon0 = 20.625;
+  const floor = (lat, lon) => (lon > lon0 + 0.00008 ? 19 : 0);
+  const site = { points: [{ lat: lat0, lon: lon0, height: 3 }] };
+  const opts = { nadir: false, oblique: false, surround: false, context: false, establish: false, orbitRings: 1, subjectClearance: 3 };
+  const flat = planMission(site, opts, CAMERAS.mini5pro);
+  const over = planMission(site, { ...opts, surfaceFloor: floor }, CAMERAS.mini5pro);
+  const ring = (m) => m.exported.filter((w) => w.pass === 'orbit' && !w.transit);
+  const a = ring(flat);
+  const b = ring(over);
+  const isEast = (w) => w.lon > lon0 + 0.00008;
+  ok('stations over the crown rise above it', b.some(isEast) && b.filter(isEast).every((w) => w.alt >= 19));
+  ok('and every other station flies exactly where it did',
+     a.length === b.length && b.every((w, i) => isEast(w) || Math.abs(w.alt - a[i].alt) < 1e-9));
+}
+
 console.log('\nthe height you type');
 {
   const { parseHeight } = await import('../js/site.js');

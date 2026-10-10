@@ -562,6 +562,8 @@ export async function installCapture(list, onProgress = null) {
   for (const saved of list) {
     const parts = partsForPlan(saved);
     if (!parts?.length) throw new Error(`“${saved.name}” will not build — it may be from an older format`);
+    const blocked = parts.find((p) => p.blocked);
+    if (blocked) throw new Error(`“${saved.name}” not installed: ${blocked.detail}`);
     for (const part of parts) jobs.push({ saved, part });
   }
   const usable = state.slots.filter((s) => s.exists);
@@ -628,6 +630,8 @@ export async function installCapture(list, onProgress = null) {
 // panel above enforces is enforced here too: a plan in three parts needs three
 // mission folders from that point on, or it is not installable at all.
 async function writeParts(parts, first) {
+  const blocked = parts.find((p) => p.blocked);
+  if (blocked) throw new Error(`Not installed: ${blocked.detail}`);
   const usable = state.slots.filter((s) => s.exists);
   const start = usable.findIndex((s) => s.id === first);
   if (start < 0) throw new Error('that mission is no longer on the controller');

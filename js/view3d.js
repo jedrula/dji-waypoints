@@ -180,7 +180,7 @@ export function createView3D(canvas) {
     // What actually flies at each height, so the scale can name it rather than
     // just marking a number.
     const NAME = { nadir: 'nadir', oblique: 'oblique', orbit: 'orbit', transect: 'cross',
-                   surround: 'surround', context: 'context' };
+                   surround: 'surround', context: 'context', tight: 'tight ring' };
     // Every height on screen, the capture's included: with seven missions
     // switched on this is the list that says 8, 12, 16, 36 and 60 m, which is
     // the whole reason for looking at a capture in three dimensions.
@@ -197,7 +197,13 @@ export function createView3D(canvas) {
     // back to it. A height nothing claims (a device route, say) still gets a
     // label, just no grip.
     const owners = mission?.levels ?? [];
+    // Only heights that are LEVELS: one a planner knob owns, or one at least
+    // six waypoints share (another saved plan's, say). A station lifted over a
+    // tree flies at a height of its own, and with the survey under the rings
+    // that is most of them -- every one got a label reading "orbit", a column
+    // of thirty that said nothing true.
     const levels = [...byHeight.values()]
+      .filter((e) => e.n >= 6 || owners.some((o) => Math.round(o.z * 10) / 10 === e.z))
       .map((e) => ({
         z: e.z,
         n: e.n,

@@ -3501,6 +3501,12 @@ export function createScene3D(canvas) {
     // Moving the anchor itself is the one case that cannot be salvaged: it is
     // a different neighbourhood, and the tiles are 100 m squares baked into
     // the old origin. They go.
+    // Where this view's ground is centred, so the app can tell when the map
+    // has moved off it.
+    origin() {
+      const f = frameOf();
+      return f ? { lat: f.lat0, lon: f.lon0 } : null;
+    },
     setAnchor({ lat, lon } = {}) {
       if (mission || !Number.isFinite(lat) || !Number.isFinite(lon)) return false;
       if (anchor && Math.abs(anchor.lat0 - lat) < 1e-7 && Math.abs(anchor.lon0 - lon) < 1e-7) return false;
@@ -3716,6 +3722,24 @@ export function createScene3D(canvas) {
     checkFlight(m, clr = clearM) {
       return checkMesh(m, clr);
     },
+    // The lowest a station may fly at a spot: the tallest survey cell within
+    // `reach` metres, plus the clearance, in metres above the grid's datum --
+    // for the planner's surfaceFloor. 0 off the grid or with none: the planner
+    // then keeps its own heights, and the flight check still has the last word.
+    floorAt(lat, lon, clr = clearM, reach = clr + 2) {
+      if (!heights?.frame) return 0;
+      const l = heights.frame.toLocal(lat, lon);
+      const R = Math.ceil(reach / HCELL);
+      let top = null;
+      for (let dz = -R; dz <= R; dz++) {
+        for (let dx = -R; dx <= R; dx++) {
+          if (dx * dx + dz * dz > R * R) continue;
+          const g = groundUnder(l.x + dx * HCELL, -l.y + dz * HCELL);
+          if (g !== null && (top === null || g > top)) top = g;
+        }
+      }
+      return top === null ? 0 : top + clr;
+    },
 
     setCollision(on) {
       collisionMode = !!on;
@@ -3837,7 +3861,12 @@ export function createScene3D(canvas) {
       // Measured to the height the map is drawing, not to the ground, and
       // ACROSS rather than down: see lookAt, which is this in reverse.
       const dist = Math.max(1, camera.position.distanceTo(t) - lookHeight());
-      return { lat: g.lat, lon: g.lon, spanM: Math.max(20, 2 * dist * tanAcross()) };
+      // Whether the camera is looking roughly straight down. Only then does
+      // its distance say how much ground is in shot; tilted towards the
+      // horizon it is far from its target and sees a long strip, and a map
+      // zoomed to that distance jumped out by a factor of several mid-orbit.
+      const topDown = controls.getPolarAngle() < (25 * Math.PI) / 180;
+      return { lat: g.lat, lon: g.lon, spanM: Math.max(20, 2 * dist * tanAcross()), topDown };
     },
 
     // Reproduce the map: straight down, north up, the same width of ground.

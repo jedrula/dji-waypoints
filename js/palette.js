@@ -17,6 +17,7 @@ export const PASS_COLOR = {
   surround: '#ff6fb5',
   context: '#ff9f5a',
   establish: '#7ee0a0',
+  tight: '#e6ef6a',
 };
 
 // Anything the palette has no name for. Grey, so an unnamed pass reads as

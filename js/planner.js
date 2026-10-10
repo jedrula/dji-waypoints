@@ -111,6 +111,13 @@ export const DEFAULTS = {
   // solving the wrong problem.
   approachFrom: null,
   approachSpeed: 8,
+  // `(lat, lon) => metres`: the lowest the aircraft may fly at that spot, from
+  // the survey (the tallest thing within the clearance, plus the clearance),
+  // or null without one. Each ring station and grid shot rises to it where it
+  // has to -- over the arc a tree stands on, not round the whole ring. See
+  // objectPass: before this, a ring round a 3 m playground was lifted whole
+  // to 19 m because one arc of it passed a crown.
+  surfaceFloor: null,
   photoMode: 'waypoint', // 'waypoint' | 'interval'
   shotsPerStop: 1,       // 1 = single frame; >1 = gimbal pitch fan at the stop
   shotSpread: 20,        // degrees between frames in the fan
@@ -178,9 +185,12 @@ function gridPass(g) {
     for (let j = 0; j < nShots; j++) {
       const k = flown % 2 === 0 ? j : nShots - 1 - j;   // serpentine
       const q = at(c, a0 + k * dAlong);
+      const ll = f.toLatLon(q.x, q.y);
       pts.push({
-        ...f.toLatLon(q.x, q.y),
-        alt: g.alt,
+        ...ll,
+        // A shot over a crown or a roof rises clear of it; the rest of the
+        // line keeps the altitude its ground resolution was planned at.
+        alt: g.floor ? Math.max(g.alt, g.floor(ll.lat, ll.lon)) : g.alt,
         pitch: g.pitch,
         heading: { mode: 'followWayline' },
         photo: true,
@@ -357,7 +367,7 @@ const MAX_PER_RING_OBJ = 32;    // every 11 deg, past which frames stop earning
 
 function objectPass(g) {
   const { subject, others = [], f, cam, frontOverlap, rings, clearance, pitchOverride,
-    pinned = null, standoff = 0 } = g;
+    pinned = null, standoff = 0, surfaceFloor = null } = g;
   const { x: cx, y: cy, height: H, span } = subject;
   const aimZ = H / 2;
 
@@ -528,8 +538,10 @@ function objectPass(g) {
       const ang = (2 * Math.PI * (i + (ri % 2) * 0.5)) / n;
       const px = cx + ringR * Math.sin(ang);
       const py = cy + ringR * Math.cos(ang);
-      // Where something stands beside the ring, this station alone goes over it.
-      const z = Math.max(h, floorAt(px, py));
+      // Where something stands beside the ring, this station alone goes over it
+      // -- the mapped obstacles, and the survey where there is one.
+      const ll = f.toLatLon(px, py);
+      const z = Math.max(h, floorAt(px, py), surfaceFloor ? surfaceFloor(ll.lat, ll.lon) : 0);
       // Aim from the height actually flown, or a lifted station keeps the tilt
       // of the height it was lifted from and points past the thing.
       const aimed = -(Math.atan2(z - aimZ, ringR) * 180) / Math.PI;
@@ -552,6 +564,41 @@ function objectPass(g) {
   return { pts, r, radii, heights, top: highZ };
 }
 
+
+// The tight ring: inside the footprint at 0.3 of its span, a clearance above
+// the thing, each station lifted to the survey's floor beside it (the same
+// hop over a crown the dome makes), camera aimed at the middle. Closer than
+// the dome by the whole span -- the close-up the dome cannot give.
+function tightRing({ subject, f, cam, frontOverlap, clearance, surfaceFloor }) {
+  const { x: cx, y: cy, height: H, span } = subject;
+  const aimZ = H / 2;
+  const radius = Math.max(3, span * 0.3);
+  const base = H + clearance;
+  const view = fov(cam);
+  const range = Math.hypot(radius, base - aimZ);
+  const step = Math.max(0.4, 2 * range * Math.tan(view.h / 2) * (1 - frontOverlap));
+  const n = Math.max(MIN_PER_RING_OBJ, Math.min(24, Math.ceil((2 * Math.PI * radius) / step)));
+  const centre = f.toLatLon(cx, cy);
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const ang = (2 * Math.PI * i) / n;
+    const px = cx + radius * Math.sin(ang);
+    const py = cy + radius * Math.cos(ang);
+    const ll = f.toLatLon(px, py);
+    const z = Math.max(base, surfaceFloor(ll.lat, ll.lon));
+    const aimed = -(Math.atan2(z - aimZ, radius) * 180) / Math.PI;
+    pts.push({
+      ...ll,
+      alt: z,
+      pitch: Math.round(Math.max(cam.minGimbalPitch, Math.min(cam.maxGimbalPitch, aimed)) * 10) / 10,
+      heading: { mode: 'towardPOI', poi: centre },
+      photo: true,
+      pass: 'tight',
+      lineStart: i === 0,
+    });
+  }
+  return pts;
+}
 
 // The same ring, flown with the camera pointing AWAY from the middle. Every
 // other pass here photographs the box; nothing photographs what is around it,
@@ -916,7 +963,7 @@ export function planMission(site, opts, cam) {
   if (p.nadir) {
     const r = gridPass({
       halfCross: halfX, halfAlong: halfY, sideSpacing, fwdSpacing, clip,
-      axis: 'NS', f, alt: p.altitude, pitch: -90, pass: 'nadir',
+      axis: 'NS', f, alt: p.altitude, pitch: -90, pass: 'nadir', floor: p.surfaceFloor,
     });
     add(r.pts);
     passes.push({ name: 'Nadir grid', count: r.pts.length, detail: `${r.nLines} lines @ ${r.dCross.toFixed(1)} m` });
@@ -924,7 +971,7 @@ export function planMission(site, opts, cam) {
   if (p.oblique) {
     const r = gridPass({
       halfCross: halfY, halfAlong: halfX, sideSpacing, fwdSpacing, clip,
-      axis: 'EW', f, alt: p.altitude, pitch: p.obliquePitch, pass: 'oblique',
+      axis: 'EW', f, alt: p.altitude, pitch: p.obliquePitch, pass: 'oblique', floor: p.surfaceFloor,
     });
     add(r.pts);
     passes.push({ name: `Oblique grid ${p.obliquePitch}°`, count: r.pts.length, detail: `${r.nLines} lines @ ${r.dCross.toFixed(1)} m` });
@@ -982,6 +1029,7 @@ export function planMission(site, opts, cam) {
 
     const rings = Math.max(1, p.orbitRings);
     let count = 0;
+    let tightCount = 0;
     let tallest = null;
     const flownRings = [];
 
@@ -995,8 +1043,8 @@ export function planMission(site, opts, cam) {
     // is already standing clear of its own subject. The horizontal part is at
     // transitZ, which clears the tallest thing on the site by the clearance.
     const transitZ = Math.max(...hazards.map((q) => q.height)) + (p.subjectClearance ?? 2);
-    const overhead = (w) => ({
-      ...w, alt: transitZ, photo: false, transit: true,
+    const overhead = (w, z = transitZ) => ({
+      ...w, alt: z, photo: false, transit: true,
       heading: { mode: 'followWayline' }, pitch: -90, lineStart: false,
     });
     for (const subject of visited) {
@@ -1009,17 +1057,46 @@ export function planMission(site, opts, cam) {
         f, cam, frontOverlap: p.frontOverlap, rings,
         clearance: p.subjectClearance ?? 2, pitchOverride: p.orbitPitch,
         standoff: p.orbitStandoff ?? 0,
+        surfaceFloor: p.surfaceFloor,
         // Only the tallest subject's rings drive the altitude scale, and only
         // its heights are the ones the 3D view can pin -- see orbitHeightsUsed.
         pinned: p.orbitHeights,
       });
+      // And a tight ring OVER an area -- inside it, low -- where the survey can
+      // vouch for the height at every station. The dome stands outside the
+      // whole footprint (half its span, plus clearance, plus 2 m), so over a
+      // painted playground every frame was taken from beyond its edge;
+      // Andrzej: "why dont we do a regular or semi-regular smaller ring above
+      // the drawn area at lower height". Only for something with an area to
+      // be inside of, and only with the survey, which is what keeps it clear.
+      const tight = p.surfaceFloor && subject.kind === 'capture' && subject.span >= 8
+        ? tightRing({ subject, f, cam, frontOverlap: p.frontOverlap,
+          clearance: p.subjectClearance ?? 2, surfaceFloor: p.surfaceFloor })
+        : [];
+      if (tight.length) {
+        // Into it over the top, like into any ring: straight across from the
+        // dome's last station at tight-ring height ran through a crown at
+        // Emilii Plater. At the higher of the two rings' tops, then straight
+        // down onto the first tight station, whose column is clear.
+        const hopZ = Math.max(...tight.map((q) => q.alt), ...r.pts.map((q) => q.alt));
+        r.pts = [...r.pts, overhead(tight[0], hopZ), ...tight];
+        tightCount += tight.length;
+      }
       if (r.pts.length) {
         // Only worth the two waypoints when the ring is actually below the
         // transit height: a dome round the tallest thing already ends up there.
         const needsLift = r.heights.some((h) => h < transitZ - 0.5);
-        if (needsLift) add([overhead(r.pts[0])]);
+        // With the survey under it, the way in and out is at the ring's own
+        // highest station: a station is lifted over whatever stands beside
+        // it, so the column above every station is clear, and arriving at the
+        // top of the ring then dropping straight down onto the first one
+        // cannot clip what the ring climbs over. At the subject's height plus
+        // clearance -- 6 m over a playground -- the way in ran straight
+        // through the crowns round the courtyard at Emilii Plater.
+        const inZ = p.surfaceFloor ? Math.max(transitZ, ...r.pts.map((q) => q.alt)) : transitZ;
+        if (needsLift || p.surfaceFloor) add([overhead(r.pts[0], inZ)]);
         add(r.pts);
-        if (needsLift) add([overhead(r.pts[r.pts.length - 1])]);
+        if (needsLift || p.surfaceFloor) add([overhead(r.pts[r.pts.length - 1], inZ)]);
       }
       count += r.pts.length;
       flownRings.push(r.heights.length);
@@ -1041,6 +1118,10 @@ export function planMission(site, opts, cam) {
       .map((n) => `${flownRings.filter((x) => x === n).length}\u00d7${n}`)
       .join(', ');
     const sameEverywhere = new Set(flownRings).size === 1;
+    if (tightCount) {
+      passes.push({ name: 'Tight ring', count: tightCount,
+        detail: 'inside the painted area, low, each station clear of what stands beside it' });
+    }
     passes.push({
       name: `Orbit ${visited.length} thing${visited.length === 1 ? '' : 's'}`,
       count,

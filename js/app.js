@@ -500,9 +500,15 @@ const labelled = (rs) => rs.map((r) => {
       : esc(name),
   };
 });
+// The zoom handed to Photon is rounded: the plugin passes map.getZoom() as is,
+// Photon answers a fractional one ("zoom=19.3") with 400 TYPE_CONVERSION_FAILED,
+// and since the map zooms in fractional steps every search read "Nothing found."
 const lookup = async (q, ctx) => {
   const here = await coords.geocode(q, ctx);
-  return here.length ? here : labelled(await photon.geocode(q, ctx));
+  if (here.length) return here;
+  const m = ctx?.map;
+  const at = m && { getCenter: () => m.getCenter(), getZoom: () => Math.round(m.getZoom()) };
+  return labelled(await photon.geocode(q, { ...ctx, map: at }));
 };
 const either = { geocode: lookup, suggest: lookup };
 const search = L.Control.geocoder({

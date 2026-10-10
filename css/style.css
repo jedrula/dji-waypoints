@@ -557,3 +557,10 @@ code { background: var(--panel2); border-radius: 4px; padding: 1px 5px; font-siz
 #paintView button.on { background: var(--panel2); color: var(--text); font-weight: 600; }
 #paintView button[data-view="painted"].on { color: #9fd8ff; }
 #paintView button[data-view="captured"].on { color: #ffb84d; }
+
+/* The detail slider in the band: the one planning control worth having out of
+   Advanced, so it gets the band's width. */
+.detailrow { margin: 0; }
+.detailrow[hidden] { display: none; }
+.detailrow .ctl input[type=range] { max-width: none; }
+.detailrow .ctl output { width: 84px; color: var(--text); font-weight: 600; }

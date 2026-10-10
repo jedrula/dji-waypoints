@@ -47,6 +47,12 @@
     </div>
 
     <div id="readout" class="readout"></div>
+    <!-- How much to capture: five recipes from a quick look to several
+         batteries. See DETAIL in js/app.js. -->
+    <label class="row detailrow" id="detailRow" hidden>
+      <span>Detail</span>
+      <span class="ctl"><input id="detail" type="range" min="0" max="4" step="1" value="2"><output id="detailOut"></output></span>
+    </label>
     <!-- The survey says the plan flies too close to something. -->
     <div id="hazardWarn" class="warn" hidden></div>
 

@@ -136,6 +136,15 @@ const GROUNDS = ['simple', 'imagery', 'survey'];
 let groundMode = 'imagery';
 let paintOn = false;   // a left-drag on the survey paints; see "painting"
 let cloudReady = false; // the survey view has this ground as points
+// The five detail notches; see "Detail" further down for what and why.
+const DETAIL = [
+  { label: 'Quick look', orbitRings: 1, orbitStandoff: 0, transect: false, frontOverlap: 75 },
+  { label: 'Standard', orbitRings: 2, orbitStandoff: 0, transect: false, frontOverlap: 80 },
+  { label: 'Detailed', orbitRings: 3, orbitStandoff: -5, transect: false, frontOverlap: 85 },
+  { label: 'Fine', orbitRings: 4, orbitStandoff: -10, transect: true, frontOverlap: 85 },
+  { label: 'Max', orbitRings: 5, orbitStandoff: -15, transect: true, frontOverlap: 90 },
+];
+const DETAIL_DEFAULT = 2;
 let linked = false;     // the map and the 3D move together; see "Linked views"
 let moveFromThreeD = false;
 let loadState = null;   // what the survey view is waiting for; see "loading state"
@@ -1055,6 +1064,7 @@ $('pDelete').addEventListener('click', () => {
 $('clearMode').addEventListener('click', () => {
   if (!site.capture().length) { toast('No points to clear.'); return; }
   lidar?.clearPaint();
+  liftApplied = 0;
   lidar?.setHeat(null);
   state.paint = null;
   state.paintCover = null;
@@ -1289,6 +1299,7 @@ function renderPreflight() {
 function renderReadout() {
   const box = $('readout');
   const m = state.mission;
+  renderDetail();
   renderEmpty3d();
   // With nothing tapped there is nothing to clear or save, and a bright Save
   // over an empty plan reads as the next step. Both said so in a toast after
@@ -2501,6 +2512,7 @@ $('paintBtn').addEventListener('click', () => {
 async function paintToSite(cells) {
   const got = paintedSite(cells);
   if (!got) return;
+  liftApplied = 0;
   state.paint = cells;
   // Saved after the plan is set, below, so it is keyed to the right points.
   site.setCapture(got.points);
@@ -2530,8 +2542,7 @@ async function paintToSite(cells) {
     }
   } catch { /* the relief stands */ }
   savePaint();
-  toast(`Painted ${Math.round(got.areaM2)} m² — planning for ${height} m tall. Checking every spot is seen…`,
-    { sticky: true });
+  toast(`Painted ${Math.round(got.areaM2)} m² — planning for ${height} m tall…`, { sticky: true });
   // Let the toast paint before the search takes the thread.
   setTimeout(fitToPaint, 30);
 }
@@ -2633,19 +2644,14 @@ function surveyCheck() {
   }
 }
 
-// After a stroke: more rings, then cross passes, then tighter rings, until
-// nine-tenths of what was painted comes out hot -- or the ladder runs out, in
-// which case the best rung wins and the readout says how far short it fell.
-// Multiple circles and more batteries are acceptable; an unseen wall is not.
-// A candidate the survey says flies clear, or null. Each rung of the ladder
-// was judged on coverage alone -- tighter rings, cross passes through the
-// site -- and the one picked over Kielce was seen going through trees. So a
+// A candidate the survey says flies clear, or null. The paint search used to
+// judge candidates on coverage alone -- tighter rings, cross passes through the
+// site -- and the one it picked over Kielce was seen going through trees. So a
 // candidate is checked against the LiDAR at the clearance you set, and if it
 // hits, the whole thing is lifted -- points and altitude together, 3 m at a
 // time -- until it clears. Lifting only ever moves away from what it would
-// hit; 45 m of it and the rung is given up.
-function safePlan(v) {
-  const points = site.capture();
+// hit; 45 m of it and the candidate is given up.
+function safePlan(v, points = site.capture()) {
   for (let lift = 0; lift <= 45; lift += 3) {
     const p = paramsFromUi({ ...v, altitude: v.altitude + lift });
     p.subjectClearance = clearance();
@@ -2662,50 +2668,106 @@ function safePlan(v) {
   return null;
 }
 
-const PAINT_LADDER = [
-  {},
-  { orbitRings: 2 },
-  { orbitRings: 3 },
-  { orbitRings: 3, transect: true },
-  { orbitRings: 3, transect: true, orbitStandoff: -10 },
-  { orbitRings: 4, transect: true, orbitStandoff: -10 },
-];
-function fitToPaint() {
-  const yAt = lidar?.sampler?.();
-  if (!yAt || !state.mission) return;
-  if (!tuned) autoFit();
-  const base = uiValues();
-  const samples = surveySamples(state.mission, yAt);
-  let best = null;
-  for (const rung of PAINT_LADDER) {
-    const v = { ...base, ...rung };
-    const safe = safePlan(v);
-    if (!safe) continue;
-    const got = judge(safe.mission, samples, yAt);
-    if (!best || got.cover > best.cover) best = { ...got, rung, lift: safe.lift };
-    if (got.cover >= 0.9) break;
-  }
-  if (!best) {
-    toast('No plan here stays clear of the survey within 45 m of lift — paint less, or raise the clearance.');
+// Detail: one slider over the recipe, five notches. Each is a set of the
+// controls in Advanced -- rings, how close they fly, cross passes, overlap --
+// so a plan code carries it like any other setting and nothing new is stored.
+//
+// It replaces a ladder that climbed until 90% of the painted surface came out
+// "hot". That score saturates at three views a spot, the same flaw that made
+// good% worthless (r = 0.000 against measured quality, see CLAUDE.md): it
+// stopped a playground at 21 photos and called it 100%. The calibrated result
+// is that ~64 frames -- about 8 positions x 8 azimuths -- reconstructed best,
+// so the middle notch is pitched there, and the person picks how much more or
+// less they want, seeing photos, minutes and batteries move as they drag.
+//
+// Every notch goes through safePlan: checked against the survey at the
+// clearance, and lifted until it clears. Closer never means inside it.
+//
+// Measured on an 84 m2 painted patch at Kadzielnia, none needing a lift:
+//
+//     Quick look   15 photos   1:06        Fine   184 photos    9:29
+//     Standard     41 photos   2:54        Max    249 photos   12:30
+//     Detailed     78 photos   4:36
+//
+// The painted-heat number read 89% at Quick look and 96% at Max -- it barely
+// moves across a 17x range of photos, which is the saturation this replaced
+// it as a target for.
+// (DETAIL and DETAIL_DEFAULT are declared up with the view state: the readout
+// renders the slider during startup, before this runs.)
+
+// Which notch the controls spell, or the nearest by ring count when they have
+// been hand-edited -- the slider then sits there and the label says Custom.
+function detailNow() {
+  const v = uiValues();
+  const exact = DETAIL.findIndex((d) => d.orbitRings === v.orbitRings && d.orbitStandoff === v.orbitStandoff
+    && d.transect === v.transect && d.frontOverlap === v.frontOverlap);
+  if (exact >= 0) return { level: exact, custom: false };
+  const near = DETAIL.reduce((bi, d, i) => (Math.abs(d.orbitRings - v.orbitRings)
+    < Math.abs(DETAIL[bi].orbitRings - v.orbitRings) ? i : bi), 0);
+  return { level: near, custom: true };
+}
+function renderDetail() {
+  const row = $('detailRow');
+  row.hidden = !site.capture().length;
+  if (row.hidden) return;
+  const { level, custom } = detailNow();
+  $('detail').value = level;
+  $('detailOut').textContent = custom ? 'Custom' : DETAIL[level].label;
+}
+
+// How much the current plan has been lifted to clear the survey, so the
+// next notch lifts from the plan as painted and not from the last notch's
+// answer. Without it every drag of the slider added its lift to the one
+// before: measured over Kadzielnia, 51 m crept to 96 m in four moves and
+// dragging back to Quick look kept every metre.
+let liftApplied = 0;
+function applyDetail(level) {
+  const d = DETAIL[level];
+  if (!d) return;
+  const baseAlt = +$('altitude').value - liftApplied;
+  const basePoints = site.capture().map((q) => ({ ...q, height: Math.max(0, q.height - liftApplied) }));
+  const v = { ...uiValues(), altitude: baseAlt, orbitRings: d.orbitRings, orbitStandoff: d.orbitStandoff,
+    transect: d.transect, frontOverlap: d.frontOverlap };
+  const safe = safePlan(v, basePoints);
+  if (!safe) {
+    toast('Nothing at this detail stays clear of the survey within 45 m of lift — '
+      + 'try less detail, or less clearance.');
+    renderDetail();
     return;
   }
-  if (best.lift) {
-    $('altitude').value = +$('altitude').value + best.lift;
-    site.setCapture(site.capture().map((q) => ({ ...q, height: q.height + best.lift })));
+  $('orbitRings').value = String(d.orbitRings);
+  $('transect').checked = d.transect;
+  controls.orbitStandoff.el.value = d.orbitStandoff;
+  controls.frontOverlap.el.value = d.frontOverlap;
+  $('altitude').value = baseAlt + safe.lift;
+  if (safe.lift !== liftApplied) {
+    site.setCapture(basePoints.map((q) => ({ ...q, height: q.height + safe.lift })));
   }
-  if (best.rung.orbitRings) $('orbitRings').value = String(best.rung.orbitRings);
-  if (best.rung.transect) $('transect').checked = true;
-  if (best.rung.orbitStandoff !== undefined) controls.orbitStandoff.el.value = best.rung.orbitStandoff;
+  liftApplied = safe.lift;
   tuned = true;
   showPreset();
+  readOuts();
   computePlan();
+  history.commit();
+  renderDetail();
+  if (safe.lift) toast(`Lifted ${safe.lift} m to stay ${clearance()} m clear of what the survey measured.`);
+}
+$('detail').addEventListener('input', () => {
+  $('detailOut').textContent = DETAIL[+$('detail').value].label;
+});
+$('detail').addEventListener('change', () => applyDetail(+$('detail').value));
+
+// After a stroke: the plan at the current detail, or the middle notch if the
+// controls do not spell one, then the heat for it.
+function fitToPaint() {
+  if (!state.mission) return;
+  if (!tuned) autoFit();
+  const { level, custom } = detailNow();
+  applyDetail(custom ? DETAIL_DEFAULT : level);
   surveyCheck();
   renderReadout();
   setPaintView('captured');
-  const pct = Math.round(best.cover * 100);
-  toast(pct >= 90
-    ? `${pct}% of what you painted is seen well — close, often, from wide angles.`
-    : `Best found: ${pct}% of what you painted is seen well. The cold and missing spots are under the heat layer.`);
+  $('toast').hidden = true;
 }
 $('cloudBtn').addEventListener('click', () => {
   const on = !$('cloudBtn').classList.contains('on');

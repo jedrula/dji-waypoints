@@ -414,6 +414,7 @@ export function createScene3D(canvas) {
           surfaceMesh.material.uniforms.uHasOrtho.value = 1;
           surfaceMesh.material.uniforms.uPatch.value = patchUv();
         }
+        cloudOrtho();
         render();
       } catch (e) { console.warn('re-drape failed:', e); } finally { redraping = false; }
     }, 350);
@@ -1969,11 +1970,11 @@ export function createScene3D(canvas) {
       onLoading(null);
       if (!meta || cloudFor !== key) return;
       cloud = { raw, meta, points: null };
-      // On by default only where the survey has colour. Stokowka's sheets do
-      // not (point format 1), and grey points over a photo-draped surface
-      // were a worse picture than the surface alone -- so there the points
-      // wait for the button.
-      cloudOn = !!meta.hasRgb;
+      // On by default where the points have colour -- their own, or the
+      // photo's (buildCloud). Grey points over a photo-draped surface were a
+      // worse picture than the surface alone, so with neither they wait for
+      // the button.
+      cloudOn = !!meta.hasRgb || !!loaded?.ortho;
       buildCloud();
       applyPendingSel();
       onCloud(true, cloudOn);
@@ -1987,6 +1988,23 @@ export function createScene3D(canvas) {
     }
   }
 
+  // 0.6 m closes up a 12-per-m2 survey (Kadzielnia); a 4-per-m2 one
+  // (Dominikowo, 2022) drew as a sieve at that size, so the dot grows with
+  // the spacing, which goes as 1/sqrt(density).
+  function dotSize(meta) {
+    const d = Math.min(...(meta.sources ?? []).map((x) => parseFloat(x.density)).filter((x) => x > 0));
+    return Number.isFinite(d) ? 0.6 * Math.sqrt(Math.max(1, 12 / d)) : 0.6;
+  }
+
+  // The cloud's photo is the surface's: called wherever loaded.ortho changes.
+  function cloudOrtho() {
+    const u = cloud?.points?.material.uniforms;
+    if (!u) return;
+    u.uOrtho.value = loaded?.ortho ?? null;
+    u.uHasOrtho.value = loaded?.ortho ? 1 : 0;
+    u.uPatch.value = patchUv();
+  }
+
   function buildCloud() {
     if (!cloud || !scene || !loaded || loaded.datum === undefined) return;
     if (cloud.points) { scene.remove(cloud.points); cloud.points.geometry.dispose(); cloud.points = null; }
@@ -1998,6 +2016,14 @@ export function createScene3D(canvas) {
     const toLocal = puwgToLocal(f, meta.e, meta.n);
     const pos = new Float32Array(count * 3);
     const col = new Uint8Array(count * 3);
+    // Where the survey has no colour, the photo the surface is draped in
+    // colours the points instead, sampled straight down: Dominikowo's only
+    // sheet (2022, point format 1, 4 per m2) drew as a grey fog over the
+    // picture it sat on. Per point, the tile UV the surface's own patch
+    // mapping takes; the shader keeps the survey grey outside the patch.
+    const span = loaded.meta.tileMetres;
+    const { east: E0, north: N0 } = loaded.meta.origin;
+    const puv = meta.hasRgb ? null : new Float32Array(count * 2);
     for (let i = 0; i < count; i++) {
       const o = i * 10;
       const l = toLocal(meta.e + dv.getInt16(o, true) / 100, meta.n + dv.getInt16(o + 2, true) / 100);
@@ -2005,10 +2031,15 @@ export function createScene3D(canvas) {
       pos[i * 3 + 1] = meta.zBase + dv.getUint16(o + 4, true) / 100 - loaded.datum;
       pos[i * 3 + 2] = -l.y;
       col[i * 3] = raw[o + 6]; col[i * 3 + 1] = raw[o + 7]; col[i * 3 + 2] = raw[o + 8];
+      if (puv) {
+        puv[i * 2] = (meta.e + dv.getInt16(o, true) / 100 - E0) / span;
+        puv[i * 2 + 1] = (meta.n + dv.getInt16(o + 2, true) / 100 - N0) / span;
+      }
     }
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geom.setAttribute('aColor', new THREE.BufferAttribute(col, 3, true));
+    geom.setAttribute('aTileUv', new THREE.BufferAttribute(puv ?? new Float32Array(count * 2).fill(-1), 2));
     // Round, sized in metres so they close up into a surface as you come in,
     // tinted by the same heat texture the surface carries.
     // Per-point heat, -1 for none: filled by setCloudHeat from the voxels the
@@ -2022,9 +2053,16 @@ export function createScene3D(canvas) {
     cloud.vox = null;
     indexCloud();
     const points = new THREE.Points(geom, new THREE.ShaderMaterial({
-      uniforms: { uSize: { value: 0.6 }, uScale: { value: 600 }, uPointHeat: pointHeatOn, uSelOn: selOn },
+      uniforms: {
+        uSize: { value: dotSize(meta) }, uScale: { value: 600 }, uPointHeat: pointHeatOn, uSelOn: selOn,
+        uOrtho: { value: null }, uHasOrtho: { value: 0 }, uPatch: { value: new THREE.Vector4(0, 0, 1, 1) },
+      },
       vertexShader: `
         attribute vec3 aColor;
+        attribute vec2 aTileUv;
+        uniform sampler2D uOrtho;
+        uniform int uHasOrtho;
+        uniform vec4 uPatch;
         attribute float aHeat;
         attribute float aSel;
         uniform float uSize, uScale;
@@ -2032,6 +2070,9 @@ export function createScene3D(canvas) {
         varying float vHeat, vSel;
         void main() {
           vColor = aColor;
+          vec2 pUv = (aTileUv - uPatch.xy) / uPatch.zw;
+          if (uHasOrtho == 1 && aTileUv.x >= 0.0 && pUv.x >= 0.0 && pUv.x <= 1.0 && pUv.y >= 0.0 && pUv.y <= 1.0)
+            vColor = texture2D(uOrtho, pUv).rgb;
           vHeat = aHeat;
           vSel = aSel;
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
@@ -2059,6 +2100,7 @@ export function createScene3D(canvas) {
     }));
     points.visible = cloudOn;
     cloud.points = points;
+    cloudOrtho();
     scene.add(points);
     applyBacking();
   }
@@ -3704,6 +3746,7 @@ export function createScene3D(canvas) {
         surfaceMesh.material.uniforms.uOrtho.value = tex;
         surfaceMesh.material.uniforms.uHasOrtho.value = 1;
       }
+      cloudOrtho();
       render();
     },
 

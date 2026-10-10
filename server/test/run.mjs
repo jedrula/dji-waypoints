@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { toPuwg92, toWgs84, inPoland } from '../../js/puwg92.js';
 import { findTiles } from '../src/gugik.js';
+import { readHeader, forEachPoint } from '../src/laz.js';
+import { pl2000ToWgs84 } from '../../js/puwg92.js';
 import { createTile, tileOf, originOf, TILE_M, SIZE, NO_DATA, MAX_H } from '../src/ndsm.js';
 import { createStore, LISTS } from '../src/store.js';
 import { createScene, GRID, CELL_M, KIND } from '../src/scene.js';
@@ -121,39 +123,57 @@ console.log('\nheight grid, safety properties');
 
 console.log('\nGUGiK index');
 {
-  // A recorded pair of index entries. The first covers the query box; the
-  // second is a PL-2000 survey, which the reader must skip because its
-  // eastings start with the zone number and would land in the Baltic.
-  const member = (n0, e0, n1, e1, crs, url) => `<wfs:member>
+  // Recorded index entries over a 500 m box. In 2024 a PUWG92 sheet covers
+  // the west half and a PL-2000 one (laz.js reprojects it) the east; a
+  // system nothing reprojects is skipped, since read as PUWG92 its points
+  // land in the Baltic; one sheet flown twice keeps its later flight; and a
+  // denser sheet over the same ground wins.
+  const member = (n0, e0, n1, e1, crs, url, { godlo = url, flown = '', density = '12 p/m2' } = {}) => `<wfs:member>
     <gml:lowerCorner>${n0} ${e0}</gml:lowerCorner>
     <gml:upperCorner>${n1} ${e1}</gml:upperCorner>
+    <gugik:godlo>${godlo}</gugik:godlo>
+    <gugik:akt_data gml:id="x"><gml:timePosition>${flown}</gml:timePosition></gugik:akt_data>
     <gugik:uklad_xy>${crs}</gugik:uklad_xy>
-    <gugik:char_przestrz>12 p/m2</gugik:char_przestrz>
+    <gugik:char_przestrz>${density}</gugik:char_przestrz>
     <gugik:url_do_pobrania>${url}</gugik:url_do_pobrania>
   </wfs:member>`;
 
+  const index = {
+    2024: [
+      member(362500, 362000, 363000, 362250, 'PL-1992', 'https://x/a.laz'),
+      member(362500, 362250, 363000, 362500, 'UTM 33N', 'https://x/utm.laz'),
+      member(362500, 362250, 363000, 362500, 'PL-2000:S6', 'https://x/march.laz', { godlo: 'S1', flown: '2024-03-20' }),
+      member(362500, 362250, 363000, 362500, 'PL-2000:S6', 'https://x/august.laz', { godlo: 'S1', flown: '2024-08-12' }),
+      member(362500, 362250, 363000, 362500, 'PL-2000:S6', 'https://x/may.laz', { godlo: 'S1', flown: '2024-05-01' }),
+      member(362500, 362250, 362750, 362500, 'PL-1992', 'https://x/sparse.laz', { godlo: 'S2', flown: '2024-08-12', density: '4 p/m2' }),
+      member(900000, 900000, 900500, 900500, 'PL-1992', 'https://x/far.laz'),
+    ],
+  };
   const calls = [];
   const fetchImpl = async (url) => {
     calls.push(url);
     const year = url.match(/LIDAR(\d{4})/)[1];
-    if (year !== '2024') return { ok: true, text: async () => '<wfs:FeatureCollection/>' };
-    return {
-      ok: true,
-      text: async () => `<wfs:FeatureCollection>
-        ${member(362500, 362000, 363000, 362500, 'PL-1992', 'https://x/a.laz')}
-        ${member(362500, 362000, 363000, 362500, 'PL-2000 strefa 6', 'https://x/b.laz')}
-        ${member(900000, 900000, 900500, 900500, 'PL-1992', 'https://x/far.laz')}
-      </wfs:FeatureCollection>`,
-    };
+    return { ok: true, text: async () => `<wfs:FeatureCollection>${(index[year] ?? []).join('')}</wfs:FeatureCollection>` };
   };
   const box = { e0: 362000, n0: 362500, e1: 362500, n1: 363000 };
   const found = await findTiles(box, { fetchImpl });
-  ok('finds the covering tile', found.length === 1, JSON.stringify(found.map((f) => f.url)));
-  ok('skips PL-2000 surveys', !found.some((f) => f.url.endsWith('b.laz')));
+  const urls = found.map((f) => f.url.split('/').pop()).sort();
+  ok('covers the box with PUWG92 and PL-2000 sheets', urls.join() === 'a.laz,august.laz', urls.join());
+  ok('skips a system it cannot reproject', !urls.includes('utm.laz'));
+  ok('a sheet flown twice keeps the later flight', !urls.includes('march.laz') && !urls.includes('may.laz'));
+  ok('the denser sheet wins over the same ground', !urls.includes('sparse.laz'));
   ok('skips tiles that do not overlap', !found.some((f) => f.url.endsWith('far.laz')));
   ok('reports the year and density', found[0]?.year === 2024 && found[0]?.density === '12 p/m2');
   ok('tries newest years first', calls[0].includes('LIDAR2026'));
-  ok('stops once a year yields tiles', !calls.some((u) => u.includes('LIDAR2023')));
+  ok('stops once the box is covered', !calls.some((u) => u.includes('LIDAR2023')));
+
+  // A box on the edge of a newer survey: 2025 covers only the west half, and
+  // the east half comes from 2023 rather than coming back empty.
+  index[2025] = [member(362500, 362000, 363000, 362250, 'PL-1992', 'https://x/new-west.laz')];
+  index[2023] = [member(362500, 362000, 363000, 362500, 'PL-1992', 'https://x/old-all.laz')];
+  delete index[2024];
+  const edge = (await findTiles(box, { fetchImpl })).map((f) => `${f.year}:${f.url.split('/').pop()}`);
+  ok('an older survey fills what the newer leaves', edge.join() === '2025:new-west.laz,2023:old-all.laz', edge.join());
 
   // The axis-order trap, asserted so it cannot silently regress: BBOX must be
   // north,east, and must carry the URN that pins the order.
@@ -161,6 +181,58 @@ console.log('\nGUGiK index');
   ok('BBOX is north,east with an explicit URN',
      bbox.startsWith(`${box.n0},${box.e0},${box.n1},${box.e1}`) && bbox.includes('urn:ogc:def:crs:EPSG::2180'),
      bbox);
+}
+
+console.log('\nPL-2000 sheets');
+{
+  // A bare LAS header -- just the fields readHeader looks at -- with the
+  // bounds of Wroclaw's 2025 sheet in PL-2000 zone 6.
+  const header = (e0, n0, e1, n1) => {
+    const b = new Uint8Array(375);
+    const dv = new DataView(b.buffer);
+    b.set([76, 65, 83, 70]);
+    b[25] = 2;
+    b[104] = 3;
+    dv.setUint16(105, 34, true);
+    for (const [at, v] of [[131, 0.01], [139, 0.01], [147, 0.01], [179, e1], [187, e0], [195, n1], [203, n0]]) dv.setFloat64(at, v, true);
+    return b;
+  };
+  const h = readHeader(header(6432000, 5665000, 6432560, 5665830));
+  const exact = (x, y) => { const g = pl2000ToWgs84(x, y); const p = toPuwg92(g.lat, g.lon); return [p.east, p.north]; };
+  let worst = 0;
+  for (let i = 0; i <= 10; i++) {
+    for (let j = 0; j <= 10; j++) {
+      const x = 6432000 + 56 * i, y = 5665000 + 83 * j;
+      const a = h.toPuwg(x, y), t = exact(x, y);
+      worst = Math.max(worst, Math.hypot(a[0] - t[0], a[1] - t[1]));
+    }
+  }
+  ok('points move into PUWG92 within a centimetre of the exact chain', worst < 0.01, `${worst.toFixed(4)} m`);
+  ok('and the bounds with them', h.bounds.e0 > 300000 && h.bounds.e0 < 400000 && h.bounds.n0 > 300000 && h.bounds.n0 < 400000,
+     JSON.stringify(h.bounds));
+  ok('a PUWG92 sheet is left exactly as read', !readHeader(header(362000, 362000, 362500, 362500)).toPuwg);
+
+  // Uncompressed LAS, as the 2019-2021 sheets are: two format-3 records after
+  // the header, read without laz-perf and reprojected on the way out.
+  const las = new Uint8Array(375 + 2 * 34);
+  las.set(header(6432000, 5665000, 6432560, 5665830));
+  const lv = new DataView(las.buffer);
+  lv.setUint32(96, 375, true);
+  lv.setUint32(107, 2, true);
+  const rec = (i, x, y, z, k, r) => {
+    const o = 375 + i * 34;
+    lv.setInt32(o, Math.round(x * 100), true); lv.setInt32(o + 4, Math.round(y * 100), true); lv.setInt32(o + 8, Math.round(z * 100), true);
+    las[o + 15] = k;
+    lv.setUint16(o + 28, r, true);
+  };
+  rec(0, 6432100, 5665100, 120.5, 5, 40000);
+  rec(1, 6432400, 5665700, 118.25, 2, 1000);
+  const got = [];
+  await forEachPoint(las, (e, n, z, k, r) => got.push({ e, n, z, k, r }), { rgb: true });
+  const want = exact(6432100, 5665100);
+  ok('plain LAS is read without laz-perf', got.length === 2 && got[0].k === 5 && got[1].z === 118.25 && got[0].r === 40000,
+     JSON.stringify(got));
+  ok('and lands in PUWG92', Math.hypot(got[0].e - want[0], got[0].n - want[1]) < 0.01);
 }
 
 console.log('\nsync store');

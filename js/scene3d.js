@@ -114,6 +114,10 @@ const KIND_COLOUR = [
   [0.38, 0.56, 0.72],   // water
 ];
 
+// ASPRS classes onto KIND_COLOUR: ground, low/medium/high vegetation,
+// building, water. Anything else is the "none" grey.
+const ASPRS_KIND = { 2: 1, 3: 3, 4: 3, 5: 3, 6: 2, 9: 4 };
+
 const POLL_MS = 4000;
 const GIVE_UP_MS = 240_000;   // a cold scene is minutes; see js/heights.js
 
@@ -1364,6 +1368,10 @@ export function createScene3D(canvas) {
     }
     // Nothing within ten metres of the new home means no tile covers it, and a
     // datum guessed from ground 200 m away is worse than the one we have.
+    // The mesh's zero is now the lowest vertex near the new home, and the
+    // points level to wherever that is (cloudDatum) -- left on the first
+    // tile's, they floated or sank by the slope between the two.
+    if (Number.isFinite(dz)) meshZero = { e: b.east, n: b.north };
     if (Number.isFinite(dz) && Math.abs(dz) > 0.01) {
       for (const t of meshTiles.values()) {
         const attr = t.geometry.getAttribute('position');
@@ -2075,7 +2083,15 @@ export function createScene3D(canvas) {
       pos[i * 3] = l.x;
       pos[i * 3 + 1] = meta.zBase + dv.getUint16(o + 4, true) / 100 - datum;
       pos[i * 3 + 2] = -l.y;
-      col[i * 3] = raw[o + 6]; col[i * 3 + 1] = raw[o + 7]; col[i * 3 + 2] = raw[o + 8];
+      if (meta.hasRgb) {
+        col[i * 3] = raw[o + 6]; col[i * 3 + 1] = raw[o + 7]; col[i * 3 + 2] = raw[o + 8];
+      } else {
+        // No colour in the survey and none from the photo here (past the
+        // tile's edge): the surface's own classification palette, not the
+        // flat grey that drew Dominikowo's far side as a white band.
+        const k = KIND_COLOUR[ASPRS_KIND[raw[o + 9]] ?? 0];
+        col[i * 3] = k[0] * 255; col[i * 3 + 1] = k[1] * 255; col[i * 3 + 2] = k[2] * 255;
+      }
       if (puv) {
         puv[i * 2] = (meta.e + dv.getInt16(o, true) / 100 - E0) / span;
         puv[i * 2 + 1] = (meta.n + dv.getInt16(o + 2, true) / 100 - N0) / span;
@@ -2149,8 +2165,11 @@ export function createScene3D(canvas) {
         ${HEAT_RAMP_GLSL}
         void main() {
           vec2 c = gl_PointCoord - 0.5;
-          if (dot(c, c) > 0.25) discard;
-          vec3 col = vColor;
+          float r2 = dot(c, c);
+          if (r2 > 0.25) discard;
+          // Each dot shaded as a small sphere lit from above: flat discs made
+          // a crown of leaves read as confetti with no depth to it.
+          vec3 col = vColor * (0.72 + 0.32 * sqrt(1.0 - 4.0 * r2) - 0.12 * c.y);
           // Painted points in the capture-point blue; the heat otherwise.
           if (uSelOn > 0.5) {
             if (vSel > 0.5) col = mix(col, vec3(0.42, 0.78, 1.0), 0.8);

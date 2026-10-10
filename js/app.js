@@ -2565,6 +2565,15 @@ $('paintBtn').addEventListener('click', () => {
   if (paintOn) toast('Drag over what you want captured. Wheel zooms, right-drag pans.');
 });
 
+// The start steps' button: the 3D survey beside the map, pencil in hand --
+// three controls in three places otherwise, the first of them unlabelled.
+$('tipPaint').addEventListener('click', async () => {
+  if (activeView === 'map') setView('split');
+  if (groundMode !== 'survey') await setGround('survey');
+  setPaint(true);
+  toast('Drag over what you want captured. Wheel zooms, right-drag pans.');
+});
+
 async function paintToSite(cells) {
   const got = paintedSite(cells);
   if (!got) return;

@@ -77,6 +77,8 @@ body {
 .tip li { line-height: 1.4; }
 .tip li::marker { color: var(--accent); font-weight: 650; }
 .tip li span { color: var(--text); }
+.tipgo { display: block; margin-top: 7px; padding: 6px 12px; border-radius: 8px; border: 0; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+.tipgo:hover { filter: brightness(1.1); }
 
 /* Four numbers, because a plan is four questions: is it worth flying, will it
    fit a battery, how sharp is it, and does it see everything. */

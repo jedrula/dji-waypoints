@@ -2818,7 +2818,9 @@ function safePlan(v) {
 // been hand-edited -- the slider then sits there and the label says Custom.
 function detailNow() {
   const v = uiValues();
-  const exact = DETAIL.findIndex((d) => d.orbitRings === v.orbitRings && d.orbitStandoff === v.orbitStandoff
+  // Standoff is left out: it is also the lever the clearance adjuster pulls
+  // (rings in or out a few metres), and a notch it adjusted read "Custom".
+  const exact = DETAIL.findIndex((d) => d.orbitRings === v.orbitRings
     && d.transect === v.transect && d.frontOverlap === v.frontOverlap);
   if (exact >= 0) return { level: exact, custom: false };
   const near = DETAIL.reduce((bi, d, i) => (Math.abs(d.orbitRings - v.orbitRings)
@@ -2839,18 +2841,27 @@ function renderDetail() {
 // last notch's answer. Without it every drag of the slider stacked its lift
 // on the one before: 51 m crept to 96 m in four moves over Kadzielnia.
 let detailBaseAlt = null;
-function applyDetail(level) {
-  const d = DETAIL[level];
-  if (!d) return;
+function applyDetail(wanted) {
   detailBaseAlt ??= +$('altitude').value;
-  const v = { ...uiValues(), altitude: detailBaseAlt, orbitRings: d.orbitRings, orbitStandoff: d.orbitStandoff,
-    transect: d.transect, frontOverlap: d.frontOverlap };
-  const safe = safePlan(v);
+  // Never a proposal that collides. If this notch cannot be made clear, the
+  // next one down that can is used, and the toast says so -- the old answer
+  // was a toast and the colliding plan left on screen.
+  let level = wanted;
+  let safe = null;
+  for (; level >= 0 && !safe; level--) {
+    const n = DETAIL[level];
+    safe = safePlan({ ...uiValues(), altitude: detailBaseAlt, orbitRings: n.orbitRings,
+      orbitStandoff: n.orbitStandoff, transect: n.transect, frontOverlap: n.frontOverlap });
+    if (safe) break;
+  }
   if (!safe) {
-    toast('Nothing at this detail stays clear of the survey without big changes — '
-      + 'try less detail, or paint less of the trees.');
+    toast('No plan here stays clear of the survey — paint less of the trees, or lower the clearance.');
     renderDetail();
     return;
+  }
+  const d = DETAIL[level];
+  if (level !== wanted) {
+    toast(`${DETAIL[wanted].label} cannot be flown clear of what is here — using ${d.label}.`);
   }
   $('orbitRings').value = String(d.orbitRings);
   $('transect').checked = d.transect;
@@ -2867,7 +2878,9 @@ function applyDetail(level) {
   const bits = [];
   if (safe.sideways) bits.push(`rings ${safe.sideways < 0 ? 'pulled in' : 'pushed out'} ${Math.abs(safe.sideways)} m`);
   if (safe.cost - Math.abs(safe.sideways ?? 0) > 0) bits.push(`raised up to ${Math.round(safe.cost - Math.abs(safe.sideways ?? 0))} m where it clipped`);
-  if (bits.length) toast(`Adjusted to stay ${clearance()} m clear of what the survey measured: ${bits.join(', ')}.`);
+  if (bits.length && level === wanted) {
+    toast(`Adjusted to stay ${clearance()} m clear of what the survey measured: ${bits.join(', ')}.`);
+  }
 }
 // Any plan that settles flying too close to the survey is adjusted, not only
 // painted ones. Tapped points went straight from auto-fit -- which knows
@@ -2878,7 +2891,10 @@ function ensureClear() {
   const check = lidar?.checkFlight?.(state.mission, clearance());
   if (!check?.hits) return;
   const safe = safePlan(uiValues());
-  if (!safe || safe.unchecked) return;
+  // Nothing clears these settings as they stand: the detail notches, which
+  // step down until one does.
+  if (!safe) { applyDetail(detailNow().level); return; }
+  if (safe.unchecked) return;
   controls.orbitStandoff.el.value = safe.v.orbitStandoff;
   $('altitude').value = safe.v.altitude;
   pinned = { orbitHeights: safe.v.orbitHeights ?? null, transectHeights: safe.v.transectHeights ?? null };

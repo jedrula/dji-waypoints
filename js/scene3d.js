@@ -301,7 +301,15 @@ export function createScene3D(canvas) {
       if (userMoving) onViewMove();
     });
     controls.addEventListener('start', () => { userMoving = true; });
-    controls.addEventListener('end', () => { userMoving = false; onViewMove(); });
+    // OrbitControls fires `end` on EVERY pointer release, the end of a paint
+    // stroke included, with no `start` before it -- and treating that as a
+    // move re-centred the linked map on each stroke. Only an end that closes
+    // a real gesture counts.
+    controls.addEventListener('end', () => {
+      if (!userMoving) return;
+      userMoving = false;
+      onViewMove();
+    });
     // The chips live over the canvas, and a drag on one is not an orbit.
     chipBox = document.createElement('div');
     chipBox.id = 'levelchips';

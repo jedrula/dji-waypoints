@@ -868,9 +868,14 @@ function transectPass(g) {
       const a = -alongHalf + k * dAlong;
       const x = axis === 'NS' ? c : a;
       const y = axis === 'NS' ? a : c;
+      const ll = f.toLatLon(x, y);
       pts.push({
-        ...f.toLatLon(x, y),
-        alt,
+        ...ll,
+        // Over what stands in its way, like the rings and the grid; at "Max"
+        // over a courtyard the cross passes were the 38 legs left red, and
+        // their levels are capped at the altitude, so lifting the level could
+        // never clear them.
+        alt: g.floor ? Math.max(alt, g.floor(ll.lat, ll.lon)) : alt,
         pitch,
         heading: { mode: 'smoothTransition', angle: yaw },
         photo: true,
@@ -997,7 +1002,7 @@ export function planMission(site, opts, cam) {
       if (levelAlt !== p.altitude) heightLevels.push({ kind: 'transect', index: li, z: levelAlt });
       for (const axis of ['NS', 'EW']) {
         const r = transectPass({
-          halfX, halfY, axis, f, cam, aimZ, level: li,
+          halfX, halfY, axis, f, cam, aimZ, level: li, floor: p.surfaceFloor,
           alt: levelAlt, frontOverlap: p.frontOverlap,
           spacingScale: p.transectSpacingScale ?? 1,
         });

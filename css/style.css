@@ -168,6 +168,7 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
       border-radius: 50%; border: 2px solid #04101d; color: #04101d;
       font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .pt.capture { background: var(--capture); }
+.pt.painted { border-width: 1.5px; box-shadow: none; }
 .pt.on { outline: 2px solid #fff; outline-offset: 1px; }
 .pt.strike { background: #ff5d5d; color: #fff; }
 .gpsdot { background: var(--capture); border: 2px solid #fff; border-radius: 50%;

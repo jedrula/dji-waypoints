@@ -241,6 +241,7 @@ export function createScene3D(canvas) {
   // against it and the heat is measured on it. `raw` is kept so a change of
   // frame or datum re-places the same points.
   let cloud = null;          // { raw: Uint8Array, meta, points }
+  let heightsVersion = 0;    // bumped per heights grid, for "measured against new ground"
   // Where the survey says a tree stands, for cutting the mesh's own trees out
   // under the survey's (treeMask). Shared by every mesh tile's material.
   const treeCut = {
@@ -2623,6 +2624,7 @@ export function createScene3D(canvas) {
         }
       }
     }
+    heightsVersion++;
     heights = { x0, z0, nx, nz, cell: HCELL, max, ms: Math.round(performance.now() - t0),
       frame: frameOf(), datum: 0 };
   }
@@ -2656,6 +2658,7 @@ export function createScene3D(canvas) {
         if (v > max[i]) max[i] = v;
       }
     }
+    heightsVersion++;
     heights = { x0, z0, nx, nz, cell: HCELL, max, ms: Math.round(performance.now() - t0),
       frame: frameOf(), datum: loaded.datum };
   }
@@ -3854,12 +3857,13 @@ export function createScene3D(canvas) {
       const keys = new Map();
       const samples = [];
       let anySel = false;
+      const vkey = (ix, iy, iz) => ((ix + 5000) * 10000 + (iy + 5000)) * 10000 + (iz + 5000);
       for (let i = 0; i < n; i++) {
         const x = pos[i * 3];
         const z = pos[i * 3 + 1];
         const y = -pos[i * 3 + 2];
         if (x < x0 || x > x1 || y < y0 || y > y1) continue;
-        const key = `${Math.floor(x / step)},${Math.floor(y / step)},${Math.floor(z / step)}`;
+        const key = vkey(Math.floor(x / step), Math.floor(y / step), Math.floor(z / step));
         let k = keys.get(key);
         if (k === undefined) {
           k = samples.length;
@@ -3870,7 +3874,7 @@ export function createScene3D(canvas) {
         // A voxel is painted if any point in it was.
         if (cloud.sel?.[i]) { samples[k].painted = true; anySel = true; }
       }
-      cloud.vox = { idx, count: samples.length };
+      cloud.vox = { idx, count: samples.length, keys, step, vkey };
       samples.selAware = anySel;
       return samples;
     },
@@ -3879,8 +3883,28 @@ export function createScene3D(canvas) {
     setCloudHeat(heat) {
       if (!cloud?.points || !cloud.vox || heat?.length !== cloud.vox.count) return;
       const attr = cloud.points.geometry.getAttribute('aHeat');
-      const { idx } = cloud.vox;
-      for (let i = 0; i < idx.length; i++) attr.array[i] = idx[i] < 0 ? -1 : heat[idx[i]];
+      const { idx, keys, step, vkey } = cloud.vox;
+      const pos = cloud.pos;
+      // Blended between the voxel centres round each point, not the one it
+      // falls in: voxels are 3 m and more, and one heat per voxel drew the
+      // ground as a chequerboard of hard squares.
+      for (let i = 0; i < idx.length; i++) {
+        if (idx[i] < 0) { attr.array[i] = -1; continue; }
+        const fx = pos[i * 3] / step - 0.5;
+        const fy = -pos[i * 3 + 2] / step - 0.5;
+        const fz = pos[i * 3 + 1] / step - 0.5;
+        const ix = Math.floor(fx), iy = Math.floor(fy), iz = Math.floor(fz);
+        const tx = fx - ix, ty = fy - iy, tz = fz - iz;
+        let sum = 0, wsum = 0;
+        for (let c = 0; c < 8; c++) {
+          const k = keys.get(vkey(ix + (c & 1), iy + ((c >> 1) & 1), iz + (c >> 2)));
+          if (k === undefined) continue;
+          const w = ((c & 1) ? tx : 1 - tx) * (((c >> 1) & 1) ? ty : 1 - ty) * ((c >> 2) ? tz : 1 - tz);
+          sum += w * heat[k];
+          wsum += w;
+        }
+        attr.array[i] = wsum > 1e-6 ? sum / wsum : heat[idx[i]];
+      }
       attr.needsUpdate = true;
       pointHeatOn.value = heatOn ? 1 : 0;
       render();
@@ -3986,6 +4010,8 @@ export function createScene3D(canvas) {
     onLevel(fn) { onLevel = fn ?? (() => {}); },
     onRadius(fn) { onRadius = fn ?? (() => {}); },
     onLevelDone(fn) { onLevelDone = fn ?? (() => {}); },
+
+    heightsVersion: () => heightsVersion,
 
     // The lowest the rings can fly and still clear the mesh. Asked for by the
     // readout when somebody takes the offer, not computed speculatively.

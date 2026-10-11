@@ -163,6 +163,7 @@ let wiresOn = false;
 // the camera is facing, and answering it unasked is cheaper than a discovery.
 let looksOn = true;
 let wirePaths = [];
+let clearedAt = -1;   // the heights grid ensureClear last ran for, from onMesh
 
 async function lidarView() {
   if (!lidar) {
@@ -173,6 +174,16 @@ async function lidarView() {
     // flight runs into, and the readout decides whether that is too close.
     lidar.onMesh((m) => {
       state.mesh = m;
+      // The survey arriving under a plan that was already settled -- a
+      // reload, a shared link -- found it colliding and only said so: the
+      // adjuster had run while there was nothing to check against, and
+      // nothing ran it again. Once per heights grid, so an unfixable plan is
+      // reported rather than retried forever.
+      const hv = lidar.heightsVersion();
+      if (m?.hits && hv !== clearedAt) {
+        clearedAt = hv;
+        setTimeout(ensureClear, 0);
+      }
       // The flat view paints from this too, so imagery and bare grid show the
       // same verdicts as the survey does instead of losing them at the switch.
       view3d.setVerdict(m?.verdict ?? null);
@@ -970,9 +981,13 @@ function renderPoints() {
 function syncPoint(kind, id, at, height, bad) {
   const key = `${kind}:${id}`;
   const on = state.selected?.kind === kind && state.selected?.id === id;
-  const size = kind === 'capture' ? 24 : 22;
-  const html = `<div class="pt ${kind}${on ? ' on' : ''}${bad ? ' strike' : ''}" `
-    + `style="width:${size}px;height:${size}px">${Math.round(height)}</div>`;
+  // A painted area's outline is up to 24 points of one measured height, and
+  // as 24 numbered discs reading "35" it buried the plan it made. Painted,
+  // they are small dots: still there to nudge, saying nothing 24 times.
+  const painted = !!state.paint;
+  const size = painted ? 10 : kind === 'capture' ? 24 : 22;
+  const html = `<div class="pt ${kind}${painted ? ' painted' : ''}${on ? ' on' : ''}${bad ? ' strike' : ''}" `
+    + `style="width:${size}px;height:${size}px">${painted ? '' : Math.round(height)}</div>`;
 
   const existing = pointMarkers.get(key);
   if (existing) {
@@ -3036,6 +3051,11 @@ function savePaint() {
 }
 {
   const saved = savedPaint();
-  if (saved?.cells?.length && saved.sig === planSig()) state.paint = saved.cells;
+  if (saved?.cells?.length && saved.sig === planSig()) {
+    state.paint = saved.cells;
+    // The markers were drawn at startup, before this: redrawn as the painted
+    // outline's dots rather than left as 24 numbered discs after a reload.
+    renderPoints();
+  }
 }
 

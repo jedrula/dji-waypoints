@@ -31,6 +31,44 @@ const norm = (a) => {
 };
 const add = (a, b, s = 1) => ({ x: a.x + b.x * s, y: a.y + b.y * s, z: a.z + b.z * s });
 
+// One grade per footprint edge, from the wall samples facing out of it, and one
+// for the roof. A wall sample goes to the nearest edge whose outward side it
+// faces; the scorer's walls are its proxy box, not the outline, so this is a
+// nearest-edge vote, not an exact face. An edge reads good when 80% of its
+// samples are, and otherwise as its commonest problem -- so a wall that is
+// mostly fine but has a blind strip still shows the strip's colour.
+function gradeFootprint(hull, samples) {
+  const cx = hull.reduce((t, q) => t + q.x, 0) / hull.length;
+  const cy = hull.reduce((t, q) => t + q.y, 0) / hull.length;
+  const segs = hull.map((p, k) => {
+    const q = hull[(k + 1) % hull.length];
+    let nx = q.y - p.y, ny = p.x - q.x;
+    if (nx * ((p.x + q.x) / 2 - cx) + ny * ((p.y + q.y) / 2 - cy) < 0) { nx = -nx; ny = -ny; }
+    return { p, q, nx, ny, tally: {} };
+  });
+  const roof = {};
+  for (const sm of samples) {
+    if (sm.kind === 'top') { roof[sm.grade] = (roof[sm.grade] ?? 0) + 1; continue; }
+    if (sm.kind !== 'wall') continue;
+    let best = null, bestD = Infinity;
+    for (const g of segs) {
+      if (g.nx * sm.n.x + g.ny * sm.n.y <= 0) continue;
+      const dx = g.q.x - g.p.x, dy = g.q.y - g.p.y;
+      const t = Math.max(0, Math.min(1, ((sm.p.x - g.p.x) * dx + (sm.p.y - g.p.y) * dy) / (dx * dx + dy * dy || 1)));
+      const d = Math.hypot(g.p.x + t * dx - sm.p.x, g.p.y + t * dy - sm.p.y);
+      if (d < bestD) { bestD = d; best = g; }
+    }
+    if (best) best.tally[sm.grade] = (best.tally[sm.grade] ?? 0) + 1;
+  }
+  const verdict = (tally) => {
+    const n = Object.values(tally).reduce((t, v) => t + v, 0);
+    if (!n) return null;
+    if ((tally.good ?? 0) >= 0.8 * n) return 'good';
+    return Object.entries(tally).filter(([g]) => g !== 'good').sort((x, y) => y[1] - x[1])[0][0];
+  };
+  return { edges: segs.map((g) => verdict(g.tally)), roof: verdict(roof) };
+}
+
 export function createView3D(canvas) {
   let onViewMove = () => {};
   const ctx = canvas.getContext('2d');
@@ -259,7 +297,7 @@ export function createView3D(canvas) {
     // to read them off `mission`, which is null the moment a capture is the
     // only thing on screen -- the frustum maths threw on `mission.cam` and the
     // map sync silently stopped answering.
-    scene = { pts, others, flown, taps, box, span, maxAlt, frustumLen, step, levels, legs, area,
+    scene = { pts, others, flown, taps, box, span, hull: mission?.hull ?? [], maxAlt, frustumLen, step, levels, legs, area,
               frame: f, cam: base.cam };
 
     // Re-frame only when the ground box itself changed. Replanning -- which
@@ -714,44 +752,36 @@ export function createView3D(canvas) {
     }
     ctx.globalAlpha = 1;
 
-    // coverage: the proxy structures, then a dot per surface sample coloured
-    // by how well it is seen. Drawn before the start marker so the marker wins.
-    if (showCoverage && coverage) {
-      ctx.strokeStyle = 'rgba(140,152,166,0.5)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      for (const bx of coverage.boxes) {
-        const c = [
-          { x: bx.min.x, y: bx.min.y }, { x: bx.max.x, y: bx.min.y },
-          { x: bx.max.x, y: bx.max.y }, { x: bx.min.x, y: bx.max.y },
-        ];
-        for (let k = 0; k < 4; k++) {
-          const a1 = { ...c[k], z: 0 };
-          const a2 = { ...c[(k + 1) % 4], z: 0 };
-          const b1 = { ...c[k], z: bx.max.z };
-          const b2 = { ...c[(k + 1) % 4], z: bx.max.z };
-          line(a1, a2, b, w, h, f);
-          line(b1, b2, b, w, h, f);
-          line(a1, b1, b, w, h, f);
-        }
-      }
-      ctx.stroke();
-
-      const dots = [];
-      for (const sm of coverage.samples) {
-        const v = toView(sm.p, b);
-        if (v.z <= NEAR) continue;
-        dots.push({ s: project(v, w, h, f), d: v.z, g: sm.grade });
-      }
-      dots.sort((m, n) => n.d - m.d);
-      for (const dt of dots) {
-        ctx.fillStyle = GRADE_COLOR[dt.g];
-        ctx.globalAlpha = dt.g === 'good' ? 0.5 : 0.95;
+    // coverage: the footprint you drew, flat on the ground, each edge coloured
+    // by how well the wall above it is seen and the inside tinted by the roof.
+    // This was the scorer's proxy box drawn as a wireframe with a dot on every
+    // sample -- a translucent cube standing where the building is, which read
+    // as an object in the scene ("what is that cube on the ground?"). Dropping
+    // only the good dots did not help: a weak plan is mostly bad samples, so
+    // it was the same cube in red.
+    if (showCoverage && coverage && scene.hull.length >= 3) {
+      const { edges, roof } = gradeFootprint(scene.hull, coverage.samples);
+      const ring = scene.hull.map((q) => toView({ ...q, z: 0 }, b));
+      if (roof && ring.every((v) => v.z > NEAR)) {
+        ctx.fillStyle = GRADE_COLOR[roof];
+        ctx.globalAlpha = 0.22;
         ctx.beginPath();
-        ctx.arc(dt.s.x, dt.s.y, dt.g === 'good' ? 1.8 : 2.8, 0, Math.PI * 2);
+        ring.forEach((v, k) => {
+          const s2 = project(v, w, h, f);
+          if (k) ctx.lineTo(s2.x, s2.y); else ctx.moveTo(s2.x, s2.y);
+        });
         ctx.fill();
+        ctx.globalAlpha = 1;
       }
-      ctx.globalAlpha = 1;
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      scene.hull.forEach((q, k) => {
+        ctx.strokeStyle = edges[k] ? GRADE_COLOR[edges[k]] : 'rgba(140,152,166,0.6)';
+        ctx.beginPath();
+        line({ ...q, z: 0 }, { ...scene.hull[(k + 1) % scene.hull.length], z: 0 }, b, w, h, f);
+        ctx.stroke();
+      });
+      ctx.lineCap = 'butt';
     }
 
     // Altitude scale: a mast standing at whichever box corner currently

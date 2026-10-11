@@ -288,6 +288,20 @@ ptpcamerad, and DJI's own app owns the folder we write into.
       has spent a year avoiding -- see the note in CLAUDE.md about the
       Cloudflare Worker owning rules for a service that was not Cloudflare.
 
+- [ ] **Install from an Android phone, no Mac.** Asked for 2026-10-11 ("from
+      the cloud ... or from a phone"). The cloud is out: DJI Fly has no import
+      and syncs no waypoint missions, so the file has to arrive over USB. The
+      WebUSB refusal above is a macOS fact -- ptpcamerad holds the interface.
+      An Android phone is a USB host with no such daemon, and Chrome on
+      Android has WebUSB, so the page itself might speak MTP to an RC 2 on a
+      USB-C cable and do what `tools/bridge.mjs` does, from GitHub Pages.
+      Unverified on every point that matters: whether Android leaves the
+      interface unclaimed, and whether DJI exposes `Android/data` the same way
+      to a phone as to a Mac. Test that first with a throwaway WebUSB page
+      that lists the controller's storage before writing any MTP code.
+      iPhone cannot: Safari has no WebUSB and iOS has no USB host for this.
+      What still works there is the plan link to a machine with the bridge.
+
 ## Ideas, unprioritised
 
 - [ ] Vertical-face mode for crags and facades (see flat-ground note above).

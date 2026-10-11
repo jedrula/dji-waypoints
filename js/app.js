@@ -2760,10 +2760,22 @@ function liftToClear(v0) {
     m.exported.forEach((w, i) => {
       const need = chk.needs?.[i];
       if (need == null || chk.verdict[i] !== 1) return;
-      const ri = w.pass === 'orbit' ? rings.findIndex((h) => Math.abs(h - w.alt) < 0.05) : -1;
-      const ti = w.pass === 'transect' ? cross.findIndex((h) => Math.abs(h - w.alt) < 0.05) : -1;
-      if (ri >= 0) rings[ri] = Math.max(rings[ri], Math.ceil(need));
-      else if (ti >= 0) cross[ti] = Math.max(cross[ti], Math.ceil(need));
+      // A station's level is the highest at or below it: the survey floor
+      // only ever raises a station off its ring (objectPass). Matched by
+      // equality, an 18 m ring's station floored to 18.5 belonged to no ring,
+      // the altitude was raised instead -- which moves nothing on a ring --
+      // and over Park Staszica every notch above Quick look "could not be
+      // flown clear" for want of lifting one ring 0.7 m. Lifted by what the
+      // station lacks, so a floored station lifts its ring by the shortfall.
+      const levelOf = (hs) => {
+        let at = -1;
+        hs.forEach((h, k) => { if (h <= w.alt + 0.05 && (at < 0 || h > hs[at])) at = k; });
+        return at;
+      };
+      const ri = w.pass === 'orbit' ? levelOf(rings) : -1;
+      const ti = w.pass === 'transect' ? levelOf(cross) : -1;
+      if (ri >= 0) rings[ri] = Math.max(rings[ri], Math.ceil(rings[ri] + need - w.alt));
+      else if (ti >= 0) cross[ti] = Math.max(cross[ti], Math.ceil(cross[ti] + need - w.alt));
       else if (GRID_PASSES.has(w.pass) || ri < 0) alt = Math.max(alt, Math.ceil(need));
     });
     // Rings keep their spacing as they rise. Each lifted to its own need,

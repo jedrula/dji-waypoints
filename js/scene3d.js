@@ -3718,7 +3718,24 @@ export function createScene3D(canvas) {
     // loaded, or in the photogrammetric-mesh mode, which has no raster.
     sampler() {
       const f = frameOf();
-      if (!loaded?.meta || loaded.datum === undefined || !f || meshMode) return null;
+      // Over a mesh, its own max-height grid (buildHeights): one metre cells
+      // in the view's x/z, metres above the mesh's zero. Without it the
+      // painted coverage, the heat and the bridging shots never ran over a
+      // city at all -- Park Staszica read "low-angle" after a paint stroke.
+      // The corner-max grid overstates what blocks a view, which can only
+      // make coverage read worse than it is, never better.
+      if (meshMode) {
+        const h = heights;
+        if (!h || !h.max) return null;
+        return (x, y) => {
+          const c = Math.floor(x - h.x0);
+          const r = Math.floor(-y - h.z0);
+          if (c < 0 || r < 0 || c >= h.nx || r >= h.nz) return null;
+          const v = h.max[r * h.nx + c];
+          return v === -Infinity ? null : v;
+        };
+      }
+      if (!loaded?.meta || loaded.datum === undefined || !f) return null;
       return localSampler(loaded.meta, loaded.height, f, loaded.datum);
     },
     // [{ x, y, z, nx, ny, nz, heat }] in local metres; heat 0..1.

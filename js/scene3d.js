@@ -241,6 +241,13 @@ export function createScene3D(canvas) {
   // against it and the heat is measured on it. `raw` is kept so a change of
   // frame or datum re-places the same points.
   let cloud = null;          // { raw: Uint8Array, meta, points }
+  // Where the survey says a tree stands, for cutting the mesh's own trees out
+  // under the survey's (treeMask). Shared by every mesh tile's material.
+  const treeCut = {
+    uTree: { value: null },
+    uTreeBox: { value: new THREE.Vector4(0, 0, 1, 1) },
+    uTreeOn: { value: 0 },
+  };
   let cloudFor = null;       // the request it answers, so one place asks once
   let cloudOn = true;
   let onCloud = () => {};
@@ -1176,7 +1183,7 @@ export function createScene3D(canvas) {
     }
 
     const tile = new THREE.Mesh(geom, new THREE.ShaderMaterial({
-      uniforms: { uMap: { value: map }, uHas: { value: map ? 1 : 0 } },
+      uniforms: { uMap: { value: map }, uHas: { value: map ? 1 : 0 }, ...treeCut },
       side: THREE.DoubleSide,
       // The normal comes from the DERIVATIVES of the view-space position, not
       // from computeVertexNormals: a photogrammetric mesh is full of zero-area
@@ -1185,8 +1192,10 @@ export function createScene3D(canvas) {
       vertexShader: `
         varying vec2 vUv;
         varying vec3 vPos;
+        varying vec3 vLocal;
         void main() {
           vUv = uv;
+          vLocal = position;
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
           vPos = mv.xyz;
           gl_Position = projectionMatrix * mv;
@@ -1194,10 +1203,23 @@ export function createScene3D(canvas) {
       fragmentShader: `
         uniform sampler2D uMap;
         uniform int uHas;
+        uniform sampler2D uTree;
+        uniform vec4 uTreeBox;
+        uniform float uTreeOn;
         varying vec2 vUv;
         varying vec3 vPos;
+        varying vec3 vLocal;
         ${LAMBERT_GLSL}
         void main() {
+          // A metre above the ground where the survey has a tree: the mesh's
+          // melted crown, which the survey's points are drawn in place of.
+          if (uTreeOn > 0.5) {
+            vec2 tUv = (vLocal.xz - uTreeBox.xy) / uTreeBox.zw;
+            if (tUv.x >= 0.0 && tUv.x <= 1.0 && tUv.y >= 0.0 && tUv.y <= 1.0) {
+              vec4 t = texture2D(uTree, tUv);
+              if (t.g > 0.5 && vLocal.y > t.r + 1.0) discard;
+            }
+          }
           vec3 n = normalize(cross(dFdx(vPos), dFdy(vPos)));
           vec3 base = uHas == 1 ? texture2D(uMap, vUv).rgb : vec3(0.72, 0.70, 0.66);
           gl_FragColor = vec4(base * lambert(gl_FrontFacing ? n : -n), 1.0);
@@ -2012,6 +2034,66 @@ export function createScene3D(canvas) {
     return Number.isFinite(d) ? 0.6 * Math.sqrt(Math.max(1, 12 / d)) : 0.6;
   }
 
+  // One metre cells over the points: the ground's height, and whether a tree
+  // stands there -- vegetation returns and no building ones, spread a cell
+  // outward (never onto a building cell), because a mesh's melted crown is
+  // wider than the canopy that made it. Only over a mesh; the surface's own
+  // trees are a heightfield the points already sit in.
+  function treeMask(pos, kind) {
+    treeCut.uTree.value?.dispose?.();
+    treeCut.uTree.value = null;
+    treeCut.uTreeOn.value = 0;
+    if (!meshMode) return;
+    const count = kind.length;
+    let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    for (let i = 0; i < count; i++) {
+      const x = pos[i * 3], z = pos[i * 3 + 2];
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (z < z0) z0 = z; if (z > z1) z1 = z;
+    }
+    if (!(x1 > x0)) return;
+    const nx = Math.ceil(x1 - x0) + 1, nz = Math.ceil(z1 - z0) + 1;
+    const ground = new Float32Array(nx * nz).fill(Infinity);
+    const low = new Float32Array(nx * nz).fill(Infinity);
+    const veg = new Uint16Array(nx * nz);
+    const bld = new Uint8Array(nx * nz);
+    for (let i = 0; i < count; i++) {
+      const c = Math.floor(pos[i * 3] - x0) + Math.floor(pos[i * 3 + 2] - z0) * nx;
+      const y = pos[i * 3 + 1];
+      const k = kind[i];
+      if (y < low[c]) low[c] = y;
+      if (k === 2 && y < ground[c]) ground[c] = y;
+      if (k >= 3 && k <= 5 && veg[c] < 65535) veg[c]++;
+      if (k === 6) bld[c] = 1;
+    }
+    const tree = new Uint8Array(nx * nz);
+    for (let c = 0; c < tree.length; c++) tree[c] = veg[c] >= 2 && !bld[c] ? 1 : 0;
+    const data = new Float32Array(nx * nz * 4);
+    for (let r = 0; r < nz; r++) {
+      for (let q = 0; q < nx; q++) {
+        const c = r * nx + q;
+        let t = tree[c];
+        if (!t && !bld[c]) {
+          for (let dr = -1; dr <= 1 && !t; dr++) for (let dq = -1; dq <= 1 && !t; dq++) {
+            const rr = r + dr, qq = q + dq;
+            if (rr >= 0 && qq >= 0 && rr < nz && qq < nx && tree[rr * nx + qq]) t = 1;
+          }
+        }
+        // Under a dense crown a cell can lack a ground return; its lowest
+        // return stands in, which only ever cuts less.
+        const g = Number.isFinite(ground[c]) ? ground[c] : low[c];
+        data[c * 4] = Number.isFinite(g) ? g : 1e6;
+        data[c * 4 + 1] = t && Number.isFinite(g) ? 1 : 0;
+      }
+    }
+    const tex = new THREE.DataTexture(data, nx, nz, THREE.RGBAFormat, THREE.FloatType);
+    tex.minFilter = tex.magFilter = THREE.NearestFilter;
+    tex.needsUpdate = true;
+    treeCut.uTree.value = tex;
+    treeCut.uTreeBox.value.set(x0, z0, nx, nz);
+    treeCut.uTreeOn.value = cloudOn ? 1 : 0;
+  }
+
   // Which points a mesh tile covers -- the PUWG92 boxes in meshCovers.
   function meshedPoints() {
     const a = cloud?.points?.geometry.getAttribute('aMeshed');
@@ -2183,6 +2265,7 @@ export function createScene3D(canvas) {
     cloud.points = points;
     cloudOrtho();
     meshedPoints();
+    treeMask(pos, kind);
     scene.add(points);
     applyBacking();
   }
@@ -3708,6 +3791,7 @@ export function createScene3D(canvas) {
     setCloud(on) {
       cloudOn = !!on;
       if (cloud?.points) cloud.points.visible = cloudOn;
+      treeCut.uTreeOn.value = meshMode && cloudOn && treeCut.uTree.value ? 1 : 0;
       applyBacking();
       render();
     },

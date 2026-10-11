@@ -638,7 +638,7 @@ console.log('\nbuildings with walls (LoD1 CityGML)');
 
 console.log('\nthe survey as points');
 {
-  const { createPointSet, keepFor } = await import('../src/points.js');
+  const { createPointSet } = await import('../src/points.js');
   const { rgbOffset } = await import('../src/laz.js');
   ok('colour sits after the GPS time in format 3', rgbOffset(3) === 28 && rgbOffset(1) === null);
 
@@ -654,12 +654,25 @@ console.log('\nthe survey as points');
   ok('16-bit colour comes down to 8', body[6] === 0x80 && body[7] === 0x40 && body[8] === 0xff);
   ok('and the class rides along', body[9] === 2 && body[19] === 5);
 
-  // Two sheets of 1000 points per 10,000 m2 each; a 50 m disc on their shared
-  // edge sees half of each, so about 785 points expected in all.
-  const sheet = (e0) => ({ count: 1000, bounds: { e0, e1: e0 + 100, n0: 0, n1: 100 } });
-  const k = keepFor([sheet(0), sheet(100)], { e: 100, n: 50, r: 50, maxPoints: 400 });
-  ok('the budget thins by what the disc overlaps', Math.abs(k - 400 / (0.1 * 100 * 100 * Math.PI / 4)) < 1e-9, k.toFixed(3));
-  ok('and keeps everything under budget', keepFor([sheet(0)], { e: 50, n: 50, r: 10, maxPoints: 1e6 }) === 1);
+  // Voxels: a second return in the same 25 cm cube adds nothing, one 30 cm
+  // away is kept -- the doubled flight strips go, the surface stays.
+  const vox = createPointSet({ e: 0, n: 0, r: 10, voxel: 0.25 });
+  vox.addPoint(1.01, 1.01, 100.01, 2);
+  vox.addPoint(1.05, 1.02, 100.05, 2);   // same cube: dropped
+  vox.addPoint(1.31, 1.01, 100.01, 2);   // next cube east: kept
+  vox.addPoint(1.01, 1.01, 100.31, 5);   // the cube above: kept
+  ok('one point per voxel', vox.finish().meta.count === 3);
+
+  // Over budget after the voxels: thinned evenly to about the budget, the
+  // same points every time.
+  const many = () => {
+    const s2 = createPointSet({ e: 0, n: 0, r: 50, voxel: 0.25, maxPoints: 1000 });
+    for (let i = 0; i < 4000; i++) s2.addPoint((i % 63) - 31, Math.floor(i / 63) - 31, 100, 2);
+    return s2.finish();
+  };
+  const a = many(), b = many();
+  ok('a budget still caps the count', Math.abs(a.meta.count - 1000) < 100, String(a.meta.count));
+  ok('deterministically', a.body.equals(b.body));
 }
 
 console.log(`\n${fails === 0 ? 'ALL PASS' : `${fails} FAILURES`}`);

@@ -10,21 +10,20 @@
 // 2025 Kielce sheets carry colour per point. Measured over Kadzielnia: 12
 // points per square metre, RGB in every record (point format 3).
 //
-// So this hands back the points inside a disc, thinned to a budget, packed
-// small:
+// So this hands back the points inside a disc, one per voxel and then to a
+// budget, packed small:
 //
 //   int16 x, int16 y   centimetres east / north of the disc's centre
 //   uint16 z           centimetres above the lowest point kept
 //   uint8 r, g, b      colour, 8-bit; mid-grey where the survey has none
 //   uint8 class        ASPRS classification
 //
-// Ten bytes a point. A 150 m disc at 12 points per m2 is 850k points; the
-// default budget of 1.2 million keeps all of them, at 12 MB before gzip.
+// Ten bytes a point: 2M, the service's budget, is 20 MB before gzip.
 
 export const MAX_RADIUS_M = 300;   // int16 centimetres reach 327 m
 const NOISE = new Set([7, 18]);    // low and high noise: never worth drawing
 
-export function createPointSet({ e, n, r, keep = 1, seed = 1 }) {
+export function createPointSet({ e, n, r, voxel = 0, maxPoints = Infinity, seed = 1 }) {
   const rr = Math.min(r, MAX_RADIUS_M);
   const r2 = rr * rr;
   // A fixed sequence, not Math.random: the same request thins to the same
@@ -34,6 +33,14 @@ export function createPointSet({ e, n, r, keep = 1, seed = 1 }) {
     state = (state * 1664525 + 1013904223) >>> 0;
     return state / 4294967296;
   };
+  // One point per voxel, the first to arrive. This was a coin toss per point
+  // at the budget's rate, and over Wroclaw's 2025 sheets (20 per m2, flown in
+  // overlapping strips) it kept one in four: the doubled strips stayed doubled
+  // and the single ones went patchy. A voxel keeps what a surface has and
+  // drops only what repeats it. Keys stay exact integers: x and y are under
+  // 2400 cells of 0.25 m across the 600 m disc, and even Rysy's 2499 m makes
+  // the key ~1.7e11, far below 2^53.
+  const seen = voxel > 0 ? new Set() : null;
   const xs = [];
   const ys = [];
   const zs = [];
@@ -48,7 +55,14 @@ export function createPointSet({ e, n, r, keep = 1, seed = 1 }) {
       const dx = pe - e;
       const dy = pn - n;
       if (dx * dx + dy * dy > r2) return;
-      if (keep < 1 && rand() >= keep) return;
+      if (seen) {
+        const ix = Math.floor((dx + MAX_RADIUS_M) / voxel);
+        const iy = Math.floor((dy + MAX_RADIUS_M) / voxel);
+        const iz = Math.floor(Math.max(0, z + 100) / voxel);
+        const key = (iz * 4096 + iy) * 4096 + ix;
+        if (seen.has(key)) return;
+        seen.add(key);
+      }
       xs.push(dx); ys.push(dy); zs.push(z); cls.push(klass);
       if (red !== undefined) {
         hasRgb = true;
@@ -60,15 +74,20 @@ export function createPointSet({ e, n, r, keep = 1, seed = 1 }) {
     },
 
     finish() {
-      const count = xs.length;
+      // Still over budget after the voxels: thinned evenly, deterministically.
+      const keep = xs.length > maxPoints ? maxPoints / xs.length : 1;
+      const pick = [];
+      for (let i = 0; i < xs.length; i++) if (keep >= 1 || rand() < keep) pick.push(i);
+      const count = pick.length;
       let zMin = Infinity;
-      for (const z of zs) if (z < zMin) zMin = z;
+      for (const i of pick) if (zs[i] < zMin) zMin = zs[i];
       // 16-bit colour that never exceeds 255 was written 8-bit and is read
       // as-is; anything above is the usual scaled-up 16-bit, shifted down.
       const shift = maxColour > 255 ? 8 : 0;
       const buf = Buffer.alloc(count * 10);
-      for (let i = 0; i < count; i++) {
-        const o = i * 10;
+      for (let j = 0; j < count; j++) {
+        const i = pick[j];
+        const o = j * 10;
         buf.writeInt16LE(Math.round(xs[i] * 100), o);
         buf.writeInt16LE(Math.round(ys[i] * 100), o + 2);
         buf.writeUInt16LE(Math.min(65535, Math.round((zs[i] - zMin) * 100)), o + 4);
@@ -83,26 +102,8 @@ export function createPointSet({ e, n, r, keep = 1, seed = 1 }) {
       }
       return {
         body: buf,
-        meta: { count, e, n, r: rr, zBase: count ? zMin : 0, hasRgb, keep, bytesPerPoint: 10 },
+        meta: { count, e, n, r: rr, zBase: count ? zMin : 0, hasRgb, voxel, keep, bytesPerPoint: 10 },
       };
     },
   };
-}
-
-// What fraction to keep for a budget, from the sheets' own headers: each one
-// knows its point count and extent, so the density inside the disc is known
-// before a single point is decompressed. Each sheet is charged for the part of
-// the disc's square it overlaps, times pi/4 for the disc inside the square.
-// The first cut charged every sheet for the whole disc, and over Kadzielnia --
-// a disc straddling two sheets -- kept 39% where the budget allowed most.
-export function keepFor(headers, { e, n, r, maxPoints }) {
-  let expected = 0;
-  for (const h of headers) {
-    const b = h.bounds;
-    const area = Math.max(1, (b.e1 - b.e0) * (b.n1 - b.n0));
-    const ow = Math.max(0, Math.min(b.e1, e + r) - Math.max(b.e0, e - r));
-    const oh = Math.max(0, Math.min(b.n1, n + r) - Math.max(b.n0, n - r));
-    expected += (h.count / area) * ow * oh * (Math.PI / 4);
-  }
-  return expected > maxPoints ? maxPoints / expected : 1;
 }

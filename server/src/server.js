@@ -34,8 +34,8 @@ import { createOrthoStore, ORTHO_PX } from './ortho.js';
 import { createBdotStore } from './bdot.js';
 import { createBuildingStore } from './buildings.js';
 import { createMeshStore } from './mesh.js';
-import { createPointSet, keepFor, MAX_RADIUS_M } from './points.js';
-import { forEachPoint, readHeader } from './laz.js';
+import { createPointSet, MAX_RADIUS_M } from './points.js';
+import { forEachPoint } from './laz.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = process.env.DATA_DIR ?? path.join(HERE, '..', 'var');
@@ -238,7 +238,12 @@ async function buildScene(tn, te) {
 // the raster -- see src/points.js for why. Snapped to a 25 m grid so nearby
 // requests share a cache entry; built from the same LAZ sheets the tiles were.
 const POINTS_DIR = path.join(ROOT, 'points');
-const POINTS_BUDGET = 1_200_000;
+// One point per 25 cm voxel first, then the budget. Measured over 150 m
+// discs: Wroclaw's 2025 sheets put 5.83M points in the disc and the voxels
+// keep 2.80M; Kadzielnia's 2.20M become 1.63M, all of which 2M keeps. Same
+// build time either way (34 s and 11 s, the decompression is the cost).
+const POINTS_BUDGET = 2_000_000;
+const POINTS_VOXEL_M = 0.25;
 const pointsJobs = new Map();
 const pointsFailed = new Map();   // key -> why, read once by the next poll
 const pointsPath = (e, n, r) => path.join(POINTS_DIR, `${e}_${n}_${r}`);
@@ -263,8 +268,7 @@ async function buildPoints(e, n, r) {
     const { file } = await lazStore.fetchLaz(src.url);
     bufs.push(await readFile(file));
   }
-  const keep = keepFor(bufs.map(readHeader), { e, n, r, maxPoints: POINTS_BUDGET });
-  const set = createPointSet({ e, n, r, keep });
+  const set = createPointSet({ e, n, r, voxel: POINTS_VOXEL_M, maxPoints: POINTS_BUDGET });
   for (const b of bufs) await forEachPoint(b, set.addPoint, { rgb: true });
   const done = set.finish();
   const body = gzipSync(done.body, { level: 6 });
@@ -531,10 +535,21 @@ const server = http.createServer(async (req, res) => {
         requestPoints(e, n, r).catch((err) => pointsFailed.set(key, String(err.message ?? err)));
         return send(res, 202, { status: 'building' }, origin, { 'Retry-After': '5' });
       }
+      // Revalidated, not immutable: a build is only "the" answer until the
+      // way points are built changes -- PL-2000 sheets, voxel thinning -- and
+      // marked immutable for a year, the browser (and the desktop app's
+      // Chromium) went on drawing the old cloud after the cache was rebuilt.
+      // A 304 costs a round trip; the body is 15 MB.
+      const etag = `"${entry.meta.builtAt}"`;
+      if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304, headers(origin, { ETag: etag, 'Cache-Control': 'no-cache' }));
+        return res.end();
+      }
       res.writeHead(200, headers(origin, {
         'Content-Type': 'application/octet-stream',
         'Content-Encoding': 'gzip',
-        'Cache-Control': 'public, max-age=31536000, immutable',
+        'Cache-Control': 'no-cache',
+        ETag: etag,
         'Access-Control-Expose-Headers': 'X-Points-Meta',
         'X-Points-Meta': JSON.stringify(entry.meta).slice(0, 3900),
       }));

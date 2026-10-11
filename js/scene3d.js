@@ -1969,7 +1969,9 @@ export function createScene3D(canvas) {
     cloudFor = key;
     try {
       onLoading({ stage: 'Fetching detailed points…', frac: null, minor: true });
-      const res = await poll(`/v1/points?lat=${f.lat0}&lon=${f.lon0}&r=150`, {
+      // `v` only steps past responses cached before the service revalidated
+      // them: those were sent immutable for a year (server.js, /v1/points).
+      const res = await poll(`/v1/points?lat=${f.lat0}&lon=${f.lon0}&r=150&v=2`, {
         onWait: () => onLoading({ stage: 'Preparing detailed points…', minor: true, frac: null,
           // Measured cold: 10 s over Kadzielnia (two 2025 sheets), 47 s over
           // Stokowka (two older sheets of 120 and 240 MB).

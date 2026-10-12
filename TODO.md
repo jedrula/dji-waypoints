@@ -302,6 +302,17 @@ ptpcamerad, and DJI's own app owns the folder we write into.
       iPhone cannot: Safari has no WebUSB and iOS has no USB host for this.
       What still works there is the plan link to a machine with the bridge.
 
+      **One mission on the controller, by convention** (Andrzej, 2026-10-12).
+      The phone holds the library -- a new plan or a saved one -- and Sync
+      overwrites the one slot; nothing is ever chosen on the controller. That
+      deletes the slot picker and the "replaces 52 wp from 26 Aug" trade from
+      this path. The slot still has to exist first (Fly lists only folders it
+      created), so the first sync says to make one throwaway mission in Fly.
+      Known cost: a plan split over the waypoint cap needs one slot per part,
+      so a 3-part mission means 3 slots, or one sync per part flown between
+      syncs. Start with one slot and a split plan synced part by part; add
+      slots only if that proves painful in the field.
+
 ## Ideas, unprioritised
 
 - [ ] Vertical-face mode for crags and facades (see flat-ground note above).

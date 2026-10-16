@@ -311,7 +311,11 @@ ptpcamerad, and DJI's own app owns the folder we write into.
       Known cost: a plan split over the waypoint cap needs one slot per part,
       so a 3-part mission means 3 slots, or one sync per part flown between
       syncs. Start with one slot and a split plan synced part by part; add
-      slots only if that proves painful in the field.
+      slots only if that proves painful in the field. Andrzej agreed
+      2026-10-16, on one condition: it only works if syncing is seamless. So
+      the phone remembers which part is next and offers it as the one tap
+      ("Sync part 2 of 3") -- picking the part by hand in the field is the
+      friction that would sink it.
 
 ## Ideas, unprioritised
 

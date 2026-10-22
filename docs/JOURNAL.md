@@ -5,6 +5,51 @@ learned, what broke, what state something was left in. What *changed in the code
 is already in `git log` and does not belong here twice; what is still open is in
 `TODO.md`. A line earns its place if you would not find it in either.
 
+## 2026-10-10 – 2026-10-22 — LiDAR anywhere in Poland, a night on autopilot, and the hosted service caught up
+
+**Coverage across Poland was a guess until it was sampled.** 32 places
+sampled across PL; every one has a 2022-or-later survey in
+`DanePomiaroweLidarEVRF2007`. Łódź had *none* before this: its sheets are
+PL-2000, and the index reader dropped every sheet that was not PL-1992. Now
+reprojected per sheet by a corner affine, 2.5 mm worst error, and Łódź reads its
+2024 survey at 25 pts/m². Older 2010–2017 flights live in a separate WFS
+(`DanePomiaroweLidarKRON86`) that is still not queried — nothing sampled needed
+it. Heights tiles cached server-side before 2026-10-11 were built without the
+PL-2000 and older-year fill.
+
+**Points were cached `immutable` for a year**, so no improvement to the clouds
+ever reached a browser that had seen the place once. Found only because a
+reprocessed cloud looked identical. Now ETag + `no-cache`. Thinning moved from a
+coin toss to one point per 25 cm voxel: Wrocław's 150 m disc goes 5.83M raw →
+2.80M voxels → 2M budget; Kadzielnia 2.20M → 1.63M; build time unchanged.
+
+**Two planner bugs only a reload or a city exposed.** Every detail notch past
+Quick look was refused over the Wrocław mesh because a ring station floored to
+18.5 m was compared to its 18 m ring by equality. And a plan restored from a
+link was settled before the survey arrived, so a plan that had been clear came
+back with 13 colliding legs at Kadzielnia.
+
+**Photon answers a fractional zoom with a 400**, which the search showed as
+"nothing found" for every address. The map's zoom is fractional whenever you
+pinch.
+
+**The coverage cube.** The plan view drew the scorer's proxy box with a dot on
+every sample; Andrzej asked "what is that cube on the ground?". Dropping only the
+good dots did not help — a weak plan is mostly bad samples, so it was the same
+cube in red. Now the footprint on the ground, edges coloured per wall.
+
+**The hosted service was 15 commits stale.** drone.topomatch.com runs from the
+home box (`communications-desktop` on Tailscale), which nothing updates on push.
+Pulled 8abaf4c → 86d7813 on 2026-10-11 and restarted only tmux pane 8
+(`topomatch:0.8`) instead of re-running `start-dev.sh`, which would have dropped
+every other service. That checkout has four untracked files from Sep 24
+(`js/photos.js`, `js/sim.js`, `photos.html`, `sim.html`), left alone.
+
+**Mission transfer, decided not built:** the cloud is out (DJI Fly has no import
+and syncs no waypoint missions); an Android phone over WebUSB might work; iPhone
+cannot. One mission slot on the controller by convention, the phone holding the
+library — see `TODO.md`.
+
 ## 2026-09-09 — one service address, and a warning that lied
 
 Two fixes, both from using the thing.

@@ -40,6 +40,7 @@ import { checkObstacles } from './collide.js';
 import { createHistory } from './history.js';
 import { surfaceSamples, measureViews, paintedCoverage, bridgeMission } from './views.js';
 import { toPuwg92 } from './puwg92.js';
+import { createTerrain } from './terrain.js';
 
 import { bestFix, GPS_ERRORS, STALE_MS } from './gps.js';
 import { serviceUrl, serviceHeaders } from './service.js';
@@ -75,6 +76,10 @@ const state = {
   // What the photogrammetric mesh says about the flight, when the survey view
   // has one. Null until it reports, and null is "not checked", not "clear".
   mesh: null,
+  // What Italy's terrain model says about the flight, outside Poland where
+  // there is no survey -- see js/terrain.js. Strikes only: it is bare earth,
+  // so a leg it does not flag is unjudged, never clear.
+  terrain: null,
   onDevice: null,             // a route being looked at next to yours
 };
 
@@ -150,6 +155,19 @@ let moveFromThreeD = false;
 let loadState = null;   // what the survey view is waiting for; see "loading state"
 let loadClock = null;
 let lidar = null;
+// The ground where the survey does not reach. Never both at once: this one
+// declines Poland outright, and the survey has nothing anywhere else.
+const terrain = createTerrain();
+let terrainClearedAt = -1;   // the terrain grid ensureClear last ran for
+
+// Would this flight come within `clr` of what is known to be there? The
+// survey's answer where there is a survey, the terrain model's elsewhere, and
+// null -- not checked, which is not clear -- where there is neither. Every
+// caller that used to ask `lidar` asks this, so the adjuster that lifts a plan
+// clear of trees in Wroclaw lifts it clear of a hillside in Sicily.
+function groundCheck(m, clr = clearance()) {
+  return lidar?.checkFlight?.(m, clr) ?? terrain.checkFlight(m, clr);
+}
 
 // Overhead lines, and whether they are being shown.
 //
@@ -186,7 +204,7 @@ async function lidarView() {
       }
       // The flat view paints from this too, so imagery and bare grid show the
       // same verdicts as the survey does instead of losing them at the switch.
-      view3d.setVerdict(m?.verdict ?? null);
+      view3d.setVerdict(m?.verdict ?? state.terrain?.verdict ?? null);
       renderFix();
     });
     lidar.setCollision(collideOn);
@@ -1179,6 +1197,7 @@ function computePlan() {
     state.mission = null;
     state.hazard = null;
     state.mesh = null;
+    state.terrain = null;
     state.coverage = null;
     for (const g of [layers.path, layers.dots, layers.poses, layers.conflicts]) g.clearLayers();
     view3d.setMission(null);
@@ -1221,6 +1240,9 @@ function computePlan() {
   // measured regardless. Turn it back on the day the readout wants the number.
   state.hazard = checkObstacles(state.mission, prisms,
     { clearance: clearance(), distances: false });
+  // Before anything draws, so the map and the band carry the same verdict.
+  state.terrain = terrain.checkFlight(state.mission, clearance());
+  syncTerrain(state.mission);
 
   drawRoute();
   renderPoints();
@@ -1238,9 +1260,32 @@ function computePlan() {
   lidar?.setMission(state.mission, state.hazard);
   // setMission is what re-checks the mesh, so the verdict is fresh only after
   // it; with no survey open there is nothing to carry and this clears it.
-  view3d.setVerdict(state.mesh?.verdict ?? null);
+  view3d.setVerdict(state.mesh?.verdict ?? state.terrain?.verdict ?? null);
   writeUrl();
   settleSoon();
+}
+
+// Fetch the terrain under a flight outside Poland, and replan once it lands.
+//
+// The replan is what puts the ground into the plan rather than only into the
+// warning: surveyFloor hands the planner a floor from it, and the adjuster
+// (ensureClear, once per grid so an unfixable plan is reported rather than
+// retried forever) lifts what still strikes. If the service is down or the
+// site is off the model, nothing happens -- the plan stays exactly what it was
+// before this existed, unchecked, and nothing on screen claims otherwise.
+function syncTerrain(m) {
+  terrain.ensure(m).then((changed) => {
+    if (!changed || !state.mission) return;
+    // CC BY 4.0: the licence's one condition is the credit. Leaflet dedupes
+    // the string, so a second grid does not add it twice.
+    map.attributionControl.addAttribution(
+      'Terrain: <a href="https://doi.org/10.13127/tinitaly/1.1">TINITALY/1.1</a>, INGV (CC BY 4.0)');
+    computePlan();
+    if (state.terrain?.hits && terrain.version() !== terrainClearedAt) {
+      terrainClearedAt = terrain.version();
+      ensureClear();
+    }
+  });
 }
 
 // The route on the map, or not. The 3D view always gets it -- looking at the
@@ -1273,7 +1318,9 @@ $('routeToggle').addEventListener('click', () => setShowRoute(!showRoute));
 
 function renderConflicts() {
   layers.conflicts.clearLayers();
-  for (const leg of state.hazard?.legs ?? []) {
+  // Terrain strikes too: outside Poland there is no survey view to see them
+  // in, so the map is where they have to be.
+  for (const leg of [...(state.hazard?.legs ?? []), ...(state.terrain?.legs ?? [])]) {
     L.polyline([[leg.a.lat, leg.a.lon], [leg.b.lat, leg.b.lon]], {
       color: LEG_COLOR[leg.grade], weight: 4, opacity: 0.9, interactive: false,
     }).addTo(layers.conflicts);
@@ -1412,11 +1459,20 @@ function renderFix() {
   // Said in the band, in every view: the lift button lives on the 3D pane,
   // so from the map a plan flying into a tree used to say nothing at all.
   const hits = state.mesh?.hits ?? 0;
-  $('hazardWarn').hidden = !hits;
+  const ground = state.terrain?.hits ?? 0;
+  $('hazardWarn').hidden = !hits && !ground;
   if (hits) {
     $('hazardWarn').textContent = `${hits} leg${hits === 1 ? '' : 's'} pass within ${clearance()} m of `
       + 'trees or buildings in the survey. In 3D, the red lift button raises the rings clear; '
       + 'grid and cross-pass legs need more altitude.';
+  } else if (ground) {
+    // Said, because there is no surface to see it in: the survey view is
+    // Poland's LiDAR, and outside Poland the struck legs on the map are the
+    // only picture there is. Bare earth is said too, because the next thing
+    // in the way on a Sicilian hillside is a pine the model has never heard of.
+    $('hazardWarn').textContent = `${ground} leg${ground === 1 ? '' : 's'} pass within ${clearance()} m of `
+      + 'the ground (TINITALY, 10 m bare earth — no trees or buildings), measured from the ground '
+      + 'under the first waypoint. Take off there, or every height moves.';
   }
   const btn = $('liftBtn');
   if (!btn) return;
@@ -1694,7 +1750,7 @@ function missionFromCode(code) {
     const same = here && here.lat0 === mission.frame.lat0 && here.lon0 === mission.frame.lon0;
     const yAt = same ? lidar?.sampler?.() : null;
     if (yAt) mission = bridgeMission(mission, surveySamples(mission, yAt, null), yAt).mission;
-    const chk = lidar?.checkFlight?.(mission, clearance());
+    const chk = groundCheck(mission);
     return { plan, mission, hits: chk?.hits ?? 0 };
   } catch {
     return null;
@@ -2754,8 +2810,11 @@ function planWith(v) {
 }
 // The survey as the planner's floor, when the survey view has it loaded.
 function surveyFloor() {
-  if (!lidar?.floorAt) return null;
   const clr = clearance();
+  // The terrain first: it is only ever loaded outside Poland, where the
+  // survey's floorAt has nothing and answers 0.
+  if (terrain.ready()) return (lat, lon) => terrain.floorAt(lat, lon, clr);
+  if (!lidar?.floorAt) return null;
   return (lat, lon) => lidar.floorAt(lat, lon, clr);
 }
 const GRID_PASSES = new Set(['nadir', 'oblique', 'establish', 'surround', 'context', 'transit', 'bridge']);
@@ -2763,7 +2822,7 @@ function liftToClear(v0) {
   let v = { ...v0 };
   let m;
   try { m = planWith(v); } catch { return null; }
-  let chk = lidar?.checkFlight?.(m, clearance());
+  let chk = groundCheck(m);
   if (!chk) return { mission: m, v, cost: 0, unchecked: true };
   const startAlt = v.altitude;
   const startRings = (m.heights?.orbit ?? []).slice();
@@ -2808,7 +2867,10 @@ function liftToClear(v0) {
     v = { ...v, altitude: Math.min(120, alt),
       orbitHeights: rings.length ? rings : null, transectHeights: cross.length ? cross : null };
     try { m = planWith(v); } catch { return null; }
-    chk = lidar.checkFlight(m, clearance());
+    chk = groundCheck(m);
+    // A lifted candidate can lose its answer -- the terrain model has none for
+    // a first waypoint nudged off its edge -- and unknown is not clear.
+    if (!chk) return null;
   }
   if (chk.hits) return null;
   const lifts = [v.altitude - startAlt,
@@ -2930,7 +2992,7 @@ function applyDetail(wanted) {
 // 5 m rings drawn red through the courtyard. Same adjuster as the detail
 // notches (safePlan), applied to the settings as they stand.
 function ensureClear() {
-  const check = lidar?.checkFlight?.(state.mission, clearance());
+  const check = groundCheck(state.mission);
   if (!check?.hits) return;
   const safe = safePlan(uiValues());
   // Nothing clears these settings as they stand: the detail notches, which

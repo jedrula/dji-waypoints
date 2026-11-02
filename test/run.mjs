@@ -2634,6 +2634,106 @@ console.log('\ncontroller bridge');
      withMine.some((r) => r.id === 'mine' && !r.deleted));
 }
 
+console.log('\nthe ground outside Poland (TINITALY)');
+{
+  const { toUtm32, covers, parseAsciiGrid, requestFor, groundAt, checkTerrain, createTerrain } = await import('../js/terrain.js');
+  // Reference values from PROJ 9 (pyproj 3.7.2, EPSG:4326 -> EPSG:32632).
+  const pm = toUtm32(38.16718, 12.7568);
+  ok('UTM 32 at Pizzo Monaco agrees with PROJ to a centimetre',
+     near(pm.east, 829143.013, 0.01) && near(pm.north, 4231037.851, 0.01), JSON.stringify(pm));
+  const ct = toUtm32(37.5, 15.09);
+  ok('and at Catania, 6.1 degrees off the meridian',
+     near(ct.east, 1038559.374, 0.02) && near(ct.north, 4167802.692, 0.02), JSON.stringify(ct));
+
+  ok('covers Sicily', covers(38.16718, 12.7568));
+  ok('but never Poland, which zone 32\'s rectangle also contains', !covers(51.11, 17.03));
+  ok('nor London', !covers(51.5, -0.12));
+
+  // A real answer from the WCS, 600 m square over the summit and the top of
+  // its east face, fetched 2026-11-03.
+  const text = readFileSync(new URL('./fixtures/tinitaly-pizzo-monaco.asc', import.meta.url), 'utf8');
+  const g = parseAsciiGrid(text);
+  ok('the grid reads as 60 x 60 cells of 10 m from its south-west corner',
+     g.cols === 60 && g.rows === 60 && g.cell === 10 && g.e0 === 828900 && g.n0 === 4230700);
+  ok('the summit cell is 530.8 m', near(groundAt(g, 38.16718, 12.7568), 530.83, 0.01));
+
+  const tiny = parseAsciiGrid('NCOLS 2\nNROWS 2\nXLLCENTER 5\nYLLCENTER 5\nCELLSIZE 10\nNODATA_VALUE -9999\n1 2\n3 -9999\n');
+  ok('a centre-registered header is moved half a cell to its corner', tiny.e0 === 0 && tiny.n0 === 0);
+  ok('and NODATA is NaN, not a height', Number.isNaN(tiny.z[3]) && tiny.z[0] === 1);
+  let threw = false;
+  try { parseAsciiGrid('NCOLS 2\nNROWS 2\nXLLCORNER 0\nYLLCORNER 0\nCELLSIZE 10\n1 2 3\n'); } catch { threw = true; }
+  ok('a short grid is refused rather than read with zeros on the end', threw);
+
+  // Errs high between cells: on a ridge the crest is the highest of the four
+  // corners, not their average.
+  {
+    const ridge = { cols: 2, rows: 2, e0: 0, n0: 0, cell: 10, z: Float32Array.from([10, 50, 10, 50]) };
+    const hole = { ...ridge, z: Float32Array.from([10, 50, 10, NaN]) };
+    const at = (gg, e, n) => {
+      // Straight to cornerMax via a grid placed at Pizzo Monaco's coordinates.
+      const p = toUtm32(38.16718, 12.7568);
+      const moved = { ...gg, e0: p.east - e, n0: p.north - n };
+      return groundAt(moved, 38.16718, 12.7568);
+    };
+    ok('a point between cells reads the highest of its four, not their mean', at(ridge, 10, 10) === 50);
+    ok('and nothing at all if one of the four is NODATA', at(hole, 10, 10) === null);
+    ok('or if it is off the grid', at(ridge, 25, 10) === null);
+  }
+
+  const req = requestFor({ south: 38.1668, north: 38.1672, west: 12.7564, east: 12.7572 }, 15);
+  ok('a request snaps outward to whole cells',
+     req.box.e0 % 10 === 0 && req.box.e1 % 10 === 0 && req.box.e0 <= pm.east - 15 && req.box.e1 >= pm.east + 15);
+  ok('in the native grid, so the server does not resample a summit down',
+     req.url.includes('subset=E(') && !req.url.includes('subsettingCrs'));
+  ok('and a box past 4 km is not asked for', requestFor({ south: 38.0, north: 38.1, west: 12.7, east: 12.8 }, 0) === null);
+
+  // From the foot of the east face, 30 m up, level, west over the summit.
+  const east = { lat: 38.166677, lon: 12.760448 };   // ground 120.4 m
+  const west = { lat: 38.166871, lon: 12.754411 };   // ground 270.2 m
+  const flight = (alt, a = east, b = west) => ({ exported: [{ ...a, alt }, { ...b, alt }] });
+  const hit = checkTerrain(g, flight(30), 5);
+  ok('a level leg from the foot into the mountain is a strike',
+     hit.hits === 1 && hit.verdict[1] === 1 && hit.legs[0].grade === 'strike');
+  // The LOWEST of the four corners round the takeoff (110.4 to 122.3 here):
+  // a takeoff ground read high puts the aircraft high, which is the error
+  // that flies it into the slope.
+  ok('measured from the lowest ground under the first waypoint', near(hit.datum, 110.4, 0.05), `datum ${hit.datum}`);
+  const need = hit.needs[1];
+  ok('and the altitude that clears it is more than the mountain above the takeoff',
+     need > 530.8 - hit.datum, `need ${need}`);
+  ok('flying it at that altitude clears it', checkTerrain(g, flight(need), 5).hits === 0);
+  ok('a metre under it does not', checkTerrain(g, flight(need - 1), 5).hits === 1);
+
+  const clear = checkTerrain(g, flight(40, { lat: 38.16718, lon: 12.7568 }, east), 5);
+  ok('from the summit outward at 40 m nothing is struck', clear.hits === 0);
+  ok('but nothing is called clear either: this is bare earth, not trees',
+     clear.verdict.every((v) => v !== 2));
+  const off = checkTerrain(g, flight(40, { lat: 38.16718, lon: 12.7568 }, { lat: 38.16718, lon: 12.7700 }), 5);
+  ok('a leg running off the model gets no altitude to clear it', off.needs[1] === null && off.hits === 0);
+  ok('and with no ground under the first waypoint nothing is judged',
+     checkTerrain(g, flight(40, { lat: 38.16718, lon: 12.7700 }, east), 5) === null);
+
+  // The loader: one request per grid, no claim at all when it fails.
+  let asked = 0;
+  const fake = async () => { asked++; return { ok: true, text: async () => text }; };
+  const t = createTerrain({ fetch: fake });
+  const m = { exported: [{ lat: 38.16718, lon: 12.7568, alt: 30 }, { lat: 38.1672, lon: 12.7572, alt: 30 }] };
+  ok('nothing is checked before the ground arrives', t.checkFlight(m, 5) === null && t.floorAt(38.16718, 12.7568, 5) === 0);
+  ok('the first flight fetches the grid', await t.ensure(m) === true && asked === 1 && t.ready());
+  ok('and a replan inside it does not fetch again', await t.ensure(m) === false && asked === 1);
+  // Highest corner at the station (530.8) over the lowest at the takeoff
+  // (527.03), plus the clearance: both readings err towards more air.
+  ok('the floor at the summit errs high at both ends',
+     near(t.floorAt(38.16718, 12.7568, 5, 0), 530.83 + 5 - 527.03, 0.01), String(t.floorAt(38.16718, 12.7568, 5, 0)));
+  ok('and a station over lower ground is not lifted', t.floorAt(38.166677, 12.760448, 5) === 0);
+  const broke = createTerrain({ fetch: async () => ({ ok: false }) });
+  ok('a service that is down leaves nothing checked, not a flat world',
+     await broke.ensure(m) === false && broke.checkFlight(m, 5) === null);
+  const poland = createTerrain({ fetch: fake });
+  ok('and Poland is never asked about here',
+     await poland.ensure({ exported: [{ lat: 51.11, lon: 17.03, alt: 30 }] }) === false && asked === 1);
+}
+
 console.log(`\n${fails === 0 ? 'ALL PASS' : fails + ' FAILURES'}`);
 console.log(`sample kmz: ${kmzPath} (${bytes.length} bytes, ${m.exported.length} waypoints)`);
 process.exit(fails ? 1 : 0);

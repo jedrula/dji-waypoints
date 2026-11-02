@@ -312,9 +312,21 @@ That last one is a crash. Take off at the bottom, fly at "93 m", and the
 aircraft is ten metres BELOW the top of its own site. The band says exactly
 that now, and offers the altitude that clears it.
 
-It is Poland only, and it says nothing rather than guessing elsewhere -- the
-service answers 0 for "off the edge of my data" as readily as for sea level, and
-a false zero on a hillside is the dangerous direction.
+It says nothing rather than guessing where it has no data -- the service
+answers 0 for "off the edge of my data" as readily as for sea level, and a
+false zero on a hillside is the dangerous direction.
+
+**Italy, since 2026-11-03.** Outside Poland the ground comes from TINITALY 1.1
+(INGV, CC BY 4.0), a 10 m bare-earth model of the whole country, asked over WCS
+straight from the browser in its own UTM 32 grid so the server never resamples
+a summit down (`js/terrain.js`). The planner gets a floor from it and the same
+adjuster that lifts a plan clear of Polish trees lifts it clear of the slope;
+legs that still strike are drawn red on the map and counted in the band.
+Strikes only, never "clear": it has no trees and no buildings. At Pizzo Monaco
+above San Vito lo Capo the summit cell reads 530.8 m, and a plan taking off
+from the foot of its east face came back with its 30 m approach flying into
+the rock and its nadir floored to 413 m above the takeoff -- unflyable, and
+said so.
 
 ### What the point cloud actually gives you
 

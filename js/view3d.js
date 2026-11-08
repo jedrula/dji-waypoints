@@ -2,6 +2,7 @@ import { fov, orientation } from './camera.js';
 import { GRADE_COLOR } from './coverage.js';
 import { PASS_COLOR, LEG_COLOR, VERDICT_COLOR, TAP_COLOR } from './palette.js';
 import { createTileCache, pickZoom, tileRange, tileBounds, TILE_PX } from './tiles.js';
+import { frame } from './geo.js';
 
 // A small hand-rolled 3D view. The scene is a few thousand line segments, so a
 // WebGL library would be more dependency than drawing. Coordinates are local
@@ -17,6 +18,8 @@ const CONFLICT_COLOR = LEG_COLOR;
 const OBSTACLE_COLOR = { clear: '#9aa7b4', near: '#ffb84d', strike: '#ff5d5d' };
 const HOVER_COLOR = '#4da3ff';
 const DEG = Math.PI / 180;
+// Textured triangles for ground over relief -- see drawGround.
+const TRI_BUDGET = 12000;
 
 const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
 const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
@@ -92,6 +95,15 @@ export function createView3D(canvas) {
   let verdict = null;      // the mesh's per-leg answer, when the survey has one
   let ground = null;       // { on, url, attribution } -- imagery under the plan
   let tiles = null;        // the cache for whichever basemap `ground` names
+  // (lat, lon) -> metres above the takeoff, or null: the terrain model under a
+  // plan outside Poland (js/terrain.js). Absent, the ground is the flat plane
+  // at the takeoff's height this view always drew -- which on Pizzo Monaco
+  // put the summit's 530 m of rock under a flight drawn hovering over nothing.
+  let relief = null;
+  // { lat, lon, half } -- ground to look at when there is no flight at all,
+  // so the 3D view can show a place before anything is planned there. Only
+  // ever the fallback: a plan or a capture on screen supplies the frame.
+  let place = null;
   let redrawTimer = null;
   const view = { az: 35, el: 28, dist: 400, target: { x: 0, y: 0, z: 0 } };
   const NEAR = 0.5;
@@ -177,7 +189,7 @@ export function createView3D(canvas) {
     // another plan's grips would let a drag edit a flight that is not on the
     // sliders.
     const base = mission ?? capture[0]?.mission ?? null;
-    if (!base) { scene = null; return; }
+    if (!base) { scene = place ? placeScene(place) : null; return; }
     const f = base.frame;
     const pts = (mission?.waypoints ?? []).map((w) => {
       const l = f.toLocal(w.lat, w.lon);
@@ -309,6 +321,22 @@ export function createView3D(canvas) {
       view.target = { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2, z: maxAlt / 2 };
       view.dist = span * 2.2 + maxAlt * 2;
     }
+  }
+
+  // Just ground: a square round a point, nothing flying over it. Every list
+  // the drawing walks is empty, so the flight, the taps and the altitude scale
+  // simply do not draw. Framed once per place, like build() frames once per box.
+  function placeScene({ lat, lon, half }) {
+    const box = { x0: -half / 3, x1: half / 3, y0: -half / 3, y1: half / 3 };
+    const key = `place ${lat.toFixed(5)},${lon.toFixed(5)},${half}`;
+    if (key !== framedKey) {
+      framedKey = key;
+      view.target = { x: 0, y: 0, z: 0 };
+      view.dist = half * 1.6;
+    }
+    return { pts: [], others: [], flown: [], taps: [], box, span: half, hull: [], maxAlt: 1,
+             frustumLen: 2, step: 1, levels: [], legs: [], area: { x0: -half, x1: half, y0: -half, y1: half },
+             frame: frame(lat, lon), cam: null };
   }
 
   // The faces of a solid that can ever be seen from above the ground: one wall
@@ -489,6 +517,9 @@ export function createView3D(canvas) {
     const z = pickZoom({ south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon },
                        { maxZoom: ground.maxZoom ?? 19, maxTiles: 48 });
     const r = tileRange({ south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon }, z);
+    const tris = [];
+    // Quads per tile side over relief, so the whole ground stays near TRI_BUDGET.
+    const perTile = Math.max(4, Math.min(24, Math.floor(Math.sqrt(TRI_BUDGET / 2 / ((r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1))))));
 
     for (let tx = r.x0; tx <= r.x1; tx++) {
       for (let ty = r.y0; ty <= r.y1; ty++) {
@@ -503,8 +534,15 @@ export function createView3D(canvas) {
         const se = fr.toLocal(tb.south, tb.east);
 
         const corner = (u, v) => {
-          const p = toView({ x: nw.x + (se.x - nw.x) * u, y: nw.y + (se.y - nw.y) * v, z: 0 }, b);
-          return p.z <= NEAR ? null : project(p, w, h, f);
+          const x = nw.x + (se.x - nw.x) * u;
+          const y = nw.y + (se.y - nw.y) * v;
+          const z = groundZ(x, y);
+          if (z === null) return null;
+          const p = toView({ x, y, z }, b);
+          if (p.z <= NEAR) return null;
+          const q = project(p, w, h, f);
+          q.depth = p.z;
+          return q;
         };
         // How finely to cut it: by how much of the screen the tile covers, so a
         // tile in the distance costs almost nothing and one under your nose is
@@ -516,6 +554,14 @@ export function createView3D(canvas) {
           ...seen.map((p) => Math.max(...seen.map((q) => Math.hypot(p.x - q.x, p.y - q.y)))),
         );
         let n = Math.min(6, Math.max(1, Math.round(extent / 140)));
+        // Over relief the cut is set by the GROUND, not the screen: a tile is
+        // flat only between the terrain's own 10 m cells, so a distant tile
+        // cut once would be a single plane slicing through a ridge.
+        //
+        // Within a budget, though: a 1.2 km place at 10 m was ~35k textured
+        // triangles and 135-198 ms a frame; at 12k it is 34-106 ms (Chrome,
+        // Pizzo Monaco, 2026-11-03) and the picture is not visibly coarser.
+        if (relief) n = Math.min(perTile, Math.max(n, Math.ceil(Math.abs(se.x - nw.x) / 10)));
         if (drag) n = Math.max(1, n >> 1);
 
         for (let i = 0; i < n; i++) {
@@ -527,12 +573,28 @@ export function createView3D(canvas) {
             const U = [[i * su, j * su], [(i + 1) * su, j * su],
                        [(i + 1) * su, (j + 1) * su], [i * su, (j + 1) * su]];
             for (const [m, q, o] of [[0, 1, 2], [0, 2, 3]]) {
-              paintTriangle(img, [P[m], P[q], P[o]], [U[m], U[q], U[o]], dpr);
+              tris.push({ img, P: [P[m], P[q], P[o]], U: [U[m], U[q], U[o]],
+                          depth: P[m].depth + P[q].depth + P[o].depth });
             }
           }
         }
       }
     }
+    // Painter's order, far to near. There is no depth buffer, and on flat
+    // ground nothing overlaps so order never mattered; over a mountain the far
+    // slope and the near one cover the same pixels.
+    if (relief) tris.sort((p, q) => q.depth - p.depth);
+    for (const t of tris) paintTriangle(t.img, t.P, t.U, dpr);
+  }
+
+  // Ground height in the view's metres at a local point: the terrain where
+  // there is some, the flat takeoff plane where there is none at all, and
+  // null -- draw nothing -- where there is terrain but this spot is off it.
+  // A flat apron round a mountain would read as a plateau that is not there.
+  function groundZ(x, y) {
+    if (!relief) return 0;
+    const ll = scene.frame.toLatLon(x, y);
+    return relief(ll.lat, ll.lon);
   }
 
   // One triangle of a tile: solve the affine that carries its three source
@@ -601,8 +663,28 @@ export function createView3D(canvas) {
     ctx.strokeStyle = ground?.on && tiles ? 'rgba(255,255,255,0.13)' : '#1b222b';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let x = gx0; x <= gx1; x += grid) line({ x, y: gy0, z: 0 }, { x, y: gy1, z: 0 }, b, w, h, f);
-    for (let y = gy0; y <= gy1; y += grid) line({ x: gx0, y, z: 0 }, { x: gx1, y, z: 0 }, b, w, h, f);
+    if (relief) {
+      // Draped over the terrain in 10 m steps, the model's own cell, so the
+      // grid IS the mountain's shape when there is no imagery under it.
+      // Broken wherever the ground is unknown rather than bridged across it.
+      const drape = (x0, y0, x1, y1) => {
+        const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 10));
+        let prev = null;
+        for (let k = 0; k <= n; k++) {
+          const x = x0 + ((x1 - x0) * k) / n;
+          const y = y0 + ((y1 - y0) * k) / n;
+          const z = groundZ(x, y);
+          const p = z === null ? null : { x, y, z };
+          if (prev && p) line(prev, p, b, w, h, f);
+          prev = p;
+        }
+      };
+      for (let x = gx0; x <= gx1; x += grid) drape(x, gy0, x, gy1);
+      for (let y = gy0; y <= gy1; y += grid) drape(gx0, y, gx1, y);
+    } else {
+      for (let x = gx0; x <= gx1; x += grid) line({ x, y: gy0, z: 0 }, { x, y: gy1, z: 0 }, b, w, h, f);
+      for (let y = gy0; y <= gy1; y += grid) line({ x: gx0, y, z: 0 }, { x: gx1, y, z: 0 }, b, w, h, f);
+    }
     ctx.stroke();
 
 
@@ -620,12 +702,16 @@ export function createView3D(canvas) {
       ctx.globalAlpha = 0.55;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      for (const q of scene.taps) line({ ...q, z: 0 }, q, b, w, h, f);
+      // A tap's height is above ITS ground, so over relief the disc stands on
+      // the slope where you tapped -- not at that height above the takeoff,
+      // which put a summit tap's stem 400 m down through the rock.
+      const lifted = scene.taps.map((q) => ({ ...q, base: groundZ(q.x, q.y) ?? 0 }));
+      for (const q of lifted) line({ ...q, z: q.base }, { ...q, z: q.base + q.z }, b, w, h, f);
       ctx.stroke();
       ctx.globalAlpha = 1;
       ctx.fillStyle = TAP_COLOR;
-      for (const q of scene.taps) {
-        const v = toView(q, b);
+      for (const q of lifted) {
+        const v = toView({ ...q, z: q.base + q.z }, b);
         if (v.z <= NEAR) continue;
         const p = project(v, w, h, f);
         ctx.beginPath();
@@ -733,9 +819,10 @@ export function createView3D(canvas) {
     }
     wedges.sort((m, n) => n.depth - m.depth);
 
-    const fv = fov(scene.cam);
-    const th = Math.tan(fv.h / 2);
-    const tv = Math.tan(fv.v / 2);
+    // No camera on a bare place, and no wedges to need one.
+    const fv = wedges.length ? fov(scene.cam) : null;
+    const th = fv ? Math.tan(fv.h / 2) : 0;
+    const tv = fv ? Math.tan(fv.v / 2) : 0;
     for (const wd of wedges) {
       const corners = [[1, 1], [1, -1], [-1, -1], [-1, 1]].map(([sx, sy]) => {
         let d = add(wd.o.forward, wd.o.right, sx * th);
@@ -761,7 +848,11 @@ export function createView3D(canvas) {
     // it was the same cube in red.
     if (showCoverage && coverage && scene.hull.length >= 3) {
       const { edges, roof } = gradeFootprint(scene.hull, coverage.samples);
-      const ring = scene.hull.map((q) => toView({ ...q, z: 0 }, b));
+      // On the ground where you drew it. Over relief that is not the takeoff's
+      // height: at Pizzo Monaco the plane at zero hung the footprint 100 m in
+      // the air over the cove it outlines.
+      const foot = scene.hull.map((q) => ({ ...q, z: groundZ(q.x, q.y) ?? 0 }));
+      const ring = foot.map((q) => toView(q, b));
       if (roof && ring.every((v) => v.z > NEAR)) {
         ctx.fillStyle = GRADE_COLOR[roof];
         ctx.globalAlpha = 0.22;
@@ -775,10 +866,10 @@ export function createView3D(canvas) {
       }
       ctx.lineWidth = 3;
       ctx.lineCap = 'round';
-      scene.hull.forEach((q, k) => {
+      foot.forEach((q, k) => {
         ctx.strokeStyle = edges[k] ? GRADE_COLOR[edges[k]] : 'rgba(140,152,166,0.6)';
         ctx.beginPath();
-        line({ ...q, z: 0 }, { ...scene.hull[(k + 1) % scene.hull.length], z: 0 }, b, w, h, f);
+        line(foot[k], foot[(k + 1) % foot.length], b, w, h, f);
         ctx.stroke();
       });
       ctx.lineCap = 'butt';
@@ -1170,6 +1261,9 @@ export function createView3D(canvas) {
     // map is given, from the same place, so the two views cannot disagree about
     // what is on screen.
     setCapture(list) { capture = list ?? []; build(); draw(); },
+    // No draw: the app sets this immediately before setMission, which draws.
+    setRelief(fn) { relief = fn ?? null; },
+    setPlace(p) { place = p ?? null; build(); draw(); },
     // Boxes in the mission's own local metres, each optionally graded by the
     // collision check, plus the legs that earned the grade.
     // `spec` is { on, url(z,x,y), attribution }. Changing the basemap swaps the

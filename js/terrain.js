@@ -307,5 +307,35 @@ export function createTerrain({ fetch = globalThis.fetch?.bind(globalThis) } = {
     checkFlight(m, clr) {
       return grid ? checkTerrain(grid, m, clr) : null;
     },
+    // The ground for the 3D view to draw: (lat, lon) -> metres above the
+    // takeoff, or null off the grid. Same zero as checkFlight -- the min of the
+    // corners under `m`'s first waypoint -- recomputed from `m` rather than
+    // reusing `datum`, which belongs to whichever plan loaded the grid and goes
+    // stale the moment the takeoff moves without a refetch.
+    //
+    // Bilinear, not the conservative corner max: this is a picture, and the
+    // max turns every slope into ten-metre terraces. Nothing judges a flight
+    // by it -- the red legs come from checkFlight.
+    relief(m) {
+      const path = m?.exported ?? m?.waypoints ?? [];
+      if (!grid || !path.length) return null;
+      const home = toUtm32(path[0].lat, path[0].lon);
+      const zero = cornerMin(grid, home.east, home.north);
+      if (zero === null) return null;
+      const g = grid;
+      return (lat, lon) => {
+        const { east, north } = toUtm32(lat, lon);
+        const c = (east - g.e0) / g.cell - 0.5;
+        const r = (g.n0 + g.rows * g.cell - north) / g.cell - 0.5;
+        const c0 = Math.floor(c);
+        const r0 = Math.floor(r);
+        if (c0 < 0 || r0 < 0 || c0 + 1 >= g.cols || r0 + 1 >= g.rows) return null;
+        const u = c - c0;
+        const v = r - r0;
+        const at = (dr, dc) => g.z[(r0 + dr) * g.cols + c0 + dc];
+        const z = (at(0, 0) * (1 - u) + at(0, 1) * u) * (1 - v) + (at(1, 0) * (1 - u) + at(1, 1) * u) * v;
+        return Number.isNaN(z) ? null : z - zero;
+      };
+    },
   };
 }

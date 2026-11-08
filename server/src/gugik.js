@@ -10,11 +10,24 @@
 import { createDownloadCache } from './download.js';
 import { insideRing } from '../../js/prism.js';
 
-const WFS = 'https://mapy.geoportal.gov.pl/wss/service/PZGIK/'
-  + 'DanePomiaroweLidarEVRF2007/WFS/Skorowidze';
+const WFS = (index) => `https://mapy.geoportal.gov.pl/wss/service/PZGIK/${index}/WFS/Skorowidze`;
 
-// Newest first: a 2024 survey beats a 2018 one over the same ground.
-const YEARS = [2026, 2025, 2024, 2023, 2022, 2021, 2020, 2019, 2018];
+// Newest first: a 2024 survey beats a 2018 one over the same ground. Then the
+// older flights, which GUGiK indexes separately by their height datum
+// (Kronstadt 86): only for ground nothing newer covers. Not queried until
+// 2026-11-03, because 32 sampled places all had a 2022+ survey -- and none of
+// them was in the Tatras, where Mnich has exactly one sheet, flown 2012 and
+// indexed only here, so the survey view said "no LiDAR here" over a mountain
+// GUGiK has measured.
+//
+// The two datums differ by centimetres to decimetres across Poland (not
+// measured here). Where both fill one scene there can be a step of that size
+// at the seam, in either direction -- smaller than the clearance and smaller
+// than a 2012 survey's own vertical error, but not zero.
+const SOURCES = [
+  ...[2026, 2025, 2024, 2023, 2022, 2021, 2020, 2019, 2018].map((year) => ({ year, index: 'DanePomiaroweLidarEVRF2007' })),
+  ...[2019, 2018, 2017, 2016, 2015, 2014, 2013, 2012, 2011, 2010].map((year) => ({ year, index: 'DanePomiaroweLidarKRON86' })),
+];
 
 const num = (s) => s.trim().split(/\s+/).map(Number);
 const tag = (xml, name) => (xml.match(new RegExp(`<gugik:${name}>([^<]+)<`)) || [])[1];
@@ -35,11 +48,11 @@ export async function findTiles({ e0, n0, e1, n1 }, { fetchImpl = fetch, signal 
     }
   }
   const chosen = [];
-  for (const year of YEARS) {
+  for (const { year, index } of SOURCES) {
     // BBOX is north,east -- see puwg92.js. The URN form is what pins the axis
     // order; drop it and the server picks, which is how this goes wrong.
     const bbox = `${n0},${e0},${n1},${e1},urn:ogc:def:crs:EPSG::2180`;
-    const url = `${WFS}?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature`
+    const url = `${WFS(index)}?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature`
       + `&TYPENAMES=gugik:SkorowidzDanychPomiarowychLIDAR${year}`
       + `&COUNT=200&BBOX=${encodeURIComponent(bbox)}`;
     let xml;

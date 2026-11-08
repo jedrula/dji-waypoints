@@ -2726,6 +2726,16 @@ console.log('\nthe ground outside Poland (TINITALY)');
   ok('the floor at the summit errs high at both ends',
      near(t.floorAt(38.16718, 12.7568, 5, 0), 530.83 + 5 - 527.03, 0.01), String(t.floorAt(38.16718, 12.7568, 5, 0)));
   ok('and a station over lower ground is not lifted', t.floorAt(38.166677, 12.760448, 5) === 0);
+  // The 3D view's ground: zero at the takeoff's lowest corner, the same zero
+  // the check uses, and recomputed per plan -- taking off at the foot instead
+  // must raise the summit by the 416.6 m between the two datums.
+  const atTop = t.relief(m);
+  const atFoot = t.relief({ exported: [{ ...east, alt: 30 }] });
+  ok('the drawn ground at the takeoff is about the takeoff',
+     Math.abs(atTop(38.16718, 12.7568)) < 4, String(atTop(38.16718, 12.7568)));
+  ok('and moving the takeoff to the foot raises the summit by the difference in datums',
+     near(atFoot(38.16718, 12.7568) - atTop(38.16718, 12.7568), 527.03 - 110.4, 0.05));
+  ok('and off the grid there is no ground drawn, not a flat apron', atTop(38.16718, 12.7700) === null);
   const broke = createTerrain({ fetch: async () => ({ ok: false }) });
   ok('a service that is down leaves nothing checked, not a flat world',
      await broke.ensure(m) === false && broke.checkFlight(m, 5) === null);

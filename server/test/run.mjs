@@ -175,6 +175,19 @@ console.log('\nGUGiK index');
   const edge = (await findTiles(box, { fetchImpl })).map((f) => `${f.year}:${f.url.split('/').pop()}`);
   ok('an older survey fills what the newer leaves', edge.join() === '2025:new-west.laz,2023:old-all.laz', edge.join());
 
+  // Mnich: the only sheet is a 2012 flight, indexed under the Kronstadt 86
+  // datum. Found there -- and only once the EVRF2007 index has had its turn.
+  const kron = [];
+  const kronFetch = async (url) => {
+    kron.push(url);
+    const hit = url.includes('LidarKRON86') && url.includes('LIDAR2012');
+    return { ok: true, text: async () => `<wfs:FeatureCollection>${hit ? member(362500, 362000, 363000, 362500, 'PL-1992', 'https://x/tatry-2012.laz') : ''}</wfs:FeatureCollection>` };
+  };
+  const tatry = (await findTiles(box, { fetchImpl: kronFetch })).map((f) => `${f.year}:${f.url.split('/').pop()}`);
+  ok('ground only the older Kronstadt index covers is found there', tatry.join() === '2012:tatry-2012.laz', tatry.join());
+  ok('after every EVRF2007 year has been asked',
+     kron.findIndex((u) => u.includes('LidarKRON86')) > kron.findLastIndex((u) => u.includes('LidarEVRF2007')));
+
   // The axis-order trap, asserted so it cannot silently regress: BBOX must be
   // north,east, and must carry the URN that pins the order.
   const bbox = decodeURIComponent(calls[0].match(/BBOX=([^&]+)/)[1]);

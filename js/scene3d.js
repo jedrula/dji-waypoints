@@ -3368,7 +3368,14 @@ export function createScene3D(canvas) {
         t.geometry.computeBoundingBox();
         box.union(t.geometry.boundingBox);
       }
-      if (surfaceMesh) box.expandByPoint(new THREE.Vector3(0, 0, 0));
+      // The whole surface, height included. This was the origin alone -- a
+      // point at the datum -- which framed a city block well enough and on
+      // Mnich put the camera 280 m up, inside a face that rises 600 m across
+      // the crop, looking at rock from a few metres away.
+      if (surfaceMesh) {
+        surfaceMesh.geometry.computeBoundingBox();
+        box.union(surfaceMesh.geometry.boundingBox);
+      }
       if (box.isEmpty()) return;
     }
     const centre = box.getCenter(new THREE.Vector3());
@@ -3380,12 +3387,16 @@ export function createScene3D(canvas) {
     // still the subject; it just is not the whole picture.
     const span = Math.max(size.x, size.z, 180) * 1.35;
     const dist = (span / 2) / Math.tan((camera.fov * Math.PI) / 360);
-    controls.target.set(centre.x, 0, centre.z);
+    // At the datum with a flight, which is what its heights count from. With
+    // none, at the middle of the ground's own height range: a valley floor
+    // and a ridge 600 m above it are both the subject, and aiming at the floor
+    // put the ridge off the top of the screen.
+    controls.target.set(centre.x, path.length ? 0 : centre.y, centre.z);
     // 0.62 rad above the horizon, the angle the service's viewer opens at, so
     // the two pictures of the same ground start from the same place. Still low
     // enough that you are looking ACROSS the site -- which is what shows a
     // tower standing beside your orbit -- rather than down on a map of it.
-    camera.position.set(centre.x, dist * Math.sin(0.62), centre.z + dist * Math.cos(0.62));
+    camera.position.set(centre.x, controls.target.y + dist * Math.sin(0.62), centre.z + dist * Math.cos(0.62));
     // The one place update() belongs: the camera was moved from code, so the
     // controls have to be told before the next draw.
     controls.update();

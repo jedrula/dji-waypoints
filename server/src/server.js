@@ -36,6 +36,7 @@ import { createBuildingStore } from './buildings.js';
 import { createMeshStore } from './mesh.js';
 import { createPointSet, MAX_RADIUS_M } from './points.js';
 import { forEachPoint } from './laz.js';
+import { createDtmStore, dtmBox } from './dtm.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = process.env.DATA_DIR ?? path.join(HERE, '..', 'var');
@@ -54,6 +55,7 @@ const orthoStore = createOrthoStore({ dir: path.join(ROOT, 'ortho') });
 const bdotStore = createBdotStore({ dir: path.join(ROOT, 'bdot') });
 const buildingStore = createBuildingStore({ dir: path.join(ROOT, 'budynki3d') });
 const meshStore = createMeshStore({ dir: path.join(ROOT, 'mesh') });
+const dtmStore = createDtmStore({ dir: path.join(ROOT, 'dtm') });
 // One parsed mesh, kept. Parsing is a second and 14 MB, and a session looks at
 // one place; a second entry would double the memory to save nothing.
 const LINES_DIR = path.join(ROOT, 'lines');
@@ -558,6 +560,21 @@ const server = http.createServer(async (req, res) => {
 
     // Overhead lines over a tile. The one obstacle the point cloud cannot see
     // and the one most likely to matter.
+    // GUGiK's 5 m terrain model over a PUWG92 box, as an ASCII grid -- scenery
+    // for the flat 3D view; see src/dtm.js.
+    if (url.pathname === '/v1/dtm') {
+      const box = dtmBox({ e0: Number(q.get('e0')), n0: Number(q.get('n0')),
+                           e1: Number(q.get('e1')), n1: Number(q.get('n1')) });
+      if (!box) return send(res, 400, { error: 'a PUWG92 box up to 4 km on a side' }, origin);
+      try {
+        const text = await dtmStore.grid(box);
+        res.writeHead(200, headers(origin, { 'Content-Type': 'text/plain', 'Cache-Control': 'public, max-age=604800' }));
+        return res.end(text);
+      } catch (err) {
+        return send(res, 502, { error: String(err.message ?? err) }, origin);
+      }
+    }
+
     const lineMatch = url.pathname.match(/^\/v1\/lines\/(-?\d+)\/(-?\d+)$/);
     if (lineMatch) {
       const tn = Number(lineMatch[1]);

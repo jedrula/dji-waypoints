@@ -160,6 +160,44 @@ let lidar = null;
 const terrain = createTerrain();
 let terrainClearedAt = -1;   // the terrain grid ensureClear last ran for
 
+// The ground to LOOK at with no plan: TINITALY round the map centre, in the 3D
+// view. A second loader on purpose, not the one above -- that one's grid and
+// takeoff datum feed the planner's floor and the strike check, and a picture
+// of somewhere you panned to must never become what a plan is measured on.
+const scenery = createTerrain();
+// Half the side of the square shown, in metres. 1.2 km of 10 m cells is the
+// mountain and its foot; the request adds the loader's 150 m margin.
+const PLACE_HALF = 600;
+let placeShown = false;      // the 3D view has ground to show without a plan
+function showPlace() {
+  if (state.mission || activeView === 'map') return;
+  const c = map.getCenter();
+  if (!scenery.covers(c.lat, c.lng)) {
+    placeShown = false;
+    view3d.setPlace(null);
+    renderEmpty3d();
+    return;
+  }
+  const lat = c.lat;
+  const lon = c.lng;
+  const dLat = PLACE_HALF / 111_320;
+  const dLon = PLACE_HALF / (111_320 * Math.cos((lat * Math.PI) / 180));
+  // The loader takes a flight; a centre and two corners are the square's.
+  // The centre goes first because the first point is where heights count from.
+  const m = { exported: [{ lat, lon, alt: 0 }, { lat: lat - dLat, lon: lon - dLon, alt: 0 },
+                         { lat: lat + dLat, lon: lon + dLon, alt: 0 }] };
+  scenery.ensure(m).then(() => {
+    if (state.mission) return;          // a plan arrived while this loaded
+    const relief = scenery.relief(m);
+    // Nothing loaded -- service down, sea under the centre -- is the empty
+    // view as before, not a flat square claiming to be the ground.
+    placeShown = !!relief;
+    view3d.setRelief(relief);
+    view3d.setPlace(relief ? { lat, lon, half: PLACE_HALF } : null);
+    renderEmpty3d();
+  });
+}
+
 // Would this flight come within `clr` of what is known to be there? The
 // survey's answer where there is a survey, the terrain model's elsewhere, and
 // null -- not checked, which is not clear -- where there is neither. Every
@@ -297,7 +335,7 @@ function applyViewCanvases() {
 // it drew nothing at all, and pressing 3D read as a dead button. Say so, and
 // offer the survey, which does have something to show before a plan exists.
 function renderEmpty3d() {
-  const nothing = activeView !== 'map' && groundMode !== 'survey' && !state.mission;
+  const nothing = activeView !== 'map' && groundMode !== 'survey' && !state.mission && !placeShown;
   $('empty3d').hidden = !nothing;
 }
 $('empty3dSurvey').addEventListener('click', () => setGround('survey'));
@@ -331,6 +369,7 @@ function setView(name) {
   if (showMap) map.invalidateSize();
   applyViewCanvases();
   if (show3d && groundMode !== 'survey') view3d.draw();
+  if (show3d) showPlace();
   // Linked, a pane coming on screen joins the other: the 3D comes to the map,
   // and the map -- when it is the one appearing from a 3D-only view -- comes
   // to the 3D.
@@ -430,6 +469,18 @@ function writeUrl() {
 function readUrl() {
   const q = new URLSearchParams(location.search);
   basemaps.set(q.get('b') ?? basemaps.name());
+  // The place first, the view second: opening the 3D asks what ground is
+  // under the map centre (Poland gets the survey, Italy the terrain), and
+  // asked before this it answered for wherever the map happened to start.
+  const [lat, lon] = (q.get('c') ?? '').split(',').map(Number);
+  const zoom = Number(q.get('z'));
+  if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
+      && Number.isFinite(zoom) && zoom >= 1 && zoom <= 22) {
+    // Not animated: opening a link should land where the link says rather than
+    // fly there, and Leaflet's animated path waits on a CSS transition that
+    // never finishes in a tab the browser is not painting.
+    map.setView([lat, lon], zoom, { animate: false });
+  }
   if (['map', 'split', '3d'].includes(q.get('v'))) setView(q.get('v'));
   if (GROUNDS.includes(q.get('s'))) setGround(q.get('s'));
   // Fetched, not just switched on. Restoring `w=1` from a link used to set the
@@ -443,15 +494,6 @@ function readUrl() {
   // the plans that actually exist and then forgets the list, so hiding one
   // does not bring it back on the next render.
   wantShown = (q.get('m') ?? '').split(',').filter(Boolean);
-  const [lat, lon] = (q.get('c') ?? '').split(',').map(Number);
-  const zoom = Number(q.get('z'));
-  if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
-      && Number.isFinite(zoom) && zoom >= 1 && zoom <= 22) {
-    // Not animated: opening a link should land where the link says rather than
-    // fly there, and Leaflet's animated path waits on a CSS transition that
-    // never finishes in a tab the browser is not painting.
-    map.setView([lat, lon], zoom, { animate: false });
-  }
 }
 map.on('moveend', () => { writeUrl(); showRecentre(); });
 
@@ -1203,6 +1245,7 @@ function computePlan() {
     view3d.setMission(null);
     view3d.setObstacles([], []);
     view3d.setVerdict(null);
+    showPlace();
     // The survey view was never told, so Clear cleared the map and the flat
     // view and left the orbits hanging in the mesh.
     lidar?.setMission(null, null);
@@ -1249,6 +1292,9 @@ function computePlan() {
   renderReadout();
   renderIdentity();
   if (state.onDevice) showDeviceRoute(null);
+  // Before setMission, which is what redraws: the ground has to be the one
+  // under THIS plan's takeoff, or the flight floats over yesterday's zero.
+  view3d.setRelief(terrain.relief(state.mission));
   view3d.setMission(state.mission, state.coverage);
   // Nothing solid to draw here any more, but the legs the check flagged are
   // still worth seeing over the flight.
@@ -1676,11 +1722,15 @@ function showDeviceRoute(src) {
   for (const g of Object.values(DEVICE_GROUPS())) g.clearLayers();
   state.onDevice = !src ? null : src.kind === 'device' ? routeFromRead(src.read, cam) : src.mission;
   if (!state.onDevice) {
+    view3d.setRelief(terrain.relief(state.mission));
     view3d.setMission(state.mission, state.coverage);
     view3d.setObstacles([], state.hazard?.legs ?? []);
     return;
   }
   renderPath(state.onDevice, { groups: DEVICE_GROUPS(), dashed: true });
+  // Its own zero: a route off the controller took off from its own first
+  // waypoint, not from the plan's.
+  view3d.setRelief(terrain.relief(state.onDevice));
   view3d.setMission(state.onDevice, null);
   // Ungraded: every grade on screen belongs to the plan, and colouring someone
   // else's route with the plan's verdict would be a lie in the most expensive
@@ -2027,8 +2077,11 @@ try { linked = localStorage.getItem('dji.linked') === '1'; } catch { /* per load
 
 async function point3dAtMap() {
   // The flat view draws the plan, so with no plan it has nowhere to stand;
-  // the survey can show any ground, plan or not.
-  if (!state.mission && groundMode !== 'survey') await setGround('survey');
+  // the survey can show any ground, plan or not -- in Poland. Where TINITALY
+  // reaches, the flat view has terrain of its own (showPlace) and the survey
+  // has nothing: switching there turned Pizzo Monaco into an empty sky.
+  const here = map.getCenter();
+  if (!state.mission && groundMode !== 'survey' && !scenery.covers(here.lat, here.lng)) await setGround('survey');
   // And the survey only has the ground it loaded: a search two kilometres
   // away (Kadzielnia to Emilii Plater) pointed its camera at empty space and
   // the pane went black. With no plan to hold it in place, ground more than
@@ -2087,6 +2140,9 @@ for (const t of ['pointerdown', 'wheel', 'keydown', 'touchstart']) {
 // result is a pointerdown or a keydown there and counts already.)
 map.on('moveend', () => {
   if (moveFromThreeD) return;
+  // Only a move the MAP made: one echoed from orbiting the 3D would move the
+  // place out from under the camera that is looking at it.
+  showPlace();
   if (performance.now() - mapTouchedAt > 1500) return;
   if (linked && activeView !== 'map') point3dAtMap();
 });

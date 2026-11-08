@@ -39,7 +39,7 @@ import { spanQuads, LINE_SPAN } from './lines.js';
 import { checkObstacles } from './collide.js';
 import { createHistory } from './history.js';
 import { surfaceSamples, measureViews, paintedCoverage, bridgeMission } from './views.js';
-import { toPuwg92 } from './puwg92.js';
+import { toPuwg92, inPoland } from './puwg92.js';
 import { createTerrain } from './terrain.js';
 
 import { bestFix, GPS_ERRORS, STALE_MS } from './gps.js';
@@ -340,6 +340,22 @@ function renderEmpty3d() {
 }
 $('empty3dSurvey').addEventListener('click', () => setGround('survey'));
 
+// The survey is GUGiK's LiDAR, so it exists in Poland and nowhere else. It was
+// offered everywhere anyway, and over Capo Calava on 2026-11-08 the 3D view
+// came up on it as an empty sky, with the 2 m Sicilian ground one button
+// away. So outside Poland it is not offered -- not the ground button, not the
+// paint brush that needs it, not the empty view's invitation -- and a view
+// already on it, or a link that asks for it, falls back to imagery.
+function offerSurvey() {
+  const c = map.getCenter();
+  const here = inPoland(c.lat, c.lng);
+  document.querySelector('#groundtabs button[data-ground="survey"]').hidden = !here;
+  $('tipPaint').hidden = !here;
+  $('empty3dSurvey').hidden = !here;
+  $('empty3dSurveyHint').hidden = !here;
+  if (!here && groundMode === 'survey') setGround('imagery');
+}
+
 
 
 function setView(name) {
@@ -482,7 +498,12 @@ function readUrl() {
     map.setView([lat, lon], zoom, { animate: false });
   }
   if (['map', 'split', '3d'].includes(q.get('v'))) setView(q.get('v'));
-  if (GROUNDS.includes(q.get('s'))) setGround(q.get('s'));
+  // Not even opened outside Poland: opening it to close it again put "No
+  // surface -- outside the survey" on screen over Capo Calava.
+  const s = q.get('s');
+  const at = map.getCenter();
+  if (GROUNDS.includes(s) && (s !== 'survey' || inPoland(at.lat, at.lng))) setGround(s);
+  offerSurvey();
   // Fetched, not just switched on. Restoring `w=1` from a link used to set the
   // toggle and draw an empty list, so a shared plan with wires showing arrived
   // with none until you turned them off and on again.
@@ -495,7 +516,7 @@ function readUrl() {
   // does not bring it back on the next render.
   wantShown = (q.get('m') ?? '').split(',').filter(Boolean);
 }
-map.on('moveend', () => { writeUrl(); showRecentre(); });
+map.on('moveend', () => { writeUrl(); showRecentre(); offerSurvey(); });
 
 // Pan far enough and the points you are working on are somewhere off the edge,
 // with nothing on screen to say which way. One tap puts them back.
@@ -1326,6 +1347,10 @@ function syncTerrain(m) {
     // the string, so a second grid does not add it twice.
     map.attributionControl.addAttribution(
       'Terrain: <a href="https://doi.org/10.13127/tinitaly/1.1">TINITALY/1.1</a>, INGV (CC BY 4.0)');
+    if (terrain.source() === 'sitr') {
+      map.attributionControl.addAttribution(
+        'Terrain: <a href="https://www.sitr.regione.sicilia.it/">SITR</a>, Regione Siciliana');
+    }
     computePlan();
     if (state.terrain?.hits && terrain.version() !== terrainClearedAt) {
       terrainClearedAt = terrain.version();
@@ -1517,7 +1542,8 @@ function renderFix() {
     // only picture there is. Bare earth is said too, because the next thing
     // in the way on a Sicilian hillside is a pine the model has never heard of.
     $('hazardWarn').textContent = `${ground} leg${ground === 1 ? '' : 's'} pass within ${clearance()} m of `
-      + 'the ground (TINITALY, 10 m bare earth — no trees or buildings), measured from the ground '
+      + `the ground (${terrain.source() === 'sitr' ? 'Regione Siciliana, 2 m' : 'TINITALY, 10 m'} `
+      + 'bare earth — no trees or buildings), measured from the ground '
       + 'under the first waypoint. Take off there, or every height moves.';
   }
   const btn = $('liftBtn');
@@ -2081,7 +2107,8 @@ async function point3dAtMap() {
   // reaches, the flat view has terrain of its own (showPlace) and the survey
   // has nothing: switching there turned Pizzo Monaco into an empty sky.
   const here = map.getCenter();
-  if (!state.mission && groundMode !== 'survey' && !scenery.covers(here.lat, here.lng)) await setGround('survey');
+  if (!state.mission && groundMode !== 'survey' && !scenery.covers(here.lat, here.lng)
+      && inPoland(here.lat, here.lng)) await setGround('survey');
   // And the survey only has the ground it loaded: a search two kilometres
   // away (Kadzielnia to Emilii Plater) pointed its camera at empty space and
   // the pane went black. With no plan to hold it in place, ground more than

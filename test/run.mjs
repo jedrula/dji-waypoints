@@ -2636,7 +2636,7 @@ console.log('\ncontroller bridge');
 
 console.log('\nthe ground outside Poland (TINITALY)');
 {
-  const { toUtm32, covers, parseAsciiGrid, requestFor, groundAt, checkTerrain, createTerrain } = await import('../js/terrain.js');
+  const { toUtm32, covers, parseAsciiGrid, requestFor, groundAt, checkTerrain, createTerrain, SITR } = await import('../js/terrain.js');
   // Reference values from PROJ 9 (pyproj 3.7.2, EPSG:4326 -> EPSG:32632).
   const pm = toUtm32(38.16718, 12.7568);
   ok('UTM 32 at Pizzo Monaco agrees with PROJ to a centimetre',
@@ -2714,8 +2714,14 @@ console.log('\nthe ground outside Poland (TINITALY)');
      checkTerrain(g, flight(40, { lat: 38.16718, lon: 12.7700 }, east), 5) === null);
 
   // The loader: one request per grid, no claim at all when it fails.
+  // Pizzo Monaco is in Sicily, so the loader asks the Region too. Down, here:
+  // these are TINITALY's numbers, and the Region's being down must leave them.
   let asked = 0;
-  const fake = async () => { asked++; return { ok: true, text: async () => text }; };
+  const fake = async (url) => {
+    if (url.startsWith(SITR)) return { ok: false };
+    asked++;
+    return { ok: true, text: async () => text };
+  };
   const t = createTerrain({ fetch: fake });
   const m = { exported: [{ lat: 38.16718, lon: 12.7568, alt: 30 }, { lat: 38.1672, lon: 12.7572, alt: 30 }] };
   ok('nothing is checked before the ground arrives', t.checkFlight(m, 5) === null && t.floorAt(38.16718, 12.7568, 5) === 0);
@@ -2742,6 +2748,84 @@ console.log('\nthe ground outside Poland (TINITALY)');
   const poland = createTerrain({ fetch: fake });
   ok('and Poland is never asked about here',
      await poland.ensure({ exported: [{ lat: 51.11, lon: 17.03, alt: 30 }] }) === false && asked === 1);
+  ok('with the Region down, the ground is TINITALY\'s', t.source() === 'tinitaly');
+}
+
+console.log('\nthe ground in Sicily (Regione Siciliana, 2 m)');
+{
+  const { toUtm33, sitrCovers, sitrRequestFor, sitrGrid, parseAsciiGrid, groundAt, checkTerrain, createTerrain, SITR } = await import('../js/terrain.js');
+  // Capo Calava, 2026-11-08: the tap on the headland and the top of its north
+  // cliff, 40 m round in the Region's grid and 60 m in TINITALY's.
+  const tap = { lat: 38.191967, lon: 14.915495 };
+  const b = { south: 38.1917, north: 38.1922, west: 14.9150, east: 14.9158 };
+  const req = sitrRequestFor(b, 40);
+  const raw = readFileSync(new URL('./fixtures/sitr-capo-calava.f32', import.meta.url));
+  const buf = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
+  const tText = readFileSync(new URL('./fixtures/tinitaly-capo-calava.asc', import.meta.url), 'utf8');
+  const tini = parseAsciiGrid(tText);
+
+  ok('covers Calava', sitrCovers(tap.lat, tap.lon));
+  ok('but not Rome', !sitrCovers(41.9, 12.5));
+  ok('a request sits on the 2 m lattice, in its native grid at its native size',
+     req.box.e0 % 2 === 0 && req.box.n1 % 2 === 0 && req.url.includes('imageSR=25833')
+     && req.url.includes(`size=${req.cols}%2C${req.rows}`) && req.url.includes('NearestNeighbor'));
+  ok('and a box past 4 km is not asked for', sitrRequestFor({ south: 38.0, north: 38.1, west: 14.8, east: 14.9 }, 0) === null);
+
+  const g = sitrGrid(buf, req, tini);
+  // The point of all this: TINITALY reads the headland a hundred metres low.
+  ok('the headland is there: 118.8 m at the tap', near(groundAt(g, tap.lat, tap.lon), 118.8, 1), String(groundAt(g, tap.lat, tap.lon)));
+  ok('where TINITALY reads 18.5', near(groundAt(tini, tap.lat, tap.lon), 18.5, 0.1), String(groundAt(tini, tap.lat, tap.lon)));
+  ok('the mask band after the floats is not read as ground', g.z.length === req.cols * req.rows);
+
+  // The sea: exactly 0 from the Region, filled from TINITALY, never NaN when
+  // TINITALY is there, never below sea level.
+  const sea = toUtm33(38.1924, 14.9153);
+  const si = Math.floor((g.n0 + g.rows * 2 - sea.north) / 2) * g.cols + Math.floor((sea.east - g.e0) / 2);
+  const rawZ = new Float32Array(buf.slice(0, req.cols * req.rows * 4));
+  ok('past the cliff the Region reads exactly 0', rawZ[si] === 0);
+  ok('and that cell takes TINITALY\'s reading or sea level, not NaN',
+     Number.isFinite(g.z[si]) && g.z[si] >= 0 && g.z[si] < 10, String(g.z[si]));
+  ok('nothing in the grid is NaN once TINITALY is under it', !g.z.some(Number.isNaN));
+  // Float32's lowest is the server's other "no land" -- finite, so it slipped
+  // past a NaN check and into the ground as -3.4e38.
+  ok('the fixture has the server\'s -3.4e38 edge cells', rawZ.filter((v) => v < -1e30).length === 426);
+  ok('and none of them reaches the grid as ground', g.z.every((v) => v >= 0));
+  const alone = sitrGrid(buf, req, null);
+  ok('without TINITALY a sea cell stays unknown rather than flat', Number.isNaN(alone.z[si]));
+  ok('an all-sea answer is no grid, so TINITALY is used as it is',
+     sitrGrid(new ArrayBuffer(req.cols * req.rows * 4), req, tini) === null);
+  let threw = false;
+  try { sitrGrid(new ArrayBuffer(16), req, tini); } catch { threw = true; }
+  ok('a short answer is refused rather than read with zeros on the end', threw);
+
+  // A flight across the headland at 30 m above a takeoff on the beach side:
+  // TINITALY waves it through, the 2 m model strikes it.
+  const foot = { lat: 38.19175, lon: 14.91505 };
+  const flight = { exported: [{ ...foot, alt: 30 }, { ...tap, alt: 30 }] };
+  ok('a leg into the rock that TINITALY calls fine', checkTerrain(tini, flight, 5).hits === 0);
+  ok('is a strike on the 2 m ground', checkTerrain(g, flight, 5).hits === 1);
+
+  // The loader: both asked at once, the Region's grid kept. Its own request is
+  // wider than the fixture, so the Region's answer here is made to the size
+  // asked for: flat land at 200 m, which nothing in TINITALY's fixture is.
+  const asked = [];
+  const regionAt = (h) => async (url) => {
+    asked.push(url.startsWith(SITR) ? 'sitr' : 'tinitaly');
+    if (!url.startsWith(SITR)) return { ok: true, text: async () => tText };
+    const [w, hgt] = new URL(url).searchParams.get('size').split(',').map(Number);
+    return { ok: true, arrayBuffer: async () => new Float32Array(w * hgt).fill(h).buffer };
+  };
+  const one = { exported: [{ ...tap, alt: 30 }] };
+  const t = createTerrain({ fetch: regionAt(200) });
+  ok('in Sicily both models are asked',
+     await t.ensure(one) === true && asked.includes('sitr') && asked.includes('tinitaly'));
+  ok('and the ground is the Region\'s', t.source() === 'sitr' && near(t.relief(one)(tap.lat, tap.lon), 0, 0.01));
+  ok('and a replan inside it does not fetch again', await t.ensure(one) === false && asked.length === 2);
+  const junk = createTerrain({ fetch: async (url) => (url.startsWith(SITR)
+    ? { ok: true, arrayBuffer: async () => new ArrayBuffer(8) }
+    : { ok: true, text: async () => tText }) });
+  ok('a garbled answer from the Region falls back to TINITALY',
+     await junk.ensure(one) === true && junk.source() === 'tinitaly');
 }
 
 console.log(`\n${fails === 0 ? 'ALL PASS' : fails + ' FAILURES'}`);

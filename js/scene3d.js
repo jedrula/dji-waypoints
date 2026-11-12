@@ -33,7 +33,7 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
-import { toPuwg92, toWgs84 } from './puwg92.js';
+import { toPuwg92, toWgs84, inPoland } from './puwg92.js';
 import { tileRange, tileCount, tileBounds, mPerPx, TILE_PX } from './tiles.js';
 import { groundAt, puwgToLocal, localToTile, drapeWire, stitch, localSampler } from './surface.js';
 import { toWgs84 as puwgToWgs84 } from './puwg92.js';
@@ -1578,6 +1578,10 @@ export function createScene3D(canvas) {
   // up or sideways -- not only once it is inside it.
   function checkMesh(m = mission, clr = clearM) {
     if (!heights || !m) return null;
+    // Resampled terrain is a picture to paint on, not the ground a flight is
+    // judged against -- js/terrain.js does that on its own native grid. And it
+    // is bare earth: a leg drawn "clear" of it may still be in a pine.
+    if (loaded?.fromTerrain) return null;
     const path = m.exported ?? m.waypoints ?? [];
     if (!path.length) return null;
     const t0 = performance.now();
@@ -1717,7 +1721,7 @@ export function createScene3D(canvas) {
   // ring only partly seen is lifted by what can be seen of it, and the readout
   // says how much was not.
   function fitRings(clearanceM) {
-    if (!heights || !mission) return null;
+    if (!heights || !mission || loaded?.fromTerrain) return null;
     const rings = mission.heights?.orbit;
     if (!rings?.length) return null;
     const path = mission.exported ?? mission.waypoints ?? [];
@@ -3402,6 +3406,106 @@ export function createScene3D(canvas) {
     controls.update();
   }
 
+  // The ground outside Poland, so it can be painted. Over Capo Calava on
+  // 2026-11-08 the north-west cliff could be found and pointed at, but not
+  // marked: painting lived only on GUGiK's LiDAR. So where the app has a
+  // terrain grid of its own (js/terrain.js -- the Region's 2 m in Sicily), it
+  // is copied into the same `loaded` structure loadFor fills, and the paint,
+  // the heat, the drape and the framing all work on it unchanged.
+  //
+  // In PUWG92, Poland's grid, even in Sicily -- because every one of those
+  // readers speaks it, and it is only a transverse Mercator: measured over
+  // Sicily, lat/lon -> PUWG92 -> lat/lon comes back within 8.5 cm worst case.
+  // The scale and the rotation that far off its meridian are local, and the
+  // same affine maps that already carry a tile into the local frame
+  // (puwgToLocal) absorb them.
+  //
+  // A PICTURE, and for painting. 1 m cells copied nearest-neighbour from a
+  // 2 m grid in another projection are not the grid the flight is judged on,
+  // so this mode never answers checkFlight or floorAt (see `fromTerrain`):
+  // js/terrain.js reads its own grid, natively, for that.
+  let groundSource = null;   // async ({ lat, lon, path }) -> terrain grid | null
+  async function loadFromGround(lat, lon) {
+    const path = mission?.exported ?? mission?.waypoints ?? [{ lat, lon }];
+    const g = await groundSource({ lat, lon, path });
+    if (!g) throw new Error('no terrain model here');
+    let eMin = Infinity; let eMax = -Infinity; let nMin = Infinity; let nMax = -Infinity;
+    for (const w of path) {
+      const q = toPuwg92(w.lat, w.lon);
+      eMin = Math.min(eMin, q.east); eMax = Math.max(eMax, q.east);
+      nMin = Math.min(nMin, q.north); nMax = Math.max(nMax, q.north);
+    }
+    const CELL = 1;
+    const side = Math.min(MAX_SIDE_M, Math.max(eMax - eMin, nMax - nMin) + 2 * MARGIN_M);
+    const N = Math.round(side / CELL);
+    const e0 = Math.round((eMin + eMax) / 2 - side / 2);
+    const n0 = Math.round((nMin + nMax) / 2 - side / 2);
+    const key = `grid|${N}|${e0}|${n0}|${g.e0},${g.n0},${g.cols}`;
+    if (loaded && loaded.key === key) return loaded;
+
+    // PUWG92 -> the grid's own metres, as an affine fitted at the middle:
+    // one inverse and three forward projections, instead of 1.4 M of each.
+    const ec = e0 + side / 2;
+    const nc = n0 + side / 2;
+    const at = (e, n) => { const w = toWgs84(e, n); return g.toGrid(w.lat, w.lon); };
+    const o = at(ec, nc);
+    const de = at(ec + 100, nc);
+    const dn = at(ec, nc + 100);
+    const toG = (e, n) => ({
+      x: o.east + ((e - ec) * (de.east - o.east) + (n - nc) * (dn.east - o.east)) / 100,
+      y: o.north + ((e - ec) * (de.north - o.north) + (n - nc) * (dn.north - o.north)) / 100,
+    });
+    const top = g.n0 + g.rows * g.cell;
+    const z = new Float32Array(N * N).fill(NaN);
+    let base = Infinity;
+    for (let row = 0; row < N; row++) {
+      const n = n0 + side - (row + 0.5) * CELL;
+      for (let col = 0; col < N; col++) {
+        const q = toG(e0 + (col + 0.5) * CELL, n);
+        const gc = Math.floor((q.x - g.e0) / g.cell);
+        const gr = Math.floor((top - q.y) / g.cell);
+        if (gc < 0 || gr < 0 || gc >= g.cols || gr >= g.rows) continue;
+        const v = g.z[gr * g.cols + gc];
+        if (!Number.isFinite(v)) continue;
+        z[row * N + col] = v;
+        if (v < base) base = v;
+      }
+    }
+    if (!Number.isFinite(base)) throw new Error('no terrain model here');
+    const height = new Uint16Array(N * N);
+    const kind = new Uint8Array(N * N);
+    for (let i = 0; i < z.length; i++) {
+      if (Number.isNaN(z[i])) continue;   // kind 0: drawn as unmeasured, not as ground
+      height[i] = Math.min(65535, Math.round((z[i] - base) * 100));
+      // Sea level is water; everything above it is bare earth, which is all a
+      // terrain model knows.
+      kind[i] = z[i] <= 0.05 ? 4 : 1;
+    }
+    const sw = toWgs84(e0, n0);
+    const ne = toWgs84(e0 + side, n0 + side);
+    const meta = {
+      grid: N, cellMetres: CELL, tileMetres: side,
+      origin: { east: e0, north: n0 },
+      base: +base.toFixed(2),
+      bounds: { south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon },
+      tiles: [], wanted: 0, unbuilt: 0,
+      sources: [{ year: g.source === 'sitr' ? 'Regione Siciliana 2 m' : 'TINITALY 10 m' }],
+    };
+    const next = { key, meta, base: meta.base, height, kind, ortho: null, buildings: [], fromTerrain: true };
+    onStatus('Draping the map…');
+    onLoading({ stage: 'Draping the map imagery…', frac: null });
+    try {
+      const got = await basemapTexture(meta);
+      next.ortho = got?.tex ?? null;
+      next.orthoBox = got?.box ?? null;
+      next.orthoMpp = got?.metresPerPixel ?? null;
+    } catch (e) {
+      console.warn('the map could not be draped:', e);
+    }
+    loaded = next;
+    return loaded;
+  }
+
   // One raster over the ground the flight actually crosses, stitched from
   // however many 500 m tiles that takes.
   //
@@ -3996,7 +4100,7 @@ export function createScene3D(canvas) {
     // for the planner's surfaceFloor. 0 off the grid or with none: the planner
     // then keeps its own heights, and the flight check still has the last word.
     floorAt(lat, lon, clr = clearM, reach = clr + 2) {
-      if (!heights?.frame) return 0;
+      if (!heights?.frame || loaded?.fromTerrain) return 0;
       const l = heights.frame.toLocal(lat, lon);
       const R = Math.ceil(reach / HCELL);
       let top = null;
@@ -4028,13 +4132,17 @@ export function createScene3D(canvas) {
     // readout when somebody takes the offer, not computed speculatively.
     fitRings,
 
+    // Where the ground comes from outside Poland: async ({ lat, lon, path })
+    // -> a js/terrain.js grid, or null. See loadFromGround.
+    setGroundSource(fn) { groundSource = fn ?? null; },
+
     // Opening the view is what fetches three.js, the surface and the photo. The
     // first time over new ground that is minutes, and the status says so.
     async open() {
       boot();
       running = true;
       if (chipBox) chipBox.hidden = false;
-      if (!frameOf()) { onStatus('Point the map at somewhere in Poland first.'); return; }
+      if (!frameOf()) { onStatus('Point the map at somewhere first.'); return; }
       // setMission fires on every replan, and a replan lands on every slider
       // tick, so without this a slow first load would be started a hundred
       // times over.
@@ -4045,6 +4153,23 @@ export function createScene3D(canvas) {
       const ctl = new AbortController();
       inFlight = ctl;
       try {
+        // Outside Poland there is no mesh and no LiDAR to ask the service
+        // for, only the app's own terrain grid (loadFromGround).
+        if (groundSource && !inPoland(c.lat0, c.lon0)) {
+          meshMode = false;
+          framedMesh = false;
+          dropMesh();
+          onMesh(null);
+          onStatus('Building the 3D ground from the terrain model…');
+          onLoading({ stage: 'Building the 3D ground…', frac: null });
+          await loadFromGround(c.lat0, c.lon0);
+          buildSurface();
+          onLoading(null);
+          onStatus(`${loaded.meta.sources[0].year} bare earth — no trees or buildings in it. `
+            + 'Paint what you want captured; the flight is still checked against the model itself.');
+          render();
+          return;
+        }
         // The mesh first, always, because where it exists it is the better
         // picture by a wide margin -- centimetres against half a metre, and
         // walls that were photographed rather than inferred. It is asked for

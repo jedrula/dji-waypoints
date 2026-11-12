@@ -2828,6 +2828,74 @@ console.log('\nthe ground in Sicily (Regione Siciliana, 2 m)');
      await junk.ensure(one) === true && junk.source() === 'tinitaly');
 }
 
+console.log('\nthe ground in Portugal (DGT LiDAR through the service)');
+{
+  const { toPtTm06, ptCovers, ptRequestFor, parseDgt, checkTerrain, groundAt, createTerrain } = await import('../js/terrain.js');
+  const { encodeGrid } = await import('../server/src/dgt.js');
+  // DGT's catalogue gives tile 159018's extent as a lat/lon box, south-west
+  // 37.11790267 N -8.594488676 E, north-east 37.12695627 N -8.58318248 E; its
+  // grid lines are e -41000..-40000, n -283000..-282000. A grid square here
+  // sits 0.28 deg off the meridians, so the box reaches 4.9 m past it east
+  // and west -- symmetrically -- and not at all north and south.
+  const c = toPtTm06(37.11790267, -8.594488676);
+  const ne = toPtTm06(37.12695627, -8.58318248);
+  ok('PT-TM06 northings land on DGT\'s tile lines', near(c.north, -283000, 0.1) && near(ne.north, -282000, 0.1), JSON.stringify([c, ne]));
+  ok('and the eastings overhang them equally on both sides, as a rotated square does',
+     near(-41000 - c.east, ne.east + 40000, 0.3) && near(-41000 - c.east, 1000 * Math.tan(0.28 * Math.PI / 180), 0.15), JSON.stringify([c, ne]));
+  ok('covers Alvor', ptCovers(37.1194, -8.5804));
+  ok('but not Sicily or Wroclaw', !ptCovers(38.19, 14.91) && !ptCovers(51.11, 17.03));
+  const req = ptRequestFor({ south: 37.1194, north: 37.1194, west: -8.5804, east: -8.5804 }, 150, 'http://svc');
+  ok('asks the service for a PT-TM06 box', req.url.startsWith('http://svc/v1/dgt?e0=') && req.box.e1 - req.box.e0 === 300 || req.box.e1 - req.box.e0 === 301, req.url);
+
+  // A 200 m square at Alvor, 1 m: ground 2 m, a 40 m tower 40 x 40 m in the
+  // middle, sea along the south edge, and one column no tile covered.
+  const e0 = Math.floor(c.east) + 2000, n0 = Math.floor(c.north) + 1000, N = 200;
+  const surface = new Int16Array(N * N).fill(20), ground = new Int16Array(N * N).fill(20);
+  for (let r = 80; r < 120; r++) for (let k = 80; k < 120; k++) surface[r * N + k] = 420;
+  for (let k = 0; k < N; k++) { surface[(N - 1) * N + k] = 0; ground[(N - 1) * N + k] = 0; }
+  for (let r = 0; r < N; r++) { surface[r * N] = -32768; ground[r * N] = -32768; }
+  const wire = encodeGrid({ cols: N, rows: N, e0, n0, cell: 1, tiles: 1, found: 1, surface, ground });
+  const buf = wire.buffer.slice(wire.byteOffset, wire.byteOffset + wire.byteLength);
+  const g = parseDgt(buf);
+  ok('the service\'s wire format reads back', g.cols === N && g.source === 'dgt' && g.z[100 * N + 100] === 42 && g.ground[100 * N + 100] === 2);
+  ok('a tile nobody had is unknown, not ground', Number.isNaN(g.z[50 * N]) && Number.isNaN(g.ground[50 * N]));
+  // Local metres -> lat/lon, by inverting toPtTm06 numerically (two steps of
+  // Newton are plenty over 200 m).
+  const ll = (e, n) => {
+    let lat = 37.12, lon = -8.57;
+    for (let i = 0; i < 4; i++) {
+      const p = toPtTm06(lat, lon), dLat = 1e-5, dLon = 1e-5;
+      const pa = toPtTm06(lat + dLat, lon), pb = toPtTm06(lat, lon + dLon);
+      const a = (pa.east - p.east) / dLat, b = (pb.east - p.east) / dLon, cc = (pa.north - p.north) / dLat, d = (pb.north - p.north) / dLon;
+      const de = e - p.east, dn = n - p.north, det = a * d - b * cc;
+      lat += (d * de - b * dn) / det; lon += (-cc * de + a * dn) / det;
+    }
+    return { lat, lon };
+  };
+  const tower = ll(e0 + 100.5, n0 + N - 100.5);
+  const west = ll(e0 + 30.5, n0 + N - 100.5);
+  const east = ll(e0 + 170.5, n0 + N - 100.5);
+  ok('the tower is surface, 42 m', groundAt(g, tower.lat, tower.lon) === 42);
+  const fly = (alt) => ({ exported: [{ ...west, alt }, { ...east, alt }] });
+  const low = checkTerrain(g, fly(30), 3);
+  ok('a leg at 30 m over a 40 m tower is a strike', low.hits === 1, JSON.stringify(low.needs));
+  ok('measured from the GROUND under the takeoff, not the surface', near(low.datum, 2, 0.01));
+  ok('and the altitude that clears it is the tower plus the clearance', near(low.needs[1], 42 + 3 - 2, 0.01));
+  ok('flown there, it is clear', checkTerrain(g, fly(low.needs[1]), 3).hits === 0);
+  // The takeoff ON the tower's footprint would read its ground, not its roof.
+  ok('a takeoff beside a parked car is not lifted onto it', checkTerrain(g, { exported: [{ ...tower, alt: 50 }, { ...east, alt: 50 }] }, 3).datum === 2);
+
+  let asked = 0;
+  const t = createTerrain({ service: () => 'http://svc', fetch: async (url) => { asked++; return url.startsWith('http://svc/v1/dgt?') ? { ok: true, arrayBuffer: async () => buf } : { ok: false }; } });
+  ok('the loader covers Portugal when it has a service', t.covers(37.1194, -8.5804));
+  ok('and not without one', !createTerrain({ fetch: async () => ({ ok: false }) }).covers(37.1194, -8.5804));
+  const m = { exported: [{ ...west, alt: 30 }, { ...east, alt: 30 }] };
+  ok('loads the DGT grid', await t.ensure(m) === true && t.source() === 'dgt' && asked === 1);
+  ok('and checks against it', t.checkFlight(m, 3).hits === 1);
+  const down = createTerrain({ service: () => 'http://svc', fetch: async () => ({ ok: false, status: 404 }) });
+  ok('no tiles there: nothing loaded, nothing claimed', await down.ensure(m) === false && down.checkFlight(m, 3) === null);
+}
+
 console.log(`\n${fails === 0 ? 'ALL PASS' : fails + ' FAILURES'}`);
 console.log(`sample kmz: ${kmzPath} (${bytes.length} bytes, ${m.exported.length} waypoints)`);
 process.exit(fails ? 1 : 0);

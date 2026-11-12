@@ -40,7 +40,7 @@ import { checkObstacles } from './collide.js';
 import { createHistory } from './history.js';
 import { surfaceSamples, measureViews, paintedCoverage, bridgeMission } from './views.js';
 import { toPuwg92, inPoland } from './puwg92.js';
-import { createTerrain } from './terrain.js';
+import { createTerrain, sitrCovers, ptCovers } from './terrain.js';
 
 import { bestFix, GPS_ERRORS, STALE_MS } from './gps.js';
 import { serviceUrl, serviceHeaders } from './service.js';
@@ -157,14 +157,18 @@ let loadClock = null;
 let lidar = null;
 // The ground where the survey does not reach. Never both at once: this one
 // declines Poland outright, and the survey has nothing anywhere else.
-const terrain = createTerrain();
+// In Portugal the ground comes through the heights service (DGT's LiDAR,
+// js/terrain.js), so every loader is told where that is.
+const terrain = createTerrain({ service: serviceUrl, headers: serviceHeaders });
 let terrainClearedAt = -1;   // the terrain grid ensureClear last ran for
 
 // The ground to LOOK at with no plan: TINITALY round the map centre, in the 3D
 // view. A second loader on purpose, not the one above -- that one's grid and
 // takeoff datum feed the planner's floor and the strike check, and a picture
 // of somewhere you panned to must never become what a plan is measured on.
-const scenery = createTerrain();
+const scenery = createTerrain({ service: serviceUrl, headers: serviceHeaders });
+// And a third, for the survey view to paint on outside Poland (lidarView).
+const paintGround = createTerrain({ service: serviceUrl, headers: serviceHeaders });
 // Half the side of the square shown, in metres. 1.2 km of 10 m cells is the
 // mountain and its foot; the request adds the loader's 150 m margin.
 const PLACE_HALF = 600;
@@ -259,6 +263,22 @@ async function lidarView() {
     // first tile can load before the view is switched to.
     lidar.setGround(basemaps.groundSpec(true));
     lidar.onPaint(paintToSite);
+    // Outside Poland the survey view draws, and is painted on, the terrain
+    // model instead of LiDAR. A loader of its own, like `scenery`: what you
+    // look at must never become the grid a plan is measured on. 250 m round
+    // the flight (or the point), the view's own margin.
+    lidar.setGroundSource(async ({ path }) => {
+      const lats = path.map((w) => w.lat);
+      const lons = path.map((w) => w.lon);
+      const lat = (Math.min(...lats) + Math.max(...lats)) / 2;
+      const dLat = 250 / mPerDegLat(lat);
+      const dLon = 250 / mPerDegLon(lat);
+      const m = { exported: [{ lat: path[0].lat, lon: path[0].lon, alt: 0 },
+        { lat: Math.min(...lats) - dLat, lon: Math.min(...lons) - dLon, alt: 0 },
+        { lat: Math.max(...lats) + dLat, lon: Math.max(...lons) + dLon, alt: 0 }] };
+      await paintGround.ensure(m);
+      return paintGround.grid();
+    });
     if (state.paint) lidar.restorePaint({ cells: state.paint, selection: savedPaint()?.selection ?? null });
     lidar.onCloud((has, on) => {
       cloudReady = has;
@@ -340,15 +360,19 @@ function renderEmpty3d() {
 }
 $('empty3dSurvey').addEventListener('click', () => setGround('survey'));
 
-// The survey is GUGiK's LiDAR, so it exists in Poland and nowhere else. It was
-// offered everywhere anyway, and over Capo Calava on 2026-11-08 the 3D view
-// came up on it as an empty sky, with the 2 m Sicilian ground one button
-// away. So outside Poland it is not offered -- not the ground button, not the
-// paint brush that needs it, not the empty view's invitation -- and a view
-// already on it, or a link that asks for it, falls back to imagery.
+// The survey view needs ground fine enough to paint on: GUGiK's LiDAR in
+// Poland, the Region's 2 m model in Sicily (scene3d's loadFromGround). It was
+// offered everywhere, and over Capo Calava on 2026-11-08 -- before it could
+// draw the Sicilian ground -- it came up as an empty sky. So where neither
+// exists it is not offered -- not the ground button, not the paint brush that
+// needs it, not the empty view's invitation -- and a view already on it, or a
+// link that asks for it, falls back to imagery.
 function offerSurvey() {
   const c = map.getCenter();
-  const here = inPoland(c.lat, c.lng);
+  // In Poland the LiDAR; in Sicily the Region's 2 m ground, which is fine
+  // enough to paint a cliff on. Not on TINITALY's 10 m alone: it does not
+  // have Capo Calava's 119 m headland at all.
+  const here = inPoland(c.lat, c.lng) || sitrCovers(c.lat, c.lng) || ptCovers(c.lat, c.lng);
   document.querySelector('#groundtabs button[data-ground="survey"]').hidden = !here;
   $('tipPaint').hidden = !here;
   $('empty3dSurvey').hidden = !here;
@@ -502,7 +526,7 @@ function readUrl() {
   // surface -- outside the survey" on screen over Capo Calava.
   const s = q.get('s');
   const at = map.getCenter();
-  if (GROUNDS.includes(s) && (s !== 'survey' || inPoland(at.lat, at.lng))) setGround(s);
+  if (GROUNDS.includes(s) && (s !== 'survey' || inPoland(at.lat, at.lng) || sitrCovers(at.lat, at.lng) || ptCovers(at.lat, at.lng))) setGround(s);
   offerSurvey();
   // Fetched, not just switched on. Restoring `w=1` from a link used to set the
   // toggle and draw an empty list, so a shared plan with wires showing arrived
@@ -1345,11 +1369,17 @@ function syncTerrain(m) {
     if (!changed || !state.mission) return;
     // CC BY 4.0: the licence's one condition is the credit. Leaflet dedupes
     // the string, so a second grid does not add it twice.
-    map.attributionControl.addAttribution(
-      'Terrain: <a href="https://doi.org/10.13127/tinitaly/1.1">TINITALY/1.1</a>, INGV (CC BY 4.0)');
+    if (terrain.source() !== 'dgt') {
+      map.attributionControl.addAttribution(
+        'Terrain: <a href="https://doi.org/10.13127/tinitaly/1.1">TINITALY/1.1</a>, INGV (CC BY 4.0)');
+    }
     if (terrain.source() === 'sitr') {
       map.attributionControl.addAttribution(
         'Terrain: <a href="https://www.sitr.regione.sicilia.it/">SITR</a>, Regione Siciliana');
+    }
+    if (terrain.source() === 'dgt') {
+      map.attributionControl.addAttribution(
+        'LiDAR: <a href="https://www.dgterritorio.gov.pt/">DGT</a> 2024');
     }
     computePlan();
     if (state.terrain?.hits && terrain.version() !== terrainClearedAt) {
@@ -1542,8 +1572,10 @@ function renderFix() {
     // only picture there is. Bare earth is said too, because the next thing
     // in the way on a Sicilian hillside is a pine the model has never heard of.
     $('hazardWarn').textContent = `${ground} leg${ground === 1 ? '' : 's'} pass within ${clearance()} m of `
-      + `the ground (${terrain.source() === 'sitr' ? 'Regione Siciliana, 2 m' : 'TINITALY, 10 m'} `
-      + 'bare earth — no trees or buildings), measured from the ground '
+      + (terrain.source() === 'dgt'
+        ? 'buildings, trees or ground (DGT LiDAR 2024, 1 m — no overhead wires), measured from the ground '
+        : `the ground (${terrain.source() === 'sitr' ? 'Regione Siciliana, 2 m' : 'TINITALY, 10 m'} `
+          + 'bare earth — no trees or buildings), measured from the ground ')
       + 'under the first waypoint. Take off there, or every height moves.';
   }
   const btn = $('liftBtn');

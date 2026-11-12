@@ -37,6 +37,7 @@ import { createMeshStore } from './mesh.js';
 import { createPointSet, MAX_RADIUS_M } from './points.js';
 import { forEachPoint } from './laz.js';
 import { createDtmStore, dtmBox } from './dtm.js';
+import { createDgtStore, dgtBox, encodeGrid } from './dgt.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = process.env.DATA_DIR ?? path.join(HERE, '..', 'var');
@@ -56,6 +57,7 @@ const bdotStore = createBdotStore({ dir: path.join(ROOT, 'bdot') });
 const buildingStore = createBuildingStore({ dir: path.join(ROOT, 'budynki3d') });
 const meshStore = createMeshStore({ dir: path.join(ROOT, 'mesh') });
 const dtmStore = createDtmStore({ dir: path.join(ROOT, 'dtm') });
+const dgtStore = createDgtStore({ dir: path.join(ROOT, 'dgt') });
 // One parsed mesh, kept. Parsing is a second and 14 MB, and a session looks at
 // one place; a second entry would double the memory to save nothing.
 const LINES_DIR = path.join(ROOT, 'lines');
@@ -562,6 +564,23 @@ const server = http.createServer(async (req, res) => {
     // and the one most likely to matter.
     // GUGiK's 5 m terrain model over a PUWG92 box, as an ASCII grid -- scenery
     // for the flat 3D view; see src/dtm.js.
+    // Portugal: DGT's surface and ground over a PT-TM06 box, 1 m, Int16
+    // decimetres -- what js/terrain.js checks a flight against there. See
+    // src/dgt.js.
+    if (url.pathname === '/v1/dgt') {
+      const box = dgtBox({ e0: Number(q.get('e0')), n0: Number(q.get('n0')),
+                           e1: Number(q.get('e1')), n1: Number(q.get('n1')) });
+      if (!box) return send(res, 400, { error: 'a PT-TM06 box up to 2 km on a side' }, origin);
+      try {
+        const g = await dgtStore.grid(box);
+        if (!g.found) return send(res, 404, { error: 'no DGT tiles here' }, origin);
+        res.writeHead(200, headers(origin, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-cache' }));
+        return res.end(encodeGrid(g));
+      } catch (err) {
+        return send(res, 502, { error: String(err.message ?? err) }, origin);
+      }
+    }
+
     if (url.pathname === '/v1/dtm') {
       const box = dtmBox({ e0: Number(q.get('e0')), n0: Number(q.get('n0')),
                            e1: Number(q.get('e1')), n1: Number(q.get('n1')) });

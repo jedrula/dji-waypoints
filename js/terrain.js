@@ -238,6 +238,72 @@ export function sitrGrid(buf, req, under = null) {
   return { cols, rows, e0: box.e0, n0: box.n0, cell: SITR_CELL, z, toGrid: toUtm33, source: 'sitr' };
 }
 
+// Mainland Portugal: DGT's 2024 LiDAR, through the heights service.
+//
+// Not bare earth, for once. DGT publishes the SURFACE (MDS: roofs, canopy,
+// cliff tops) next to the ground (MDT), and the service sends both for a box
+// at 1 m -- the surface pooled by the max, the ground by the min, see
+// server/src/dgt.js. So here the grid's `z` is the surface, which is what a
+// flight can hit, and `ground` is what the takeoff stands on (datumAt). Over
+// Alvor the surface stands up to 47 m above the ground: the beachfront hotels.
+//
+// PT-TM06, EPSG:3763: transverse Mercator on GRS80, central meridian
+// -8.1331083, latitude of origin 39.6682583, scale 1, no false easting.
+// js/tm.js counts northings from the equator, so the latitude of origin
+// becomes a false northing of minus the meridian arc to it -- worked out once
+// here rather than written down as a number nobody can check. Measured
+// against DGT's own catalogue, which gives each 1 km tile's extent as a
+// lat/lon box: over three tiles at Alvor the box's south and north edges land
+// within 0.03 m of the grid lines, and its west and east edges 4.7-4.9 m
+// OUTSIDE them, on both sides. That is not an error in this projection: 80 km
+// west of the central meridian a grid square is rotated 0.28 degrees to the
+// meridians, and the lat/lon box around a rotated square reaches past its
+// corners by 1000 m x tan(0.28 deg) = 4.9 m.
+const PTTM06_BASE = { lon0: (-8.1331083 * Math.PI) / 180, k0: 1, fe: 0, fn: 0, f: GRS80_F };
+const PTTM06 = { ...PTTM06_BASE, fn: -tmFromWgs84(39.6682583, -8.1331083, PTTM06_BASE).north };
+export const toPtTm06 = (lat, lon) => tmFromWgs84(lat, lon, PTTM06);
+
+// The mainland, as a box -- it takes in a strip of Spain, where the service
+// has no tiles and answers 404, which is "nothing loaded", as before.
+export const ptCovers = (lat, lon) => lat > 36.95 && lat < 42.16 && lon > -9.53 && lon < -6.18;
+
+// A request on the service's 1 m lattice. 2 km is its cap.
+export function ptRequestFor(bounds, margin, base) {
+  const corners = [
+    toPtTm06(bounds.south, bounds.west), toPtTm06(bounds.south, bounds.east),
+    toPtTm06(bounds.north, bounds.west), toPtTm06(bounds.north, bounds.east),
+  ];
+  const e = corners.map((c) => c.east);
+  const n = corners.map((c) => c.north);
+  const box = {
+    e0: Math.floor(Math.min(...e) - margin), n0: Math.floor(Math.min(...n) - margin),
+    e1: Math.ceil(Math.max(...e) + margin), n1: Math.ceil(Math.max(...n) + margin),
+  };
+  if (box.e1 - box.e0 > 2000 || box.n1 - box.n0 > 2000) return null;
+  return { box, url: `${base}/v1/dgt?e0=${box.e0}&n0=${box.n0}&e1=${box.e1}&n1=${box.n1}` };
+}
+
+// The service's answer -> a grid. Int16 decimetres; -32768 is a tile nobody
+// has on disk, which is unknown (NaN), never ground.
+export function parseDgt(buf) {
+  const dv = new DataView(buf);
+  const hl = dv.getUint32(0, true);
+  const head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hl)));
+  const at = 4 + hl + ((4 + hl) % 2);
+  const n = head.cols * head.rows;
+  if (buf.byteLength < at + 4 * n) throw new Error('DGT grid short');
+  const s = new Int16Array(buf.slice(at, at + 2 * n));
+  const t = new Int16Array(buf.slice(at + 2 * n, at + 4 * n));
+  const z = new Float32Array(n);
+  const ground = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    z[i] = s[i] === head.nodata ? NaN : s[i] / 10;
+    ground[i] = t[i] === head.nodata ? NaN : t[i] / 10;
+  }
+  return { cols: head.cols, rows: head.rows, e0: head.e0, n0: head.n0, cell: head.cell, z, ground,
+    toGrid: toPtTm06, source: 'dgt' };
+}
+
 // The ground at a point, in metres above sea level: the HIGHEST of the four
 // cell centres around it. A 10 m grid does not know the shape between its
 // samples, and interpolating between them would put a ridge crest lower than
@@ -266,6 +332,11 @@ const cornerMax = (g, e, n) => corners(g, e, n, Math.max);
 // and its own test caught it: at the foot of Pizzo Monaco's east face the four
 // corners span 11.9 m (110.4 to 122.3), all of it on the wrong side.
 const cornerMin = (g, e, n) => corners(g, e, n, Math.min);
+// The takeoff's ground. Where the grid is a SURFACE (Portugal: roofs and
+// canopy) it carries the bare earth alongside, and the takeoff stands on
+// that -- read off the surface, a car parked beside you or the tree you are
+// under would become the zero every altitude is added to.
+const datumAt = (g, e, n) => cornerMin(g.ground ? { ...g, z: g.ground } : g, e, n);
 
 export const groundAt = (g, lat, lon) => {
   const { east, north } = gridXY(g, lat, lon);
@@ -308,7 +379,7 @@ export function checkTerrain(g, m, clr) {
   const path = m?.exported ?? m?.waypoints ?? [];
   if (!g || !path.length) return null;
   const home = gridXY(g, path[0].lat, path[0].lon);
-  const datum = cornerMin(g, home.east, home.north);
+  const datum = datumAt(g, home.east, home.north);
   // No ground under the first waypoint is no zero to measure from at all.
   if (datum === null) return null;
   const pts = path.map((w) => ({ ...gridXY(g, w.lat, w.lon), z: w.alt + datum }));
@@ -352,7 +423,11 @@ export function checkTerrain(g, m, clr) {
 //
 // `fetch` is passed in so test/run.mjs can answer from a fixture instead of
 // asking Pisa.
-export function createTerrain({ fetch = globalThis.fetch?.bind(globalThis) } = {}) {
+//
+// `service` is the heights service's base URL, for Portugal, and `headers`
+// what it wants with every request (its key -- see the gate in
+// server/src/server.js); without a service, Portugal is simply not covered.
+export function createTerrain({ fetch = globalThis.fetch?.bind(globalThis), service = null, headers = null } = {}) {
   let grid = null;
   let datum = null;      // floorAt's zero: the ground under the flight that loaded the grid
   let pending = null;    // the request in flight, by URL, so a replan does not start another
@@ -365,15 +440,20 @@ export function createTerrain({ fetch = globalThis.fetch?.bind(globalThis) } = {
 
   const inside = (b) => {
     if (!grid) return false;
-    const want = grid.source === 'sitr' ? sitrRequestFor(b, 30) : requestFor(b, 30);
+    const want = grid.source === 'sitr' ? sitrRequestFor(b, 30)
+      : grid.source === 'dgt' ? ptRequestFor(b, 30, '') : requestFor(b, 30);
     return want && want.box.e0 >= grid.e0 && want.box.n0 >= grid.n0
       && want.box.e1 <= grid.e0 + grid.cols * grid.cell
       && want.box.n1 <= grid.n0 + grid.rows * grid.cell;
   };
 
+  const pt = (lat, lon) => !!service && ptCovers(lat, lon);
   return {
-    covers,
+    covers: (lat, lon) => pt(lat, lon) || covers(lat, lon),
     ready: () => grid !== null,
+    // The grid itself, for the survey view to draw and paint on outside
+    // Poland (scene3d's loadFromGround). Read-only by convention.
+    grid: () => grid,
     // Which model the ground came from, for the credit and the warning.
     source: () => (grid ? grid.source ?? 'tinitaly' : null),
     version: () => version,
@@ -383,10 +463,37 @@ export function createTerrain({ fetch = globalThis.fetch?.bind(globalThis) } = {
     // existed, with nothing checked and nothing claimed.
     async ensure(m) {
       const path = m?.exported ?? m?.waypoints ?? [];
-      if (!path.length || !fetch || !covers(path[0].lat, path[0].lon)) return false;
+      if (!path.length || !fetch) return false;
       const lats = path.map((w) => w.lat);
       const lons = path.map((w) => w.lon);
       const b = { south: Math.min(...lats), north: Math.max(...lats), west: Math.min(...lons), east: Math.max(...lons) };
+      if (pt(path[0].lat, path[0].lon)) {
+        if (grid?.source === 'dgt' && inside(b)) return false;
+        const preq = ptRequestFor(b, MARGIN, typeof service === 'function' ? service() : service);
+        if (!preq) return false;
+        if (pending?.url === preq.url) return pending.job;
+        const job = (async () => {
+          try {
+            const r = await fetch(preq.url, { headers: headers?.() ?? {} });
+            if (!r.ok) return false;
+            const g = parseDgt(await r.arrayBuffer());
+            const home = gridXY(g, path[0].lat, path[0].lon);
+            const d = datumAt(g, home.east, home.north);
+            if (d === null) return false;
+            grid = g;
+            datum = d;
+            version++;
+            return true;
+          } catch {
+            return false;
+          } finally {
+            pending = null;
+          }
+        })();
+        pending = { url: preq.url, job };
+        return job;
+      }
+      if (!covers(path[0].lat, path[0].lon)) return false;
       if (inside(b)) return false;
       const req = requestFor(b, MARGIN);
       if (!req) return false;
@@ -410,7 +517,7 @@ export function createTerrain({ fetch = globalThis.fetch?.bind(globalThis) } = {
           }
           if (!g) return false;
           const home = gridXY(g, path[0].lat, path[0].lon);
-          const d = cornerMin(g, home.east, home.north);
+          const d = datumAt(g, home.east, home.north);
           if (d === null) return false;
           grid = g;
           datum = d;
@@ -451,7 +558,7 @@ export function createTerrain({ fetch = globalThis.fetch?.bind(globalThis) } = {
       const path = m?.exported ?? m?.waypoints ?? [];
       if (!grid || !path.length) return null;
       const home = gridXY(grid, path[0].lat, path[0].lon);
-      const zero = cornerMin(grid, home.east, home.north);
+      const zero = datumAt(grid, home.east, home.north);
       if (zero === null) return null;
       const g = grid;
       return (lat, lon) => {

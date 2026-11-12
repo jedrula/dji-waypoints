@@ -688,5 +688,40 @@ console.log('\nthe survey as points');
   ok('deterministically', a.body.equals(b.body));
 }
 
+console.log('\nPortugal: DGT surface and ground');
+{
+  const { createDgtStore, dgtBox, tileId, encodeGrid } = await import('../src/dgt.js');
+  ok('tile 159018 is the square whose north-west corner is (-41000, -282000)',
+     tileId(-41000, -283000) === '159018' && tileId(-40000.5, -282000.5) === '159018' && tileId(-39999, -283500) === '160017');
+  // A 1 km tile, 0.5 m cells, as DGT's rasters read: ground 10 m, one 0.5 m
+  // chimney 30 m up on a 12 m roof, and a strip of sea (-3.4e38) along the
+  // south edge.
+  const N = 2000;
+  const NO = -3.4028234663852886e38;
+  const S = new Float32Array(N * N).fill(10);
+  const T = new Float32Array(N * N).fill(10);
+  for (let r = 400; r < 420; r++) for (let c = 600; c < 620; c++) S[r * N + c] = 12;
+  S[410 * N + 611] = 30;
+  for (let r = 1990; r < N; r++) for (let c = 0; c < N; c++) { S[r * N + c] = NO; T[r * N + c] = NO; }
+  const load = async (kind, id) => (id === '159018'
+    ? { z: kind === 'MDS' ? S : T, w: N, h: N, ox: -41000, oy: -282000 } : null);
+  const store = createDgtStore({ dir: null, load });
+  const g = await store.grid(dgtBox({ e0: -41000, n0: -283000, e1: -40000, n1: -282000 }));
+  const at = (e, n) => { const c = Math.floor(e + 41000), r = Math.floor(-282000 - n); return [g.surface[r * 1000 + c] / 10, g.ground[r * 1000 + c] / 10]; };
+  ok('read as 1 m cells from 0.5 m', g.cols === 1000 && g.rows === 1000 && g.found === 1);
+  // The chimney is one 0.5 m cell: pooled by the max it survives at 1 m.
+  ok('a chimney narrower than a cell is kept, not averaged away', at(-41000 + 305.7, -282000 - 205.2)[0] === 30, String(at(-40694.3, -282205.2)));
+  ok('the roof around it reads 12 m', at(-41000 + 302.5, -282000 - 201.5)[0] === 12);
+  ok('and the ground under it 10 m', at(-41000 + 302.5, -282000 - 201.5)[1] === 10);
+  ok('the sea mask is sea level, not a hole', at(-40500, -282999)[0] === 0 && at(-40500, -282999)[1] === 0);
+  const off = await store.grid(dgtBox({ e0: -39000, n0: -283000, e1: -38500, n1: -282500 }));
+  ok('a tile not on disk is no data at all, not sea', off.found === 0 && off.surface.every((v) => v === -32768));
+  ok('a box past 2 km is not served', dgtBox({ e0: 0, n0: 0, e1: 2500, n1: 10 }) === null);
+  const buf = encodeGrid(g);
+  const hl = buf.readUInt32LE(0);
+  const head = JSON.parse(buf.subarray(4, 4 + hl).toString());
+  ok('the wire header says what follows', head.cols === 1000 && head.unit === 'dm' && buf.length === 4 + hl + ((4 + hl) % 2) + 4 * 1000 * 1000);
+}
+
 console.log(`\n${fails === 0 ? 'ALL PASS' : `${fails} FAILURES`}`);
 process.exit(fails ? 1 : 0);

@@ -19,11 +19,28 @@
 // measured from.
 
 import { toPuwg92, toWgs84 } from './puwg92.js';
+import { tmFromWgs84, tmToWgs84 } from './tm.js';
+
+// The projected grid the survey view works in. PUWG92 for GUGiK's LiDAR,
+// which is where every tile, crop and paint cell in it came from. Outside
+// Poland (scene3d's loadFromGround) it cannot be: PUWG92 is a transverse
+// Mercator on 19 E, and its round trip measured 0.0 m over Sicily (4 degrees
+// off) but 2,562 m at Alvor (27 degrees off) -- the 3D view came up empty
+// there, every cell sampled from the wrong kilometre. So that mode works in a
+// transverse Mercator centred on the site itself, where the series is exact
+// to well under a millimetre. One view, one projection at a time.
+export const PUWG92_PROJ = { fwd: toPuwg92, inv: toWgs84, name: 'PUWG92' };
+export function siteProjection(lon) {
+  const p = { lon0: (lon * Math.PI) / 180, k0: 1, fe: 500000, fn: 0 };
+  return { fwd: (lat, lo) => tmFromWgs84(lat, lo, p), inv: (e, n) => tmToWgs84(e, n, p), name: `TM ${lon.toFixed(3)}` };
+}
+export const proj = { ...PUWG92_PROJ };
+export function setProjection(p) { Object.assign(proj, p); }
 
 // Row 0 is the tile's NORTH edge, so north and row run opposite ways. Getting
 // this backwards mirrors the whole tile, which looks plausible and is not.
 export function cellAt(meta, lat, lon) {
-  const { east, north } = toPuwg92(lat, lon);
+  const { east, north } = proj.fwd(lat, lon);
   return {
     col: Math.round((east - meta.origin.east) / meta.cellMetres),
     row: Math.round((meta.origin.north + meta.tileMetres - north) / meta.cellMetres),
@@ -54,7 +71,7 @@ export function groundAt(meta, height, lat, lon) {
 // centimetre" here before measuring it, which was wrong by a factor of five.
 export function puwgToLocal(frame, e0, n0) {
   const at = (e, n) => {
-    const g = toWgs84(e, n);
+    const g = proj.inv(e, n);
     return frame.toLocal(g.lat, g.lon);
   };
   const o = at(e0, n0);
@@ -152,7 +169,7 @@ export function stitch(parts, { e0, n0, side, cell }) {
 // asking for is a patch of the tile.
 export function localToTile(frame, e0, n0) {
   const at = (e, n) => {
-    const g = toWgs84(e, n);
+    const g = proj.inv(e, n);
     return frame.toLocal(g.lat, g.lon);
   };
   const o = at(e0, n0);

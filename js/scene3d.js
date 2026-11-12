@@ -33,10 +33,9 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
-import { toPuwg92, toWgs84, inPoland } from './puwg92.js';
+import { inPoland } from './puwg92.js';
 import { tileRange, tileCount, tileBounds, mPerPx, TILE_PX } from './tiles.js';
-import { groundAt, puwgToLocal, localToTile, drapeWire, stitch, localSampler } from './surface.js';
-import { toWgs84 as puwgToWgs84 } from './puwg92.js';
+import { groundAt, puwgToLocal, localToTile, drapeWire, stitch, localSampler, proj, setProjection, siteProjection, PUWG92_PROJ } from './surface.js';
 import { serviceUrl, serviceHeaders } from './service.js';
 import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, VERDICT_COLOR, TAP_COLOR, asHex } from './palette.js';
 import { fov, orientation } from './camera.js';
@@ -177,7 +176,7 @@ export function createScene3D(canvas) {
   // cannot disagree with themselves.
   const meshCovers = [];    // { eMin, eMax, nMin, nMax }
   const covered = (lat, lon) => {
-    const p = toPuwg92(lat, lon);
+    const p = proj.fwd(lat, lon);
     return meshCovers.some((b) => p.east >= b.eMin && p.east <= b.eMax
       && p.north >= b.nMin && p.north <= b.nMax);
   };
@@ -653,8 +652,8 @@ export function createScene3D(canvas) {
     const b = box ?? { e0: 0, n0: 0, e1: span, n1: span };
     const { east: E0, north: N0 } = meta.origin;
     // The patch, in lat/lon, for choosing a zoom and listing the tiles.
-    const sw = toWgs84(E0 + b.e0, N0 + b.n0);
-    const ne = toWgs84(E0 + b.e1, N0 + b.n1);
+    const sw = proj.inv(E0 + b.e0, N0 + b.n0);
+    const ne = proj.inv(E0 + b.e1, N0 + b.n1);
     const bbox = { south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon };
 
     // 2048 across the patch. Over a whole tile that is 24 cm a pixel -- what
@@ -707,7 +706,7 @@ export function createScene3D(canvas) {
       if (!img) continue;
       const b = tileBounds(z, jobs[i].tx, jobs[i].ty);
       const corner = (lat, lon) => {
-        const g = toPuwg92(lat, lon);
+        const g = proj.fwd(lat, lon);
         return px(g.east, g.north);
       };
       // The tile's top-left, top-right and bottom-left, in canvas pixels.
@@ -804,7 +803,7 @@ export function createScene3D(canvas) {
       ?? [{ lat: frame.lat0, lon: frame.lon0 }];
     let eMin = Infinity; let eMax = -Infinity; let nMin = Infinity; let nMax = -Infinity;
     for (const w of path) {
-      const p = toPuwg92(w.lat, w.lon);
+      const p = proj.fwd(w.lat, w.lon);
       if (p.east < eMin) eMin = p.east;
       if (p.east > eMax) eMax = p.east;
       if (p.north < nMin) nMin = p.north;
@@ -1134,8 +1133,8 @@ export function createScene3D(canvas) {
     // time two different points in one tile were clicked.
     const here = Number.isFinite(meta?.origin?.east) && Number.isFinite(meta?.origin?.north)
       ? { east: meta.origin.east, north: meta.origin.north }
-      : toPuwg92(lat, lon);
-    const home = toPuwg92(lat0, lon0);
+      : proj.fwd(lat, lon);
+    const home = proj.fwd(lat0, lon0);
     const toLocal = puwgToLocal(frameOf(), home.east, home.north);
     const datum = meshDatum(position, nv);
     const box = { eMin: Infinity, eMax: -Infinity, nMin: Infinity, nMax: -Infinity };
@@ -1255,7 +1254,7 @@ export function createScene3D(canvas) {
   const TILE_REACH = 700;                // metres from home, so another city's tiles stay there
 
   const tileKey = (lat, lon) => {
-    const p = toPuwg92(lat, lon);
+    const p = proj.fwd(lat, lon);
     return `${Math.round(p.east / PAD)},${Math.round(p.north / PAD)}`;
   };
 
@@ -1278,10 +1277,10 @@ export function createScene3D(canvas) {
   // Fetched one at a time on purpose: eight parallel 7 MB requests is a way to
   // make the first tile arrive later than it has to.
   async function restoreTiles({ signal } = {}) {
-    const home = toPuwg92(frameOf().lat0, frameOf().lon0);
+    const home = proj.fwd(frameOf().lat0, frameOf().lon0);
     const near = readTiles()
       .map((t) => {
-        const p = toPuwg92(t.lat, t.lon);
+        const p = proj.fwd(t.lat, t.lon);
         return { ...t, d: Math.hypot(p.east - home.east, p.north - home.north) };
       })
       .filter((t) => t.d <= TILE_REACH && !covered(t.lat, t.lon))
@@ -1370,8 +1369,8 @@ export function createScene3D(canvas) {
   // frame behind.
   function rebaseMesh(from, to) {
     if (!meshTiles.size) return;
-    const a = toPuwg92(from.lat0, from.lon0);
-    const b = toPuwg92(to.lat0, to.lon0);
+    const a = proj.fwd(from.lat0, from.lon0);
+    const b = proj.fwd(to.lat0, to.lon0);
     const de = a.east - b.east;
     const dn = a.north - b.north;
     if (Math.hypot(de, dn) < 0.01) return;
@@ -1446,7 +1445,7 @@ export function createScene3D(canvas) {
     hoverPad = null;
     if (!meshMode || !meshTiles.size || !frameOf()) return;
     const { lat0, lon0 } = frameOf();
-    const home = toPuwg92(lat0, lon0);
+    const home = proj.fwd(lat0, lon0);
     const toLocal = puwgToLocal(frameOf(), home.east, home.north);
     const back = localToTile(frameOf(), home.east, home.north);
 
@@ -1797,7 +1796,7 @@ export function createScene3D(canvas) {
       return;
     }
     const g = f.toLatLon(hit.point.x, -hit.point.z);
-    const c = toPuwg92(g.lat, g.lon);
+    const c = proj.fwd(g.lat, g.lon);
     let grew = false;
     for (let e = Math.floor((c.east - r) / PAINT_CELL); e <= Math.floor((c.east + r) / PAINT_CELL); e++) {
       for (let n = Math.floor((c.north - r) / PAINT_CELL); n <= Math.floor((c.north + r) / PAINT_CELL); n++) {
@@ -1806,7 +1805,7 @@ export function createScene3D(canvas) {
         if (Math.hypot(ce - c.east, cn - c.north) > r) continue;
         const key = `${e},${n}`;
         if (painted.has(key)) continue;
-        const ll = puwgToWgs84(ce, cn);
+        const ll = proj.inv(ce, cn);
         painted.set(key, { lat: ll.lat, lon: ll.lon, y: hit.point.y });
         grew = true;
       }
@@ -1989,7 +1988,7 @@ export function createScene3D(canvas) {
     // own -- is the same ground: re-placed by buildCloud, not fetched again.
     // Keyed on the origin, the stroke threw the points away mid-paint and the
     // view sat on the dark backing for the length of a rebuild.
-    const here = toPuwg92(f.lat0, f.lon0);
+    const here = proj.fwd(f.lat0, f.lon0);
     if (cloud?.meta && Math.hypot(here.east - cloud.meta.e, here.north - cloud.meta.n) < 60) return;
     const key = `${f.lat0.toFixed(4)},${f.lon0.toFixed(4)}`;
     if (cloudFor === key) return;
@@ -2477,10 +2476,10 @@ export function createScene3D(canvas) {
       if (!pad) return;
 
       const { lat0, lon0 } = frameOf();
-      const home = toPuwg92(lat0, lon0);
+      const home = proj.fwd(lat0, lon0);
       const { e, n } = pad.object.userData.at;
       const key = pad.object.userData.key;
-      const g = puwgToWgs84(home.east + e, home.north + n);
+      const g = proj.inv(home.east + e, home.north + n);
 
       // One fetch per square. A second click started a second download of the
       // same 19 MB, and whichever finished last won -- which on a slow day is
@@ -3413,12 +3412,10 @@ export function createScene3D(canvas) {
   // is copied into the same `loaded` structure loadFor fills, and the paint,
   // the heat, the drape and the framing all work on it unchanged.
   //
-  // In PUWG92, Poland's grid, even in Sicily -- because every one of those
-  // readers speaks it, and it is only a transverse Mercator: measured over
-  // Sicily, lat/lon -> PUWG92 -> lat/lon comes back within 8.5 cm worst case.
-  // The scale and the rotation that far off its meridian are local, and the
-  // same affine maps that already carry a tile into the local frame
-  // (puwgToLocal) absorb them.
+  // In a transverse Mercator centred on the site, not PUWG92: every reader
+  // here goes through surface.js's `proj`, and PUWG92 is 2.6 km out by
+  // Portugal (see siteProjection). The paint cells, the crop and the drape
+  // are all in whichever projection is current.
   //
   // A PICTURE, and for painting. 1 m cells copied nearest-neighbour from a
   // 2 m grid in another projection are not the grid the flight is judged on,
@@ -3431,7 +3428,7 @@ export function createScene3D(canvas) {
     if (!g) throw new Error('no terrain model here');
     let eMin = Infinity; let eMax = -Infinity; let nMin = Infinity; let nMax = -Infinity;
     for (const w of path) {
-      const q = toPuwg92(w.lat, w.lon);
+      const q = proj.fwd(w.lat, w.lon);
       eMin = Math.min(eMin, q.east); eMax = Math.max(eMax, q.east);
       nMin = Math.min(nMin, q.north); nMax = Math.max(nMax, q.north);
     }
@@ -3447,7 +3444,7 @@ export function createScene3D(canvas) {
     // one inverse and three forward projections, instead of 1.4 M of each.
     const ec = e0 + side / 2;
     const nc = n0 + side / 2;
-    const at = (e, n) => { const w = toWgs84(e, n); return g.toGrid(w.lat, w.lon); };
+    const at = (e, n) => { const w = proj.inv(e, n); return g.toGrid(w.lat, w.lon); };
     const o = at(ec, nc);
     const de = at(ec + 100, nc);
     const dn = at(ec, nc + 100);
@@ -3481,8 +3478,8 @@ export function createScene3D(canvas) {
       // terrain model knows.
       kind[i] = z[i] <= 0.05 ? 4 : 1;
     }
-    const sw = toWgs84(e0, n0);
-    const ne = toWgs84(e0 + side, n0 + side);
+    const sw = proj.inv(e0, n0);
+    const ne = proj.inv(e0 + side, n0 + side);
     const meta = {
       grid: N, cellMetres: CELL, tileMetres: side,
       origin: { east: e0, north: n0 },
@@ -3536,12 +3533,12 @@ export function createScene3D(canvas) {
       ?? [{ lat: frameOf().lat0, lon: frameOf().lon0 }];
     let eMin = Infinity; let eMax = -Infinity; let nMin = Infinity; let nMax = -Infinity;
     for (const w of path) {
-      const q = toPuwg92(w.lat, w.lon);
+      const q = proj.fwd(w.lat, w.lon);
       eMin = Math.min(eMin, q.east); eMax = Math.max(eMax, q.east);
       nMin = Math.min(nMin, q.north); nMax = Math.max(nMax, q.north);
     }
     if (!Number.isFinite(eMin)) {
-      const q = toPuwg92(lat, lon);
+      const q = proj.fwd(lat, lon);
       eMin = eMax = q.east; nMin = nMax = q.north;
     }
     const CELL = 0.5;
@@ -3659,8 +3656,8 @@ export function createScene3D(canvas) {
       origin: { east: e0, north: n0 },
       base: +base.toFixed(2),
       bounds: (() => {
-        const sw = toWgs84(e0, n0);
-        const ne = toWgs84(e0 + side, n0 + side);
+        const sw = proj.inv(e0, n0);
+        const ne = proj.inv(e0 + side, n0 + side);
         return { south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon };
       })(),
       // Which tiles this is made of, so the buildings can be asked for per tile
@@ -3889,7 +3886,7 @@ export function createScene3D(canvas) {
     restorePaint({ cells = [], selection = null } = {}) {
       painted.clear();
       for (const c of cells) {
-        const q = toPuwg92(c.lat, c.lon);
+        const q = proj.fwd(c.lat, c.lon);
         painted.set(`${Math.floor(q.east / PAINT_CELL)},${Math.floor(q.north / PAINT_CELL)}`, c);
       }
       pendingSel = selection;
@@ -4156,6 +4153,8 @@ export function createScene3D(canvas) {
         // Outside Poland there is no mesh and no LiDAR to ask the service
         // for, only the app's own terrain grid (loadFromGround).
         if (groundSource && !inPoland(c.lat0, c.lon0)) {
+          // Before anything is projected: see siteProjection in surface.js.
+          if (proj.name !== siteProjection(c.lon0).name) { setProjection(siteProjection(c.lon0)); loaded = null; }
           meshMode = false;
           framedMesh = false;
           dropMesh();
@@ -4170,6 +4169,7 @@ export function createScene3D(canvas) {
           render();
           return;
         }
+        if (proj.name !== PUWG92_PROJ.name) { setProjection(PUWG92_PROJ); loaded = null; }
         // The mesh first, always, because where it exists it is the better
         // picture by a wide margin -- centimetres against half a metre, and
         // walls that were photographed rather than inferred. It is asked for

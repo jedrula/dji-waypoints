@@ -27,9 +27,21 @@ area with RTH set sensibly.
       it is worth knowing. Currently labelled "unverified" in the UI and never
       auto-proposed unless waypoint mode cannot fit. Test: fly a small grid in
       interval mode, count the images on the card.
-- [ ] **Frames per stop = 3 (pitch fan).** Emits 3 `gimbalRotate` + 3 `takePhoto`
-      actions in one waypoint's action group. Unknown whether DJI Fly caps
-      actions per waypoint — if it does, find the cap and clamp the fan.
+- [ ] **Frames per stop = 3 (pitch fan) — probably broken; delete it.** Emits 3
+      `gimbalRotate` + 3 `takePhoto` in one waypoint's action group. Flown
+      2026-11-08 at the Belvedere, Gioiosa Marea, a 20 x 20 m grid whose first
+      stop carried 5 x (`rotateYaw`, `takePhoto`) then a `gimbalRotate` to -90
+      and a sixth `takePhoto`: 15 photos instead of 20, in three timed runs of
+      five (one per column), and that stop's one photo is nadir (the LAST
+      gimbal setting) at the travel heading, 2 s before the next stop. DJI Fly
+      on the Mini 5 Pro ran neither the turns nor the extra shutters. The pitch
+      fan uses the same multi-`takePhoto` group, so it is almost certainly one
+      frame, not three. Not yet flown on its own; if confirmed, remove
+      `shotsPerStop` and README's "best buy in the table".
+- [ ] **A heading fan needs a waypoint per heading.** `rotateYaw` inside a
+      waypoint is ignored (above), so a cliff station that must look straight
+      at the rock and to either side is several co-located waypoints, each its
+      own `smoothTransition` heading, each counted against the 200.
 - [ ] **Does the fan actually help?** Compare a single-frame capture against a
       3-frame capture of the same subject through the same 3DGS pipeline. The
       prediction is that it improves facade/roofline coverage but not geometry,

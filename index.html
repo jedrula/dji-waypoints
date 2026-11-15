@@ -67,13 +67,9 @@
 
   <main id="stage">
     <div id="map"></div>
-    <canvas id="scene" hidden></canvas>
-    <!-- The other 3D: the LiDAR surface, in WebGL. Same box as #scene and only
-         one of them is ever on screen. -->
+    <!-- The 3D view, in WebGL (js/scene3d.js). -->
     <canvas id="lidar" hidden></canvas>
     <div id="toast" hidden></div>
-    <!-- The 3D view with no plan used to be a black pane, and clicking 3D read as
-         a dead button. Shown over the 3D pane only while it has nothing to draw. -->
     <!-- What the survey view is waiting for: a card over the pane while there
          is nothing to look at, a pill in its corner while the detail streams in
          over a picture that is already up. See onLoading in js/scene3d.js. -->
@@ -89,12 +85,6 @@
     <div id="paintView" hidden>
       <button type="button" data-view="painted">Painted</button>
       <button type="button" data-view="captured" class="on">Will be captured</button>
-    </div>
-    <div id="empty3d" hidden>
-      <p>Nothing to show in 3D yet.</p>
-      <p class="hint">Tap the map on what you want captured and the flight appears here —
-        <span id="empty3dSurveyHint">or look at the ground first in the LiDAR survey.</span></p>
-      <button id="empty3dSurvey" type="button">Show the survey here</button>
     </div>
     <div id="splitter" hidden></div>
     <div id="viewtabs">
@@ -121,32 +111,6 @@
     <!-- What the flight is drawn over. One setting with three answers rather
          than two toggles that can disagree: nothing, the map's own photograph,
          or the LiDAR survey with the flight inside it. -->
-    <div id="groundtabs" hidden>
-      <button type="button" data-ground="simple"
-              title="No ground — just the grid and the flight">
-        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
-             stroke-width="1.6" stroke-linecap="round">
-          <path d="M3 9h18M3 15h18M9 3v18M15 3v18"/>
-        </svg>
-      </button>
-      <button type="button" data-ground="imagery" class="on"
-              title="The map's own imagery, painted flat under the flight">
-        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
-             stroke-width="1.7" stroke-linejoin="round">
-          <path d="M3 8.5 12 4l9 4.5-9 4.5z"/>
-          <path d="M3 13.5 12 18l9-4.5"/>
-        </svg>
-      </button>
-      <button type="button" data-ground="survey"
-              title="The LiDAR survey, with the flight inside it">
-        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
-             stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 17.5 8 12l3.5 3L16 8.5 21 15"/>
-          <path d="M3 20.5h18"/>
-          <circle cx="16" cy="5" r="1.6"/>
-        </svg>
-      </button>
-    </div>
     <!-- Link the two views: on, either one moving moves the other to the same
          ground at the same scale, straight down and north up like the map. Off,
          they are independent -- you can pan the map to the next thing while

@@ -26,7 +26,6 @@ import { frame, mPerDegLat, mPerDegLon } from './geo.js';
 import { mPerPx } from './tiles.js';
 import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, TAP_COLOR, passColour } from './palette.js';
 import { buildKmz } from './wpml.js';
-import { createView3D } from './view3d.js';
 import { scoreCoverage } from './coverage.js';
 import { initInstall } from './install.js';
 import { encodePlan, decodePlan } from './share.js';
@@ -128,24 +127,15 @@ const layers = {
 const basemaps = createBasemaps({ map, onChange: () => { pushGround(); writeUrl(); } });
 
 /* ---------- 3D ---------- */
-const view3d = createView3D($('scene'));
+// One 3D view, js/scene3d.js, over the best ground known: the photogrammetric
+// mesh or GUGiK's LiDAR in Poland, the terrain grid in Sicily and Portugal,
+// and the map's photo laid flat anywhere else. There were two renderers until
+// 2026-11-15 -- this one for the survey and a hand-drawn canvas (view3d.js)
+// for "imagery" and "grid" -- and the same mission came out with different
+// frustums, dots, labels and colours in each. Andrzej: "those changes are
+// not necessary, aim for best ux". The canvas one is gone, and so is the
+// choice of ground: the best one is the only one worth looking at.
 let activeView = 'map';
-// What the flight is drawn over. Three answers to one question, so one setting
-// rather than two toggles that can disagree about it:
-//
-//   simple    the grid, and nothing else
-//   imagery   the map's own tiles on a flat plane -- a photograph of the ground
-//   survey    the LiDAR as a real surface, with the flight inside it
-//
-// `imagery` is the default. It was opt-in while it was the only thing this view
-// could put under a flight and it looked like a debug overlay; a flight over
-// bare grid is the least useful of the three.
-//
-// `survey` is a different renderer, not a different layer -- see js/scene3d.js
-// -- and its module is not even fetched until it is first picked, because it
-// brings three.js with it and nobody planning over imagery needs the megabyte.
-const GROUNDS = ['simple', 'imagery', 'survey'];
-let groundMode = 'imagery';
 let paintOn = false;   // a left-drag on the survey paints; see "painting"
 let cloudReady = false; // the survey view has this ground as points
 // The five detail notches; see "Detail" further down for what and why.
@@ -169,46 +159,8 @@ let lidar = null;
 const terrain = createTerrain({ service: serviceUrl, headers: serviceHeaders });
 let terrainClearedAt = -1;   // the terrain grid ensureClear last ran for
 
-// The ground to LOOK at with no plan: TINITALY round the map centre, in the 3D
-// view. A second loader on purpose, not the one above -- that one's grid and
-// takeoff datum feed the planner's floor and the strike check, and a picture
-// of somewhere you panned to must never become what a plan is measured on.
-const scenery = createTerrain({ service: serviceUrl, headers: serviceHeaders });
 // And a third, for the survey view to paint on outside Poland (lidarView).
 const paintGround = createTerrain({ service: serviceUrl, headers: serviceHeaders });
-// Half the side of the square shown, in metres. 1.2 km of 10 m cells is the
-// mountain and its foot; the request adds the loader's 150 m margin.
-const PLACE_HALF = 600;
-let placeShown = false;      // the 3D view has ground to show without a plan
-function showPlace() {
-  if (state.mission || activeView === 'map') return;
-  const c = map.getCenter();
-  if (!scenery.covers(c.lat, c.lng)) {
-    placeShown = false;
-    view3d.setPlace(null);
-    renderEmpty3d();
-    return;
-  }
-  const lat = c.lat;
-  const lon = c.lng;
-  const dLat = PLACE_HALF / 111_320;
-  const dLon = PLACE_HALF / (111_320 * Math.cos((lat * Math.PI) / 180));
-  // The loader takes a flight; a centre and two corners are the square's.
-  // The centre goes first because the first point is where heights count from.
-  const m = { exported: [{ lat, lon, alt: 0 }, { lat: lat - dLat, lon: lon - dLon, alt: 0 },
-                         { lat: lat + dLat, lon: lon + dLon, alt: 0 }] };
-  scenery.ensure(m).then(() => {
-    if (state.mission) return;          // a plan arrived while this loaded
-    const relief = scenery.relief(m);
-    // Nothing loaded -- service down, sea under the centre -- is the empty
-    // view as before, not a flat square claiming to be the ground.
-    placeShown = !!relief;
-    view3d.setRelief(relief);
-    view3d.setPlace(relief ? { lat, lon, half: PLACE_HALF } : null);
-    renderEmpty3d();
-  });
-}
-
 // Would this flight come within `clr` of what is known to be there? The
 // survey's answer where there is a survey, the terrain model's elsewhere, and
 // null -- not checked, which is not clear -- where there is neither. Every
@@ -236,7 +188,7 @@ async function lidarView() {
   if (!lidar) {
     const { createScene3D } = await import('./scene3d.js');
     lidar = createScene3D($('lidar'));
-    window.__lidar = lidar;   // for driving it under test, like __view3d
+    window.__lidar = lidar;   // for driving it under test
     // What the photogrammetric mesh says about the flight. Geometry from the
     // view, judgement here: it reports what is under the flight and what the
     // flight runs into, and the readout decides whether that is too close.
@@ -252,9 +204,6 @@ async function lidarView() {
         clearedAt = hv;
         setTimeout(ensureClear, 0);
       }
-      // The flat view paints from this too, so imagery and bare grid show the
-      // same verdicts as the survey does instead of losing them at the switch.
-      view3d.setVerdict(m?.verdict ?? state.terrain?.verdict ?? null);
       renderFix();
     });
     lidar.setCollision(collideOn);
@@ -272,7 +221,7 @@ async function lidarView() {
     lidar.setGround(basemaps.groundSpec(true));
     lidar.onPaint(paintToSite);
     // Outside Poland the survey view draws, and is painted on, the terrain
-    // model instead of LiDAR. A loader of its own, like `scenery`: what you
+    // model instead of LiDAR. A loader of its own: what you
     // look at must never become the grid a plan is measured on. 250 m round
     // the flight (or the point), the view's own margin.
     lidar.setGroundSource(async ({ path }) => {
@@ -304,91 +253,50 @@ async function lidarView() {
   return lidar;
 }
 
-async function setGround(name) {
-  if (!GROUNDS.includes(name)) return;
-  groundMode = name;
-  for (const b of document.querySelectorAll('#groundtabs button')) {
-    b.classList.toggle('on', b.dataset.ground === name);
-  }
-  pushGround();
-  applyViewCanvases();
-  writeUrl();
-  if (name !== 'survey') {
-    lidar?.close();
-    // Tell the flat view what it is standing on and make it draw. Neither
-    // happened here: setView set the ground spec and setGround did not, and
-    // nothing asked for a frame -- so picking "no ground" or "imagery" showed
-    // an empty canvas until some other event happened to trigger a draw, which
-    // in practice meant nudging the view.
-    view3d.setGround(basemaps.groundSpec(name === 'imagery'));
-    view3d.draw();
-    return;
-  }
+// Open the 3D on whatever there is: the plan, or with no plan the ground the
+// map is looking at -- browsing it is a reason to open this view, not only a
+// consequence of having planned something.
+async function open3d() {
   const view = await lidarView();
-  // With nothing tapped yet, the ground the MAP is looking at is the ground
-  // worth drawing: browsing the mesh is a reason to open this view, not only a
-  // consequence of having planned something.
   if (!state.mission) {
     const c = map.getCenter();
     view.setAnchor({ lat: c.lat, lon: c.lng });
   }
   view.setMission(state.mission, state.hazard);
+  view.setVerdict(state.terrain?.verdict ?? null);
   await view.open();
 }
 
-// Which of the two canvases is on screen. `hidden` on the wrong one is not
-// enough on its own: a hidden canvas has no client size, so the renderer that
-// owns it has to be told once it is visible again.
+// Whether the 3D canvas is on screen. `hidden` is not enough on its own: a
+// hidden canvas has no client size, so the renderer has to be told once it is
+// visible again.
 function applyViewCanvases() {
   const show3d = activeView !== 'map';
-  const survey = groundMode === 'survey';
-  $('scene').hidden = !show3d || survey;
-  $('lidar').hidden = !show3d || !survey;
-  if (show3d && survey) lidar?.resize();
-  // The same for the flat canvas: it had no client size while hidden, so
-  // whatever it drew last was drawn at the wrong size or not at all.
-  if (show3d && !survey) view3d.draw();
-  // Painting needs the survey under the brush; anywhere else it switches off
-  // rather than staying armed for a view it cannot act on.
-  $('paintBtn').hidden = !(show3d && survey);
-  $('heatBtn').hidden = !(show3d && survey);
-  $('cloudBtn').hidden = !(show3d && survey && cloudReady);
+  $('lidar').hidden = !show3d;
+  if (show3d) lidar?.resize();
+  // Painting needs measured ground under the brush; anywhere else it switches
+  // off rather than staying armed for a view it cannot act on.
+  const measured = paintable();
+  $('paintBtn').hidden = !(show3d && measured);
+  $('heatBtn').hidden = !(show3d && measured);
+  $('cloudBtn').hidden = !(show3d && cloudReady);
   placePaintView();
   placeLoading();
   if ($('paintBtn').hidden) setPaint(false);
-  renderEmpty3d();
 }
 
-// The flat 3D view draws the flight and the ground under it, so with no plan
-// it drew nothing at all, and pressing 3D read as a dead button. Say so, and
-// offer the survey, which does have something to show before a plan exists.
-function renderEmpty3d() {
-  const nothing = activeView !== 'map' && groundMode !== 'survey' && !state.mission && !placeShown;
-  $('empty3d').hidden = !nothing;
-}
-$('empty3dSurvey').addEventListener('click', () => setGround('survey'));
-
-// The survey view needs ground fine enough to paint on: GUGiK's LiDAR in
-// Poland, the Region's 2 m model in Sicily (scene3d's loadFromGround). It was
-// offered everywhere, and over Capo Calava on 2026-11-08 -- before it could
-// draw the Sicilian ground -- it came up as an empty sky. So where neither
-// exists it is not offered -- not the ground button, not the paint brush that
-// needs it, not the empty view's invitation -- and a view already on it, or a
-// link that asks for it, falls back to imagery.
-function offerSurvey() {
+// Painting needs ground fine enough to paint on: GUGiK's LiDAR in Poland, the
+// Region's 2 m model in Sicily, DGT's in Portugal. Not TINITALY's 10 m alone:
+// it does not have Capo Calava's 119 m headland at all. Over the flat photo
+// there is nothing for a brush to land on, so it is not offered.
+function paintable() {
   const c = map.getCenter();
-  // In Poland the LiDAR; in Sicily the Region's 2 m ground, which is fine
-  // enough to paint a cliff on. Not on TINITALY's 10 m alone: it does not
-  // have Capo Calava's 119 m headland at all.
-  const here = inPoland(c.lat, c.lng) || sitrCovers(c.lat, c.lng) || ptCovers(c.lat, c.lng);
-  document.querySelector('#groundtabs button[data-ground="survey"]').hidden = !here;
-  $('tipPaint').hidden = !here;
-  $('empty3dSurvey').hidden = !here;
-  $('empty3dSurveyHint').hidden = !here;
-  if (!here && groundMode === 'survey') setGround('imagery');
+  return inPoland(c.lat, c.lng) || sitrCovers(c.lat, c.lng) || ptCovers(c.lat, c.lng);
 }
-
-
+function offerSurvey() {
+  $('tipPaint').hidden = !paintable();
+  if (activeView !== 'map') applyViewCanvases();
+}
 
 function setView(name) {
   const was = activeView;
@@ -398,15 +306,12 @@ function setView(name) {
   for (const b of document.querySelectorAll('#viewtabs button')) b.classList.toggle('on', b.dataset.view === name);
   $('stage').classList.toggle('split', name === 'split');
   $('map').hidden = !showMap;
-  $('scene').hidden = !show3d;
-  $('lidar').hidden = true;
   $('splitter').hidden = name !== 'split';
   $('basetabs').hidden = !showMap;
   $('findme').hidden = !showMap;
   // Each belongs to the view it acts on: the route toggle hides clutter on the
   // map, the imagery button paints the ground under the 3D.
   $('routeToggle').hidden = !showMap;
-  $('groundtabs').hidden = !show3d;
   // Each sync is only offered when the view it READS from is on screen: there
   // is no sense in aiming the 3D at a map you cannot see.
   $('looksBtn').hidden = !show3d;
@@ -416,8 +321,7 @@ function setView(name) {
   if (name === 'split') setSplit(splitPct, { store: false });
   if (showMap) map.invalidateSize();
   applyViewCanvases();
-  if (show3d && groundMode !== 'survey') view3d.draw();
-  if (show3d) showPlace();
+  if (show3d && ready) open3d();
   // Linked, a pane coming on screen joins the other: the 3D comes to the map,
   // and the map -- when it is the one appearing from a 3D-only view -- comes
   // to the 3D.
@@ -451,7 +355,7 @@ function setSplit(pct, { store = true } = {}) {
   $('stage').classList.toggle('tight', !stacked() && mapWidth < 240);
   if (store) { try { localStorage.setItem(SPLIT_KEY, String(v)); } catch { /* private window */ } }
   map.invalidateSize();
-  view3d.draw();
+  lidar?.resize();
 }
 
 let splitPct = 50;
@@ -475,7 +379,7 @@ $('splitter').addEventListener('pointercancel', endSplit);
 $('splitter').addEventListener('dblclick', () => { splitPct = 50; setSplit(50); });
 window.addEventListener('resize', () => {
   if (activeView === 'split') setSplit(splitPct, { store: false });
-  else if (activeView !== 'map') view3d.draw();
+  else if (activeView !== 'map') lidar?.resize();
 });
 for (const btn of document.querySelectorAll('#viewtabs button')) {
   btn.addEventListener('click', () => setView(btn.dataset.view));
@@ -483,10 +387,8 @@ for (const btn of document.querySelectorAll('#viewtabs button')) {
 
 function pushGround() {
   if (!ready) return;
-  view3d.setGround(basemaps.groundSpec(groundMode === 'imagery'));
-  // The survey view wants the same imagery, but only where the country has no
-  // orthophoto of its own -- so it gets the spec regardless of whether the flat
-  // view is painting with it.
+  // The 3D drapes the map's imagery, but only where the country has no
+  // orthophoto of its own.
   lidar?.setGround(basemaps.groundSpec(true));
 }
 
@@ -499,7 +401,6 @@ function writeUrl() {
   const c = map.getCenter();
   q.set('c', `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`);
   q.set('z', String(Math.round(map.getZoom() * 100) / 100));
-  if (groundMode !== 'imagery') q.set('s', groundMode);
   if (wiresOn) q.set('w', '1');
   if (!looksOn) q.set('k', '0');
   if (collideOn) q.set('x', '1');
@@ -530,11 +431,6 @@ function readUrl() {
     map.setView([lat, lon], zoom, { animate: false });
   }
   if (['map', 'split', '3d'].includes(q.get('v'))) setView(q.get('v'));
-  // Not even opened outside Poland: opening it to close it again put "No
-  // surface -- outside the survey" on screen over Capo Calava.
-  const s = q.get('s');
-  const at = map.getCenter();
-  if (GROUNDS.includes(s) && (s !== 'survey' || inPoland(at.lat, at.lng) || sitrCovers(at.lat, at.lng) || ptCovers(at.lat, at.lng))) setGround(s);
   offerSurvey();
   // Fetched, not just switched on. Restoring `w=1` from a link used to set the
   // toggle and draw an empty list, so a shared plan with wires showing arrived
@@ -1285,7 +1181,6 @@ function settleSoon() {
     state.coverage.forWaypoints = state.mission.stats.waypoints;
     surveyCheck();
     renderReadout();
-    view3d.setMission(state.mission, state.coverage);
   }, 260);
 }
 
@@ -1343,13 +1238,10 @@ function computePlan() {
     state.terrain = null;
     state.coverage = null;
     for (const g of [layers.path, layers.dots, layers.poses, layers.conflicts]) g.clearLayers();
-    view3d.setMission(null);
-    view3d.setObstacles([], []);
-    view3d.setVerdict(null);
-    showPlace();
-    // The survey view was never told, so Clear cleared the map and the flat
-    // view and left the orbits hanging in the mesh.
+    // The 3D was never told, so Clear cleared the map and left the orbits
+    // hanging in the mesh.
     lidar?.setMission(null, null);
+    lidar?.setVerdict(null);
     renderPoints();
     renderReadout();
     writeUrl();
@@ -1393,21 +1285,11 @@ function computePlan() {
   renderReadout();
   renderIdentity();
   if (state.onDevice) showDeviceRoute(null);
-  // Before setMission, which is what redraws: the ground has to be the one
-  // under THIS plan's takeoff, or the flight floats over yesterday's zero.
-  view3d.setRelief(terrain.relief(state.mission));
-  view3d.setMission(state.mission, state.coverage);
-  // Nothing solid to draw here any more, but the legs the check flagged are
-  // still worth seeing over the flight.
-  // The count is what collision mode needs to tell "clear of everything
-  // mapped" from "nothing was mapped" -- see setObstacles.
-  view3d.setObstacles([], state.hazard.legs, hazards.length);
-  // Whichever surface is up gets the same flight. The survey view rebuilds the
-  // path on every replan and the ground only when the frame moves.
+  // The 3D rebuilds the path on every replan and the ground only when the
+  // frame moves. Where it does not measure the ground itself, it draws the
+  // terrain model's verdict.
   lidar?.setMission(state.mission, state.hazard);
-  // setMission is what re-checks the mesh, so the verdict is fresh only after
-  // it; with no survey open there is nothing to carry and this clears it.
-  view3d.setVerdict(state.mesh?.verdict ?? state.terrain?.verdict ?? null);
+  lidar?.setVerdict(state.terrain?.verdict ?? null);
   writeUrl();
   settleSoon();
 }
@@ -1527,7 +1409,6 @@ function renderReadout() {
   const box = $('readout');
   const m = state.mission;
   renderDetail();
-  renderEmpty3d();
   // With nothing tapped there is nothing to clear or save, and a bright Save
   // over an empty plan reads as the next step. Both said so in a toast after
   // the press; now they say it before.
@@ -1807,7 +1688,6 @@ function captureList() {
 function renderCapture() {
   const list = captureList();
   const failed = shown.size - list.length;
-  view3d.setCapture(list);
   lidar?.setCapture(list);
 
   layers.capture.clearLayers();
@@ -1860,20 +1740,16 @@ function showDeviceRoute(src) {
   for (const g of Object.values(DEVICE_GROUPS())) g.clearLayers();
   state.onDevice = !src ? null : src.kind === 'device' ? routeFromRead(src.read, cam) : src.mission;
   if (!state.onDevice) {
-    view3d.setRelief(terrain.relief(state.mission));
-    view3d.setMission(state.mission, state.coverage);
-    view3d.setObstacles([], state.hazard?.legs ?? []);
+    lidar?.setMission(state.mission, state.hazard);
+    lidar?.setVerdict(state.terrain?.verdict ?? null);
     return;
   }
   renderPath(state.onDevice, { groups: DEVICE_GROUPS(), dashed: true });
-  // Its own zero: a route off the controller took off from its own first
-  // waypoint, not from the plan's.
-  view3d.setRelief(terrain.relief(state.onDevice));
-  view3d.setMission(state.onDevice, null);
   // Ungraded: every grade on screen belongs to the plan, and colouring someone
   // else's route with the plan's verdict would be a lie in the most expensive
   // possible place.
-  view3d.setObstacles([], []);
+  lidar?.setMission(state.onDevice, null);
+  lidar?.setVerdict(null);
   map.fitBounds(L.latLngBounds(state.onDevice.waypoints.map((w) => [w.lat, w.lon])),
     { padding: [40, 40], maxZoom: 21 });
 }
@@ -2107,10 +1983,9 @@ $('findme').addEventListener('click', () => findMe());
 // Measured over Cybulskiego, 27 m and 40 m both leave 25 legs through
 // buildings. The height of one ring is the lever, and this is the handle on it.
 //
-// Every part of this existed and none of it was connected: js/view3d.js draws
-// the grips and reports the drag, js/share.js carries the result in the plan
-// code, js/planner.js accepts pinned heights and reports the ones it used.
-// `onLevelChange` was simply never called, so the grips were never drawn.
+// The 3D draws the grips and reports the drag (scene3d onLevel), js/share.js
+// carries the result in the plan code, js/planner.js accepts pinned heights
+// and reports the ones it used.
 //
 // A drag fires this continuously, and each call replans -- which is what every
 // slider here already does on every tick, and what makes the flight follow your
@@ -2156,17 +2031,6 @@ function moveLevel(handles, z) {
   computePlan();
 }
 
-// One behaviour, both views. The flat view drags a level on its own canvas and
-// the survey view drags a chip over the mesh; they hand back the same handles,
-// so there is one place that decides what a dragged height means.
-view3d.onLevelChange(moveLevel);
-view3d.onLevelDone(() => history.commit());
-
-// Nothing, a photograph, or the survey. Same kind of choice as the basemap
-// picker it sits under, so it is the same kind of control.
-for (const b of document.querySelectorAll('#groundtabs button')) {
-  b.addEventListener('click', () => setGround(b.dataset.ground));
-}
 
 // The two views are not tied together, on purpose: you pan the map to find the
 // next thing while the 3D stays on what you are working on. These are how you
@@ -2176,7 +2040,7 @@ for (const b of document.querySelectorAll('#groundtabs button')) {
 // and a zoom; a 3D view speaks local metres and a camera distance. Neither
 // converts to the other, so both answer "where are you looking, and how much of
 // the ground is in shot" -- a centre and a span -- and that is the whole of it.
-const active3d = () => (groundMode === 'survey' ? lidar : view3d);
+const active3d = () => lidar;
 
 // How wide the map is showing, in metres of ground across the pane.
 function mapSpanM() {
@@ -2196,10 +2060,7 @@ function mapSpanM() {
 // the span that pane has to show. Comparing two pictures means comparing them
 // at one scale.
 const mapMPerPx = () => mapSpanM() / Math.max(200, map.getSize().x || 800);
-const view3dWidth = () => {
-  const el = groundMode === 'survey' ? $('lidar') : $('scene');
-  return Math.max(200, el.clientWidth || 800);
-};
+const view3dWidth = () => Math.max(200, $('lidar').clientWidth || 800);
 
 // Linked views. On, the map moving points the 3D at the same ground, and the
 // 3D moving points the map -- so six buildings on the left are the same six
@@ -2213,28 +2074,24 @@ const view3dWidth = () => {
 // setView reads them during startup.)
 try { linked = localStorage.getItem('dji.linked') === '1'; } catch { /* per load */ }
 
-async function point3dAtMap() {
-  // The flat view draws the plan, so with no plan it has nowhere to stand;
-  // the survey can show any ground, plan or not -- in Poland. Where TINITALY
-  // reaches, the flat view has terrain of its own (showPlace) and the survey
-  // has nothing: switching there turned Pizzo Monaco into an empty sky.
-  const here = map.getCenter();
-  if (!state.mission && groundMode !== 'survey' && !scenery.covers(here.lat, here.lng)
-      && inPoland(here.lat, here.lng)) await setGround('survey');
-  // And the survey only has the ground it loaded: a search two kilometres
-  // away (Kadzielnia to Emilii Plater) pointed its camera at empty space and
-  // the pane went black. With no plan to hold it in place, ground more than
-  // 150 m from what is loaded -- well inside the 200 m the crop reaches --
-  // moves the survey there and loads it before the camera goes.
-  if (!state.mission && groundMode === 'survey' && lidar) {
-    const c = map.getCenter();
-    const o = lidar.origin();
-    const far = !o || Math.hypot((c.lat - o.lat) * mPerDegLat(c.lat), (c.lng - o.lon) * mPerDegLon(c.lat)) > 150;
-    if (far) {
-      lidar.setAnchor({ lat: c.lat, lon: c.lng });
-      await lidar.open();
-    }
+// The 3D only has the ground it loaded: a search two kilometres away
+// (Kadzielnia to Emilii Plater) pointed its camera at empty space and the pane
+// went black. With no plan to hold it in place, ground more than 150 m from
+// what is loaded -- well inside the 200 m the crop reaches -- moves the view
+// there and loads it.
+async function followMap() {
+  if (state.mission || !lidar) return;
+  const c = map.getCenter();
+  const o = lidar.origin();
+  const far = !o || Math.hypot((c.lat - o.lat) * mPerDegLat(c.lat), (c.lng - o.lon) * mPerDegLon(c.lat)) > 150;
+  if (far) {
+    lidar.setAnchor({ lat: c.lat, lon: c.lng });
+    await lidar.open();
   }
+}
+
+async function point3dAtMap() {
+  await followMap();
   const v = active3d();
   if (!v?.lookAt) return;
   const c = map.getCenter();
@@ -2264,7 +2121,6 @@ function threeDMoved() {
   if (threeDMoveTimer) return;
   threeDMoveTimer = setTimeout(() => { threeDMoveTimer = null; pointMapAt3d(); }, 80);
 }
-view3d.onViewMove(threeDMoved);
 // The map pushes the 3D only when YOU moved the map. Its own adjustments --
 // the zoom cap snapping it back to the deepest imagery, a fit, the 3D moving
 // it -- fire moveend too, and each one pointed the 3D at the map's zoom. The
@@ -2280,8 +2136,11 @@ for (const t of ['pointerdown', 'wheel', 'keydown', 'touchstart']) {
 map.on('moveend', () => {
   if (moveFromThreeD) return;
   // Only a move the MAP made: one echoed from orbiting the 3D would move the
-  // place out from under the camera that is looking at it.
-  showPlace();
+  // place out from under the camera that is looking at it. With no plan the
+  // 3D follows the map to new ground, as the flat view did, so it never shows
+  // a place you have left.
+  if (!state.mission && activeView !== 'map') followMap();
+  offerSurvey();
   if (performance.now() - mapTouchedAt > 1500) return;
   if (linked && activeView !== 'map') point3dAtMap();
 });
@@ -2406,11 +2265,9 @@ $('looksBtn').addEventListener('click', () => { setLooks(!looksOn); writeUrl(); 
 let collideOn = false;
 function setCollide(on) {
   collideOn = on;
-  // Both 3D views, because the button sits over whichever one is up: the
-  // survey paints from the mesh's per-leg verdict, the flat one from the
-  // obstacle check. Same colours, different evidence, and each says which.
+  // From the mesh's per-leg verdict where the 3D measured the ground, the
+  // terrain model's elsewhere (scene3d setVerdict).
   lidar?.setCollision(collideOn);
-  view3d.setCollision(collideOn);
   $('collideBtn').classList.toggle('on', collideOn);
 }
 $('collideBtn').addEventListener('click', () => { setCollide(!collideOn); writeUrl(); });
@@ -2706,20 +2563,19 @@ applyUiValues({
   shotsPerStop: DEFAULTS.shotsPerStop,
   orbitRings: DEFAULTS.orbitRings,
   surroundRings: DEFAULTS.surroundRings,
-  // TWO passes to open with, which is the smallest thing that is still a
-  // reconstruction: the nadir grid for the ground -- the orthophoto mission --
-  // and one dome round each thing you tapped, for its sides. A grid alone
-  // photographs roofs and pavement and gives a splat nothing to stand up.
+  // The "One building" preset, by reference: the nadir grid for the ground,
+  // a dome round each thing you tapped for its sides, and the outer
+  // (establishing) ring that ties it to its surroundings. A copy of its own
+  // stood here with the outer ring off, so the preset gained it on 2026-11-13
+  // and a fresh drawing still came up without it (found 2026-11-15).
   //
-  // It opened with five on -- adding oblique, surround and the establishing
-  // ring -- which is a good 3DGS recipe and a terrible first screen: a hundred
-  // waypoints and four coloured passes over a site you have just tapped,
-  // before you have said what you are doing. The other three are checkboxes in
-  // Advanced and add themselves to this. js/planner.js keeps the full recipe
-  // as its DEFAULTS, because that is the library's answer to "plan me a
-  // reconstruction"; this is the app's answer to "I just opened it".
-  nadir: true, orbit: true, oblique: false, surround: false, transect: false, establish: false,
-  context: false,
+  // It once opened with five on -- oblique and surround too -- which is a good
+  // 3DGS recipe and a terrible first screen: a hundred waypoints and four
+  // coloured passes over a site you have just tapped. Those stay checkboxes in
+  // Advanced. js/planner.js keeps the full recipe as its DEFAULTS, the
+  // library's answer to "plan me a reconstruction"; this is the app's answer
+  // to "I just opened it".
+  ...PRESETS.building,
 });
 try {
   const c = localStorage.getItem(CLEARANCE_KEY);
@@ -2760,7 +2616,6 @@ if (opened.has('mockgps')) {
 window.__state = state;
 window.__site = site;
 window.__map = map;
-window.__view3d = view3d;
 
 /* ---------- tooltips ---------- */
 // Every map control is an icon, and the browser's own tooltip is a second's
@@ -2799,7 +2654,7 @@ $('stage').addEventListener('pointerover', (e) => {
   // its tip underneath, because beside it would cover its neighbours.
   const r = el.getBoundingClientRect();
   const t = tipEl.getBoundingClientRect();
-  if (el.closest('#groundtabs, #basetabs, #viewtabs')) {
+  if (el.closest('#basetabs, #viewtabs')) {
     const x = Math.min(window.innerWidth - t.width - 4, Math.max(4, r.left + r.width / 2 - t.width / 2));
     tipEl.style.left = `${x}px`;
     tipEl.style.top = `${r.bottom + 6}px`;
@@ -2835,7 +2690,7 @@ $('paintBtn').addEventListener('click', () => {
 // three controls in three places otherwise, the first of them unlabelled.
 $('tipPaint').addEventListener('click', async () => {
   if (activeView === 'map') setView('split');
-  if (groundMode !== 'survey') await setGround('survey');
+  await open3d();
   setPaint(true);
   toast('Drag over what you want captured. Wheel zooms, right-drag pans.');
 });
@@ -3306,7 +3161,7 @@ const mmssOf = (ms) => {
   return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
 };
 function placeLoading() {
-  $('load3d').hidden = !loadState || activeView === 'map' || groundMode !== 'survey';
+  $('load3d').hidden = !loadState || activeView === 'map';
 }
 function paintLoading() {
   const st = loadState;
@@ -3334,7 +3189,7 @@ function showLoading(st) {
 // what you selected, or how well each will come out. Only with the points up
 // and something painted; the surface keeps its own heat button.
 function placePaintView() {
-  $('paintView').hidden = !(activeView !== 'map' && groundMode === 'survey'
+  $('paintView').hidden = !(activeView !== 'map'
     && lidar?.cloudShown?.() && state.paint?.length);
 }
 function setPaintView(view) {

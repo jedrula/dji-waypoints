@@ -683,7 +683,7 @@ function tightRing({ subject, f, cam, frontOverlap, clearance, surfaceFloor }) {
 // long tie-in that lets a reconstruction agree with itself across the whole
 // site rather than solving each end separately.
 function establishPass(g) {
-  const { halfX, halfY, subjectHeight, f, cam, frontOverlap, ceiling = 120, minAlt } = g;
+  const { halfX, halfY, subjectHeight, f, cam, frontOverlap, ceiling = 120, minAlt, outside = 0 } = g;
   const view = fov(cam);
   const diag = 2 * Math.hypot(halfX, halfY);
   const aimZ = (subjectHeight ?? 0) / 2;
@@ -703,7 +703,7 @@ function establishPass(g) {
   const wanted = aimZ + range * Math.sin((40 * Math.PI) / 180);
   const alt = Math.max(minAlt ?? 0, Math.min(ceiling, wanted));
   const rise = Math.max(1, alt - aimZ);
-  const r = Math.max(Math.hypot(halfX, halfY) + 5, Math.sqrt(Math.max(1, range * range - rise * rise)));
+  const r = Math.max(outside, Math.hypot(halfX, halfY) + 5, Math.sqrt(Math.max(1, range * range - rise * rise)));
 
   const frameW = 2 * Math.hypot(r, rise) * Math.tan(view.h / 2);
   const step = Math.max(1, frameW * (1 - frontOverlap));
@@ -1221,38 +1221,33 @@ export function planMission(site, opts, cam) {
     });
   }
 
-  // The establishing ring, but only where the plan does not already satisfy the
-  // rule by accident. Round a tall thing the detail rings stand well back and
-  // the whole site is in every frame already; over a wide flat one nothing ever
-  // sees more than a slice, and that is the case worth spending twenty frames
-  // on. Measured rather than guessed: ask what the widest inward-facing frame
-  // in the plan actually covers.
+  // The establishing ring, whenever it is asked for, and OUTSIDE everything
+  // else. It used to be dropped wherever the widest detail frame already held
+  // the whole site -- which is every single building: a point, 20 x 15,
+  // 60 x 16 and a 30 x 30 tower all lost it, only a 100 x 80 m site kept it
+  // (measured 2026-11-15). And where it did fly round a small site it came out
+  // at r = 17 m, inside the orbit. Andrzej, the same day: "i want context
+  // around!" -- the ring is for what surrounds the subject, so it stands 10 m
+  // beyond the furthest photo stop and looks in across it.
   if (p.establish) {
-    const view = fov(cam);
-    const diag = 2 * Math.hypot(halfX, halfY);
-    const aimZ = (p.subjectHeight ?? 0) / 2;
-    let widest = 0;
+    let beyond = 0;
     for (const w of waypoints) {
-      if (!w.photo || w.pass === 'surround' || w.pass === 'context') continue;
+      if (!w.photo) continue;
       const l = f.toLocal(w.lat, w.lon);
-      const range = Math.hypot(l.x, l.y, w.alt - aimZ);
-      const wdt = 2 * range * Math.tan(view.h / 2);
-      if (wdt > widest) widest = wdt;
+      beyond = Math.max(beyond, Math.hypot(l.x, l.y));
     }
-    if (widest < diag) {
-      const r = establishPass({
-        halfX, halfY, subjectHeight: p.subjectHeight, f, cam,
-        frontOverlap: p.frontOverlap, minAlt: p.altitude,
-      });
-      add(r.pts);
-      passes.push({
-        name: 'Establishing orbit',
-        count: r.pts.length,
-        detail: r.covers
-          ? `whole site in frame, r = ${r.r.toFixed(0)} m at ${r.alt.toFixed(0)} m`
-          : `${((100 * r.frameW) / r.diag).toFixed(0)}% of the site in frame — the ceiling stops it framing all of it`,
-      });
-    }
+    const r = establishPass({
+      halfX, halfY, subjectHeight: p.subjectHeight, f, cam,
+      frontOverlap: p.frontOverlap, minAlt: p.altitude, outside: beyond > 0 ? beyond + 10 : 0,
+    });
+    add(r.pts);
+    passes.push({
+      name: 'Establishing orbit',
+      count: r.pts.length,
+      detail: r.covers
+        ? `whole site in frame, r = ${r.r.toFixed(0)} m at ${r.alt.toFixed(0)} m`
+        : `${((100 * r.frameW) / r.diag).toFixed(0)}% of the site in frame — the ceiling stops it framing all of it`,
+    });
   }
 
   // A painted facade's stations, worked out by js/facade.js from the terrain

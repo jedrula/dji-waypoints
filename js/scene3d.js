@@ -1,25 +1,15 @@
-// The survey itself, with the mission inside it.
+// The 3D view: the ground, with the mission inside it.
 //
-// js/view3d.js draws the flight over a flat plane with map imagery painted on
-// it. That is a photograph of the ground, not the ground: anything with height
-// leans away from nadir, so a roof is painted metres from the walls holding it
-// up, and the only real geometry in the picture is the boxes you drew. This is
-// the other thing -- the national LiDAR as a surface, at half-metre cells, with
-// the flight in the same space. What the aircraft would hit is what you can see
-// it nearly hitting.
+// The best ground known -- the photogrammetric mesh or the national LiDAR in
+// Poland, a terrain grid in Sicily and Portugal, the map's photo laid flat
+// anywhere else (loadFlat) -- with the flight in the same space. What the
+// aircraft would hit is what you can see it nearly hitting.
 //
-// Two renderers in one app is a cost, taken deliberately. view3d.js is canvas
-// 2D with a painter's algorithm and no depth buffer, and a million-cell surface
-// is not something it can be taught: even decimated hard you would lose the
-// texture and gain a slideshow. This is WebGL through three.js, loaded from a
-// CDN the way Leaflet already is and only when the view is first opened, so an
-// ordinary session never fetches it.
-//
-// What this does NOT do yet: draw the obstacles you tapped, and let you move a
-// waypoint. The first is nearly redundant here -- the buildings and trees ARE
-// in the surface, which is the whole point -- and the second is the next step
-// and wants picking, which is most of why three.js is here rather than the
-// hand-written GL in server/public/scene.html.
+// It is the only 3D renderer. A canvas one (js/view3d.js) drew the flat photo
+// until 2026-11-15, with its own frustums, dots and colours, and the same
+// mission looked different in each; it was deleted so that cannot recur.
+// WebGL through three.js, loaded from a CDN the way Leaflet already is and
+// only when the view is first opened.
 
 import * as THREE from 'three';
 import { MapControls } from 'three/addons/controls/MapControls.js';
@@ -210,6 +200,7 @@ export function createScene3D(canvas) {
   let onStatus = () => {};
   let onMesh = () => {};
   let meshHazard = null;
+  let outsideVerdict = null;   // the app's per-leg verdict, where this view does not judge (setVerdict)
   let framedMesh = false;
   let collisionMode = false;
   let onLevel = () => {};
@@ -694,8 +685,8 @@ export function createScene3D(canvas) {
   // degree in Poland, which is 8 m of skew across 500 m, so blitting the tiles
   // square would visibly shear the picture. Over one tile the mapping is affine
   // to well under a pixel, so three corners give the transform and drawImage
-  // does the rest. Same trick view3d.js uses per triangle, needed once per tile
-  // here because the target is flat rather than a perspective camera.
+  // does the rest, once per tile, because the target is flat rather than a
+  // perspective camera.
   //
   // `box` is the patch of the tile to cover, in the tile's own metres, and it
   // is what makes this behave like a map rather than like a photograph. Draped
@@ -3315,10 +3306,15 @@ export function createScene3D(canvas) {
     //
     // Two buffers rather than a line per leg: a hundred and eleven draw calls
     // to say one thing is a hundred and ten too many.
-    if (collisionMode && meshHazard?.verdict) {
+    // Its own answer where it measured the ground; the app's (the terrain
+    // model's strikes, js/terrain.js) where it did not -- a ground it may not
+    // judge is not a reason to paint the flight as if nobody had.
+    const judged = meshHazard?.verdict
+      ?? (outsideVerdict?.length === path.length ? outsideVerdict : null);
+    if (collisionMode && judged) {
       const parts = { 1: [], 2: [], 0: [] };
       for (let i = 1; i < path.length; i++) {
-        parts[meshHazard.verdict[i] ?? 0].push(at(path[i - 1]), at(path[i]));
+        parts[judged[i] ?? 0].push(at(path[i - 1]), at(path[i]));
       }
       for (const [state, name, width] of [[2, 'clear', 3], [0, 'none', 2.5], [1, 'hit', 5]]) {
         if (!parts[state].length) continue;
@@ -3413,8 +3409,7 @@ export function createScene3D(canvas) {
   // "inward", "outward" and "straight down" are properties of the camera and
   // not of the path.
   //
-  // The same wedges js/view3d.js draws over its flat plane, and deliberately
-  // the same numbers, so the two views agree about where the lens is looking:
+  // Where the lens is looking:
   // yaw and pitch come resolved from the planner (js/planner.js sets w.yaw for
   // every heading mode, and w.shots is the pitch fan at the stop), the cone
   // comes from the camera in js/camera.js, and the direction comes from the
@@ -3458,7 +3453,7 @@ export function createScene3D(canvas) {
     };
 
     // Every waypoint is too many to see through, and this is a diagram of the
-    // camera work rather than an inventory. Same thinning rule as view3d.
+    // camera work rather than an inventory.
     const step = Math.max(1, Math.ceil(path.length / 70));
     const fv = fov(mission.cam);
     const th = Math.tan(fv.h / 2);
@@ -3656,6 +3651,76 @@ export function createScene3D(canvas) {
     }
     loaded = next;
     return loaded;
+  }
+
+  // Where nothing measured the ground: the map's photograph on a flat plane at
+  // the takeoff's height. This was js/view3d.js's whole picture, a second
+  // renderer with its own frustums, dots and colours; on 2026-11-15 Andrzej
+  // asked for one way of drawing a mission ("those changes are not
+  // necessary, aim for best ux"), so the flat ground moved in here and that
+  // renderer was deleted.
+  //
+  // `fromTerrain`, so it never answers checkFlight or floorAt: a plane at zero
+  // would call every flight clear of buildings it simply does not contain.
+  // 4 m cells, because there is nothing in a plane for finer ones to show.
+  async function loadFlat(lat, lon) {
+    const path = mission?.exported ?? mission?.waypoints ?? [{ lat, lon }];
+    let eMin = Infinity; let eMax = -Infinity; let nMin = Infinity; let nMax = -Infinity;
+    for (const w of path) {
+      const q = proj.fwd(w.lat, w.lon);
+      eMin = Math.min(eMin, q.east); eMax = Math.max(eMax, q.east);
+      nMin = Math.min(nMin, q.north); nMax = Math.max(nMax, q.north);
+    }
+    const CELL = 4;
+    const side = Math.min(MAX_SIDE_M, Math.max(eMax - eMin, nMax - nMin) + 2 * MARGIN_M);
+    const N = Math.round(side / CELL);
+    const e0 = Math.round((eMin + eMax) / 2 - side / 2);
+    const n0 = Math.round((nMin + nMax) / 2 - side / 2);
+    const key = `flat|${N}|${e0}|${n0}`;
+    if (loaded && loaded.key === key) return loaded;
+    const sw = proj.inv(e0, n0);
+    const ne = proj.inv(e0 + side, n0 + side);
+    const meta = {
+      grid: N, cellMetres: CELL, tileMetres: side,
+      origin: { east: e0, north: n0 },
+      base: 0,
+      bounds: { south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon },
+      tiles: [], wanted: 0, unbuilt: 0,
+      sources: [{ year: 'No measured ground here' }],
+      bare: true, flat: true,
+    };
+    const next = { key, meta, base: 0, height: new Uint16Array(N * N), kind: new Uint8Array(N * N).fill(1),
+      ortho: null, buildings: [], fromTerrain: true };
+    onLoading({ stage: 'Draping the map imagery…', frac: null });
+    try {
+      const got = await basemapTexture(meta);
+      next.ortho = got?.tex ?? null;
+      next.orthoBox = got?.box ?? null;
+      next.orthoMpp = got?.metresPerPixel ?? null;
+    } catch (e) {
+      console.warn('the map could not be draped:', e);
+    }
+    loaded = next;
+    return loaded;
+  }
+
+  async function openFlat(c, why = null) {
+    if (inPoland(c.lat0, c.lon0)) {
+      if (proj.name !== PUWG92_PROJ.name) { setProjection(PUWG92_PROJ); loaded = null; }
+    } else if (proj.name !== siteProjection(c.lon0).name) {
+      setProjection(siteProjection(c.lon0));
+      loaded = null;
+    }
+    meshMode = false;
+    framedMesh = false;
+    dropMesh();
+    onMesh(null);
+    await loadFlat(c.lat0, c.lon0);
+    buildSurface();
+    onLoading(null);
+    onStatus(`No measured ground here${why ? ` — ${why}` : ''}: the map's photo, flat. `
+      + 'Nothing in it is checked against the flight.');
+    render();
   }
 
   // One raster over the ground the flight actually crosses, stitched from
@@ -3897,7 +3962,7 @@ export function createScene3D(canvas) {
   }
 
   const api = {
-    // The mission is pushed on every replan, like view3d's. Rebuilding the
+    // The mission is pushed on every replan. Rebuilding the
     // flight is cheap; the surface is not, so it is only rebuilt when the frame
     // it is expressed in has actually moved.
     setMission(m, h) {
@@ -4245,9 +4310,14 @@ export function createScene3D(canvas) {
     // rather than returned, because it is answered when a tile arrives and not
     // when anybody asks.
     onMesh(fn) { onMesh = fn ?? (() => {}); },
+    // The app's per-leg verdict (1 strike, 2 clear, 0 not judged), drawn in
+    // collision mode wherever this view has not measured the ground itself.
+    setVerdict(v) {
+      outsideVerdict = v ?? null;
+      if (collisionMode && !meshHazard && mission) { buildMission(); render(); }
+    },
 
-    // A level dragged in this view, and the end of that gesture -- the same two
-    // callbacks js/view3d.js offers, so the app wires one behaviour for both.
+    // A level dragged in this view, and the end of that gesture.
     // Paint the flight by whether it can be flown rather than by what pass it
     // is. Rebuilt rather than recoloured, because the two pictures group the
     // legs differently: one by pass, one by verdict.
@@ -4338,7 +4408,8 @@ export function createScene3D(canvas) {
           onMesh(null);
           onStatus('Building the 3D ground from the terrain model…');
           onLoading({ stage: 'Building the 3D ground…', frac: null });
-          await loadFromGround(c.lat0, c.lon0);
+          const terrain = await loadFromGround(c.lat0, c.lon0).catch(() => null);
+          if (!terrain) { await openFlat(c); return; }
           buildSurface();
           onLoading(null);
           onStatus(`${loaded.meta.sources[0].year}${loaded.meta.bare ? ' bare earth — no trees or buildings in it' : ', roofs and trees included'}. `
@@ -4346,6 +4417,7 @@ export function createScene3D(canvas) {
           render();
           return;
         }
+        if (!groundSource && !inPoland(c.lat0, c.lon0)) { await openFlat(c); return; }
         if (proj.name !== PUWG92_PROJ.name) { setProjection(PUWG92_PROJ); loaded = null; }
         // The mesh first, always, because where it exists it is the better
         // picture by a wide margin -- centimetres against half a metre, and
@@ -4419,15 +4491,16 @@ export function createScene3D(canvas) {
             : ''));
         render();
       } catch (e) {
-        if (e.name !== 'AbortError') onStatus(`No surface — ${e.message}`);
         onLoading(null);
+        // The survey failing is the flat photo, as before this view drew
+        // everything -- never an empty sky.
+        if (e.name !== 'AbortError') await openFlat(c, `the survey would not load (${e.message})`).catch(() => {});
       } finally {
         opening = false;
       }
     },
 
-    // The same two calls js/view3d.js answers, so the app can sync whichever
-    // 3D view is up without asking which. A place on the ground and how much
+    // What the linked views exchange with the map: a place on the ground and how much
     // of it is in shot; the camera's height above the target is its own
     // business and is left alone.
     where() {

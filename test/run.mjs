@@ -340,7 +340,7 @@ ok('orbit radius never collapses onto the thing',
    Math.min(...domesOf(tower)[0].map((w) => Math.hypot(
      tower.frame.toLocal(w.lat, w.lon).x, tower.frame.toLocal(w.lat, w.lon).y))) >= 2.9);
 const rings2 = planMission({ points: [{ lat: 50.061, lon: 19.931, height: 12 }] },
-  { altitude: 40, orbitRings: 2, nadir: false, oblique: false, surround: false, context: false }, cam);
+  { altitude: 40, orbitRings: 2, nadir: false, oblique: false, surround: false, context: false, establish: false }, cam);
 ok('2 rings fly at two distinct heights',
    new Set(rings2.waypoints.filter(w => !w.transit).map(w => w.alt)).size === 2);
 
@@ -2568,11 +2568,17 @@ console.log('\ncontroller bridge');
        `${widestInward(m, side, h).toFixed(0)} m vs ${diag.toFixed(0)} m diagonal`);
   }
 
-  // And it is not a ring for nothing: round a tall thing the detail rings
-  // already stand far enough back, so none is added.
+  // Round a tall thing too, where the detail rings already hold the whole
+  // site: it used to be skipped there, and so never flew round a single
+  // building. It is for what SURROUNDS the subject, so it stands outside every
+  // other photo stop.
   const tall = planMission(square(30, 25), DEFAULTS, cam);
-  ok('no establishing ring where the detail rings already do it',
-     !tall.passes.some((x) => x.name === 'Establishing orbit'));
+  const radius = (w) => Math.hypot((w.lon - 17) * M * COS, (w.lat - 51) * M);
+  const ringR = Math.min(...tall.exported.filter((w) => w.pass === 'establish').map(radius));
+  const restR = Math.max(...tall.exported.filter((w) => w.photo && w.pass !== 'establish').map(radius));
+  ok('an establishing ring round a single tall building too',
+     tall.passes.some((x) => x.name === 'Establishing orbit'));
+  ok(`and outside everything else (${ringR.toFixed(0)} m vs ${restR.toFixed(0)} m)`, ringR >= restR + 9, `${ringR} vs ${restR}`);
   const flat = planMission(square(200, 5), DEFAULTS, cam);
   const est = flat.passes.find((x) => x.name === 'Establishing orbit');
   ok('and one where they never will', Boolean(est));
@@ -2743,16 +2749,6 @@ console.log('\nthe ground outside Poland (TINITALY)');
   ok('the floor at the summit errs high at both ends',
      near(t.floorAt(38.16718, 12.7568, 5, 0), 530.83 + 5 - 527.03, 0.01), String(t.floorAt(38.16718, 12.7568, 5, 0)));
   ok('and a station over lower ground is not lifted', t.floorAt(38.166677, 12.760448, 5) === 0);
-  // The 3D view's ground: zero at the takeoff's lowest corner, the same zero
-  // the check uses, and recomputed per plan -- taking off at the foot instead
-  // must raise the summit by the 416.6 m between the two datums.
-  const atTop = t.relief(m);
-  const atFoot = t.relief({ exported: [{ ...east, alt: 30 }] });
-  ok('the drawn ground at the takeoff is about the takeoff',
-     Math.abs(atTop(38.16718, 12.7568)) < 4, String(atTop(38.16718, 12.7568)));
-  ok('and moving the takeoff to the foot raises the summit by the difference in datums',
-     near(atFoot(38.16718, 12.7568) - atTop(38.16718, 12.7568), 527.03 - 110.4, 0.05));
-  ok('and off the grid there is no ground drawn, not a flat apron', atTop(38.16718, 12.7700) === null);
   const broke = createTerrain({ fetch: async () => ({ ok: false }) });
   ok('a service that is down leaves nothing checked, not a flat world',
      await broke.ensure(m) === false && broke.checkFlight(m, 5) === null);
@@ -2830,7 +2826,7 @@ console.log('\nthe ground in Sicily (Regione Siciliana, 2 m)');
   const t = createTerrain({ fetch: regionAt(200) });
   ok('in Sicily both models are asked',
      await t.ensure(one) === true && asked.includes('sitr') && asked.includes('tinitaly'));
-  ok('and the ground is the Region\'s', t.source() === 'sitr' && near(t.relief(one)(tap.lat, tap.lon), 0, 0.01));
+  ok('and the ground is the Region\'s', t.source() === 'sitr');
   ok('and a replan inside it does not fetch again', await t.ensure(one) === false && asked.length === 2);
   const junk = createTerrain({ fetch: async (url) => (url.startsWith(SITR)
     ? { ok: true, arrayBuffer: async () => new ArrayBuffer(8) }

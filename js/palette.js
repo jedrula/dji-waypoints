@@ -18,6 +18,10 @@ export const PASS_COLOR = {
   context: '#ff9f5a',
   establish: '#7ee0a0',
   tight: '#e6ef6a',
+  // A painted wall's pass had no colour and fell to the grey below: over
+  // Lagos on 2026-11-14 the whole flight was a faint grey zigzag and the
+  // painted outline's blue dots read as the waypoints.
+  facade: '#3fd6e6',
 };
 
 // Anything the palette has no name for. Grey, so an unnamed pass reads as
@@ -32,7 +36,12 @@ export const LEG_COLOR = { clear: '#ffb84d', near: '#ff9f4d', strike: '#ff5d5d' 
 // stem and the survey as a ball on one -- one colour, because they are the same
 // thing seen three ways, and the whole point of the ball is that you recognise
 // it from the map.
-export const TAP_COLOR = '#4da3ff';
+//
+// White, the colour of "what is photographed", where everything flown has a
+// pass colour. It was the nadir grid's blue, and over Lagos on 2026-11-14 the
+// painted outline's blue dots were the loudest thing on screen and read as the
+// waypoints, which are small and the colour of their pass.
+export const TAP_COLOR = '#f4f6f8';
 
 // Collision mode: the flight painted by whether it can be flown at all, which
 // replaces the pass colours while it is on. Here rather than in either

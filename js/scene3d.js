@@ -22,7 +22,7 @@
 // hand-written GL in server/public/scene.html.
 
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { MapControls } from 'three/addons/controls/MapControls.js';
 // Wide lines, which WebGL cannot draw: `linewidth` on a LineBasicMaterial is
 // ignored -- the spec lets a driver support only 1.0 and every desktop one
 // does -- so the flight was a hairline however close you got to it. These draw
@@ -192,6 +192,7 @@ export function createScene3D(canvas) {
   let groundSpec = null;
   let looksOn = true;
   let surfaceMesh = null;
+  let surfaceDatum = NaN;   // the ground the surface was last built from
   let loaded = null;       // { tn, te, meta, height, kind, base }
   let mission = null;
   // The frame everything in this view is expressed in.
@@ -204,6 +205,7 @@ export function createScene3D(canvas) {
   // change of origin drops them; see setAnchor.
   let anchor = null;
   const frameOf = () => mission?.frame ?? anchor;
+  const GROUND_NAMES = { dgt: 'DGT LiDAR 2024, 1 m', sitr: 'Regione Siciliana 2 m', tinitaly: 'TINITALY 10 m' };
   let hazard = null;
   let onStatus = () => {};
   let onMesh = () => {};
@@ -291,7 +293,31 @@ export function createScene3D(canvas) {
     // you which way was up in a view you orbit by hand. The horizon does that.
     scene.background = sky();
     camera = new THREE.PerspectiveCamera(55, 1, 1, 8000);
-    controls = new OrbitControls(camera, canvas);
+    // Map-style, the way Google Maps' 3D handles: left-drag slides the ground
+    // under the cursor, right-drag (or Ctrl/Shift + left) turns and tilts,
+    // the wheel zooms towards whatever the cursor is over. This was an orbit
+    // camera -- left-drag rotated about a fixed point, the wheel zoomed into
+    // the middle of the screen -- and on 2026-11-13 over Lagos Andrzej asked for
+    // it to behave like Google Maps instead: pan was a right-drag nobody
+    // finds, and zooming at a cliff edge flew past it into the middle.
+    controls = new MapControls(camera, canvas);
+    controls.screenSpacePanning = false;   // slide along the ground, not the screen
+    controls.zoomToCursor = true;
+    controls.zoomSpeed = 2;                // ~12% a wheel notch was a crawl next to Google Maps
+    // A touchpad needs two gains, because a Mac touchpad sends two different
+    // wheels. A pinch arrives as ctrl+wheel, with deltas Chrome sizes so that
+    // exp(-sum/100) is the pinch's scale; the controls multiply those by 10,
+    // and at zoomSpeed 2 a pinch that doubles fingers' spread zooms ~2x --
+    // right as it is. A two-finger scroll arrives as plain pixels, ~100 a
+    // flick, and at zoomSpeed 2 that is 10% a flick: zooming out from a roof
+    // (100 m) to the town (2 km) took ~30 flicks, the "super slow zoom out"
+    // of 2026-11-14. At 9 a flick of 150 px doubles, as near Google Maps.
+    // Set before the controls read it: a capture listener on the same canvas
+    // runs ahead of their bubbling one.
+    canvas.addEventListener('wheel', (e) => { controls.zoomSpeed = e.ctrlKey ? 2 : 9; },
+      { capture: true, passive: true });
+    controls.minDistance = 8;              // not inside a roof
+    controls.maxDistance = 4000;           // not off into space past the loaded ground
     controls.maxPolarAngle = Math.PI / 2 - 0.02;   // never under the ground
     // Drawn on demand, from the controls' own change event -- no animation
     // loop. Two reasons, and the second one bit: a loop spins the GPU while
@@ -325,6 +351,37 @@ export function createScene3D(canvas) {
       onViewMove();
     });
     // The chips live over the canvas, and a drag on one is not an orbit.
+    // A compass, as on Google Maps: the needle points north as the view
+    // turns, and a click turns it back to north-up -- tilt and zoom kept.
+    // Asked for on 2026-11-13 once right-drag could turn the view: there was
+    // no way back to the orientation the map pane is drawn in.
+    compass = document.createElement('button');
+    compass.type = 'button';
+    compass.className = 'compass3d';
+    compass.title = 'Turn back to north up';
+    compass.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 15 12H9z" fill="#e5484d"/>'
+      + '<path d="M12 21 9 12h6z" fill="currentColor"/></svg>';
+    compass.addEventListener('click', northUp);
+    // Beside it, Google Maps' other two: turn 45 degrees either way, and tilt
+    // between straight down and a 45 degree look across the ground. Ctrl-drag
+    // is not something anybody guesses; buttons are.
+    const navBox = document.createElement('div');
+    navBox.className = 'nav3d';
+    const btn = (label, title, fn) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.title = title;
+      b.addEventListener('click', fn);
+      return b;
+    };
+    navBox.append(
+      btn('\u21BA', 'Turn left 45\u00B0', () => turnBy(Math.PI / 4)),
+      compass,
+      btn('\u21BB', 'Turn right 45\u00B0', () => turnBy(-Math.PI / 4)),
+      btn('3D', 'Tilt: straight down / at an angle', toggleTilt),
+    );
+    canvas.parentElement?.append(navBox);
     chipBox = document.createElement('div');
     chipBox.id = 'levelchips';
     canvas.parentElement?.append(chipBox);
@@ -773,9 +830,59 @@ export function createScene3D(canvas) {
     camera.updateProjectionMatrix();
   }
 
+  let compass = null;
+  // North is -z in this view (z points south), so north-up is the camera on
+  // the +z side of its target, looking along -z.
+  function northUp() {
+    if (!controls) return;
+    const t = controls.target;
+    const d = camera.position.distanceTo(t);
+    const polar = controls.getPolarAngle();
+    camera.position.set(t.x, t.y + d * Math.cos(polar), t.z + d * Math.sin(polar));
+    controls.update();
+    render();
+    onViewMove();
+  }
+
+  // Turn the camera about its target by `da` radians of azimuth, keeping
+  // distance and tilt. Positive turns the camera anticlockwise seen from
+  // above, so the world on screen turns clockwise -- the left-arrow button.
+  function turnBy(da) {
+    if (!controls) return;
+    const t = controls.target;
+    const off = camera.position.clone().sub(t);
+    off.applyAxisAngle(new THREE.Vector3(0, 1, 0), da);
+    camera.position.copy(t).add(off);
+    controls.update();
+    render();
+    onViewMove();
+  }
+  // Straight down (just off vertical, so azimuth survives) or 45 degrees.
+  function toggleTilt() {
+    if (!controls) return;
+    const t = controls.target;
+    const d = camera.position.distanceTo(t);
+    const az = controls.getAzimuthalAngle();
+    const polar = controls.getPolarAngle() < 0.2 ? Math.PI / 4 : 0.01;
+    camera.position.set(
+      t.x + d * Math.sin(polar) * Math.sin(az),
+      t.y + d * Math.cos(polar),
+      t.z + d * Math.sin(polar) * Math.cos(az),
+    );
+    controls.update();
+    render();
+    onViewMove();
+  }
+
   function render() {
     if (!renderer || !running) return;
     size();
+    if (compass && controls) {
+      // OrbitControls' azimuth is atan2(x, z) of the camera about its target:
+      // 0 on +z (north-up), +90 deg with the camera east of it looking west --
+      // where north is on screen right, so the needle turns by +azimuth.
+      compass.style.transform = `rotate(${(controls.getAzimuthalAngle() * 180) / Math.PI}deg)`;
+    }
     if (cloud?.points) {
       cloud.points.material.uniforms.uScale.value =
         canvas.clientHeight / 2 / Math.tan((camera.fov * Math.PI) / 360);
@@ -829,6 +936,15 @@ export function createScene3D(canvas) {
     // the crop stands in -- wrong by a metre or two, and not silently absent.
     const datum = (path[0] && groundAt(meta, height, path[0].lat, path[0].lon))
       ?? heightAt(r0, c0);
+    // A new datum lifts or sinks everything; the camera follows, for the
+    // same reason it follows a moved frame (setMission).
+    if (Number.isFinite(surfaceDatum) && camera && controls && Math.abs(datum - surfaceDatum) > 0.01) {
+      const dy = surfaceDatum - datum;
+      camera.position.y += dy;
+      controls.target.y += dy;
+      controls.update();
+    }
+    surfaceDatum = datum;
 
     const verts = new Float32Array(cols * rows * 3);
     const uvs = new Float32Array(cols * rows * 2);
@@ -958,6 +1074,9 @@ export function createScene3D(canvas) {
     loaded.step = step;
     buildFlights();
     buildWires();
+    // And what was painted: a reload restores it before there is any ground
+    // to stand it on, and nothing drew it after -- painted, and invisible.
+    buildPaint();
     // The datum may have moved with the surface; re-place the points on it,
     // and ask for them if this ground has not been asked about. AFTER
     // loaded.datum is set: done before it, the points were placed on the old
@@ -1797,6 +1916,18 @@ export function createScene3D(canvas) {
     }
     const g = f.toLatLon(hit.point.x, -hit.point.z);
     const c = proj.fwd(g.lat, g.lon);
+    // Which way the surface faces where the brush landed, in world axes --
+    // east, up, and NORTH (this view's z points south). A wall says "steep,
+    // facing that way", which is what turns a painted facade into a facade
+    // pass instead of an object to orbit (js/facade.js). Without it a painted
+    // wall was an outline plus a height, and the plan flew rings round the
+    // building and over its roof (Lagos, 2026-11-13).
+    let normal = null;
+    if (hit.face) {
+      const nm = new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld);
+      const w = hit.face.normal.clone().applyMatrix3(nm).normalize();
+      normal = { e: +w.x.toFixed(3), u: +w.y.toFixed(3), n: +(-w.z).toFixed(3) };
+    }
     let grew = false;
     for (let e = Math.floor((c.east - r) / PAINT_CELL); e <= Math.floor((c.east + r) / PAINT_CELL); e++) {
       for (let n = Math.floor((c.north - r) / PAINT_CELL); n <= Math.floor((c.north + r) / PAINT_CELL); n++) {
@@ -1806,7 +1937,7 @@ export function createScene3D(canvas) {
         const key = `${e},${n}`;
         if (painted.has(key)) continue;
         const ll = proj.inv(ce, cn);
-        painted.set(key, { lat: ll.lat, lon: ll.lon, y: hit.point.y });
+        painted.set(key, { lat: ll.lat, lon: ll.lon, y: hit.point.y, ...(normal ? { normal } : {}) });
         grew = true;
       }
     }
@@ -1916,12 +2047,16 @@ export function createScene3D(canvas) {
     }
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    // Pale blue, the colour of a capture point on the map, and faint: the
-    // heat layer is drawn in warm colours over the same ground, and paint in
-    // orange read as part of it.
+    // A white haze over what was painted: white, the colour of "what is
+    // photographed" in every view (palette.js TAP_COLOR), soft and the size
+    // of a brush cell, so it reads as a patch of surface and not as dots.
+    // Rimmed fixed-size dots were tried and looked exactly like the route's
+    // stops. Before that they were 1.4 m pale blue at 35%, invisible from the
+    // 230 m the view opens at -- "how do i see what was painted", Lagos
+    // 2026-11-14.
     paintDots = new THREE.Points(geom, new THREE.PointsMaterial({
-      color: 0x9fd8ff, size: PAINT_CELL * 0.7, sizeAttenuation: true, map: softDot(),
-      transparent: true, opacity: 0.35, depthTest: false, depthWrite: false,
+      color: asHex(TAP_COLOR), size: PAINT_CELL * 1.4, sizeAttenuation: true, map: softDot(),
+      transparent: true, opacity: 0.6, depthTest: false, depthWrite: false,
     }));
     paintDots.renderOrder = 10;
     scene.add(paintDots);
@@ -3051,6 +3186,7 @@ export function createScene3D(canvas) {
   // gl_PointSize is in FRAMEBUFFER pixels, so the size is set from the device
   // pixel ratio in size() rather than here.
   const TAP_PX = 10;
+  const STOP_PX = 7;
   const tapSkin = new THREE.PointsMaterial({
     color: asHex(TAP_COLOR),
     size: TAP_PX,
@@ -3061,6 +3197,8 @@ export function createScene3D(canvas) {
     // is a dot and one behind a wall is still hidden by the wall.
     alphaTest: 0.5,
   });
+  // The same sprite for the route's stops, tinted by the material's colour.
+  const dotSprite = tapSkin.map;
 
   // A filled circle, for the sprite above. Drawn rather than fetched: an
   // eight-by-eight PNG is not worth a request, and this view already builds
@@ -3146,7 +3284,10 @@ export function createScene3D(canvas) {
     // pointed and the stem says how tall you said it was. Unlit on purpose --
     // it is a marker, and a marker that takes the scene's light reads as an
     // object standing there.
-    const taps = mission.points ?? [];
+    // Not for a painted area: its "taps" are the edge of the brush stroke, and
+    // as balls on stalks along the roof they read as waypoints hanging over
+    // it (Lagos, 2026-11-14). What was painted is on the surface already.
+    const taps = painted.size ? [] : (mission.points ?? []);
     if (taps.length) {
       const heads = taps.map((q) => new THREE.Vector3(q.x, Math.max(q.height ?? 0, 0), -q.y));
       missionGroup.add(new THREE.Points(
@@ -3211,10 +3352,16 @@ export function createScene3D(canvas) {
     let runPass = path[0]?.pass;
     const flushRun = () => {
       if (run.length > 1) {
+        const color = asHex(PASS_COLOR[runPass] ?? PASS_FALLBACK);
+        // Seen through what stands in front of it, faintly. A facade flies
+        // in the street between two blocks, and from almost anywhere the
+        // block in front hid most of it -- "the waypoints seem incomplete",
+        // Lagos 2026-11-14. Drawn first and without the depth test, so the
+        // solid line on top covers it wherever the route is in plain view.
         missionGroup.add(fatLine(run, {
-          color: asHex(PASS_COLOR[runPass] ?? PASS_FALLBACK),
-          linewidth: 3,
+          color, linewidth: 2, transparent: true, opacity: 0.35, depthTest: false,
         }));
+        missionGroup.add(fatLine(run, { color, linewidth: 3 }));
       }
       run = run.length ? [run[run.length - 1]] : [];
     };
@@ -3231,10 +3378,15 @@ export function createScene3D(canvas) {
       if (!byPass.has(w.pass)) byPass.set(w.pass, []);
       byPass.get(w.pass).push(at(w));
     }
+    // A fixed size on screen, round, rimmed -- the map's stop dots. They were
+    // 2.2 m squares, which vanish from a hundred metres back and are blobs
+    // from ten. Photo stops only: a transit point is a corner, not a shot.
     for (const [pass, pts] of byPass) {
+      if (pass === 'transit') continue;
       const g = new THREE.BufferGeometry().setFromPoints(pts);
       missionGroup.add(new THREE.Points(g, new THREE.PointsMaterial({
-        color: asHex(PASS_COLOR[pass] ?? PASS_FALLBACK), size: 2.2, sizeAttenuation: true,
+        color: asHex(PASS_COLOR[pass] ?? PASS_FALLBACK), size: STOP_PX * (window.devicePixelRatio || 1),
+        sizeAttenuation: false, map: dotSprite, transparent: true, alphaTest: 0.5,
       })));
     }
 
@@ -3486,7 +3638,10 @@ export function createScene3D(canvas) {
       base: +base.toFixed(2),
       bounds: { south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon },
       tiles: [], wanted: 0, unbuilt: 0,
-      sources: [{ year: g.source === 'sitr' ? 'Regione Siciliana 2 m' : 'TINITALY 10 m' }],
+      sources: [{ year: GROUND_NAMES[g.source] ?? GROUND_NAMES.tinitaly }],
+      // DGT's grid is the SURFACE (roofs, canopy); SITR and TINITALY are bare
+      // earth. Saying "bare earth" over Lagos's tower blocks was wrong.
+      bare: g.source !== 'dgt',
     };
     const next = { key, meta, base: meta.base, height, kind, ortho: null, buildings: [], fromTerrain: true };
     onStatus('Draping the map…');
@@ -3757,6 +3912,20 @@ export function createScene3D(canvas) {
       // meridian convergence -- under a centimetre over the 700 m these tiles
       // are allowed to spread.
       if (m && was && anchor && !mission && moved) rebaseMesh(was, m.frame);
+      // The camera rides along. Everything drawn is about to be rebuilt in
+      // the new frame, and a camera left at the old numbers looked at a spot
+      // the new origin's offset away -- the view leapt on the first brush
+      // stamp (it makes the plan, the plan brings its own origin), and the
+      // rest of the stroke landed on whatever was under the cursor then:
+      // three blocks smeared together at Lagos, 2026-11-13.
+      if (m && was && moved && camera && controls) {
+        const a = proj.fwd(was.lat0, was.lon0);
+        const b = proj.fwd(m.frame.lat0, m.frame.lon0);
+        const shift = new THREE.Vector3(a.east - b.east, 0, -(a.north - b.north));
+        camera.position.add(shift);
+        controls.target.add(shift);
+        controls.update();
+      }
       mission = m;
       // Only a real flight replaces the anchor. setMission(null) arrives on
       // every replan of an empty site -- the app clears the plan when the last
@@ -3848,11 +4017,12 @@ export function createScene3D(canvas) {
       return true;
     },
 
-    // Paint mode: a left-drag paints instead of orbiting. The wheel still
-    // zooms and a right-drag still pans, so you can move about mid-paint.
+    // Paint mode: a left-drag paints instead of panning. The wheel still
+    // zooms and a right-drag still turns the view, so you can move about
+    // mid-paint.
     setPaint(on) {
       paintOn = !!on;
-      if (controls) controls.mouseButtons.LEFT = paintOn ? null : THREE.MOUSE.ROTATE;
+      if (controls) controls.mouseButtons.LEFT = paintOn ? null : THREE.MOUSE.PAN;
       if (!paintOn) canvas.style.cursor = '';
     },
     clearPaint() {
@@ -4133,6 +4303,13 @@ export function createScene3D(canvas) {
     // -> a js/terrain.js grid, or null. See loadFromGround.
     setGroundSource(fn) { groundSource = fn ?? null; },
 
+    // Under test only: where the camera is and what it is looking at.
+    debugCamera() {
+      if (!camera || !controls) return null;
+      return { pos: camera.position.toArray().map((v) => +v.toFixed(1)), target: controls.target.toArray().map((v) => +v.toFixed(1)),
+        dist: +camera.position.distanceTo(controls.target).toFixed(1) };
+    },
+
     // Opening the view is what fetches three.js, the surface and the photo. The
     // first time over new ground that is minutes, and the status says so.
     async open() {
@@ -4164,7 +4341,7 @@ export function createScene3D(canvas) {
           await loadFromGround(c.lat0, c.lon0);
           buildSurface();
           onLoading(null);
-          onStatus(`${loaded.meta.sources[0].year} bare earth — no trees or buildings in it. `
+          onStatus(`${loaded.meta.sources[0].year}${loaded.meta.bare ? ' bare earth — no trees or buildings in it' : ', roofs and trees included'}. `
             + 'Paint what you want captured; the flight is still checked against the model itself.');
           render();
           return;

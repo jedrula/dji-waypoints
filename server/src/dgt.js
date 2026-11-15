@@ -55,9 +55,17 @@ export function createDgtStore({ dir, load = null }) {
   let names = null;
 
   async function fileFor(kind, id) {
-    names ??= await readdir(dir).catch(() => []);
     // The newest version when DGT has reissued a tile (_v01, _v02 ...).
-    const hits = names.filter((f) => f.startsWith(`${kind}-50cm-${id}-`) && f.endsWith('.tif')).sort();
+    const find = () => names.filter((f) => f.startsWith(`${kind}-50cm-${id}-`) && f.endsWith('.tif')).sort();
+    names ??= await readdir(dir).catch(() => []);
+    let hits = find();
+    // Tiles are dropped into the folder while the service runs -- the Lagos
+    // ones were, on 2026-11-13, and a list read once at startup answered 404
+    // for them. A miss reads the folder again; a hit costs nothing.
+    if (!hits.length) {
+      names = await readdir(dir).catch(() => []);
+      hits = find();
+    }
     return hits.length ? path.join(dir, hits[hits.length - 1]) : null;
   }
 

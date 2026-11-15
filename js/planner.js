@@ -261,7 +261,55 @@ function clusterTaps(taps) {
 
   const sorted = [...edges].map((e) => e.d).sort((m, n) => m - n);
   const median = sorted[Math.floor(sorted.length / 2)];
-  const keep = edges.filter((e) => e.d <= median * GAP_FACTOR);
+
+  // A long gap is not enough on its own: the four corners of ONE long
+  // building have one too. 16 x 60 m gives links of 16, 16 and 60, the 60 is
+  // 3.7x the median, and it was cut -- two 16 m things at the ends, the 40 m
+  // of building between them neither orbited nor AVOIDED (hazardsOf groups
+  // the same way), and in simulation 16 of 160 ring cameras stood inside the
+  // block (sim3dgs facade_ab, 2026-11-14). A cut that leaves two taps on one
+  // side is that case: two taps outline no building, they are one edge of
+  // it. So such a cut is refused and the pieces stay one thing -- a bigger
+  // ring round both, which errs safe. Two buildings tapped at their corners
+  // leave three or more a side and still split; a single tap is a thing of
+  // its own and splits too. Longest first, so each cut is judged against the
+  // tree the longer cuts have already left.
+  const cut = new Set();
+  const sideOf = (e) => {
+    // Taps reachable from e.a without e or anything already cut.
+    const seen = new Set([e.a]);
+    const stack = [e.a];
+    while (stack.length) {
+      const i = stack.pop();
+      for (const o of edges) {
+        if (o === e || cut.has(o)) continue;
+        const j = o.a === i ? o.b : o.b === i ? o.a : null;
+        if (j !== null && !seen.has(j)) { seen.add(j); stack.push(j); }
+      }
+    }
+    return seen.size;
+  };
+  const sizeOfComponent = (e) => {
+    // The component e currently sits in, counted the same way.
+    const seen = new Set([e.a]);
+    const stack = [e.a];
+    while (stack.length) {
+      const i = stack.pop();
+      for (const o of edges) {
+        if (cut.has(o)) continue;
+        const j = o.a === i ? o.b : o.b === i ? o.a : null;
+        if (j !== null && !seen.has(j)) { seen.add(j); stack.push(j); }
+      }
+    }
+    return seen.size;
+  };
+  for (const e of [...edges].sort((m, n) => n.d - m.d)) {
+    if (e.d <= median * GAP_FACTOR) break;
+    const a = sideOf(e);
+    const b = sizeOfComponent(e) - a;
+    if (a !== 2 && b !== 2) cut.add(e);
+  }
+  const keep = edges.filter((e) => !cut.has(e));
 
   // Union-find over the links that survived.
   const parent = taps.map((_, i) => i);
@@ -964,7 +1012,11 @@ export function planMission(site, opts, cam) {
   // Something always flies at the set altitude -- the grids, the top orbit ring,
   // the top cross level -- and they are tied to it rather than to each other,
   // so that level answers to the altitude slider and never to one pass.
-  heightLevels.push({ kind: 'altitude', index: 0, z: p.altitude });
+  // Except a facade alone: nothing flies at the altitude then, and a "40 m"
+  // chip over a plan whose top row is 15 m was a number about nothing.
+  if (!p.facade?.length || p.nadir || p.oblique || p.orbit || p.transect || p.establish) {
+    heightLevels.push({ kind: 'altitude', index: 0, z: p.altitude });
+  }
   if (p.nadir) {
     const r = gridPass({
       halfCross: halfX, halfAlong: halfY, sideSpacing, fwdSpacing, clip,
@@ -1201,6 +1253,37 @@ export function planMission(site, opts, cam) {
           : `${((100 * r.frameW) / r.diag).toFixed(0)}% of the site in frame — the ceiling stops it framing all of it`,
       });
     }
+  }
+
+  // A painted facade's stations, worked out by js/facade.js from the terrain
+  // grid: in front of the wall at a set distance, camera level and facing it.
+  // Taken as given -- NOT floored by surfaceFloor, whose whole job is to lift a
+  // station over what is under it, and these stand beside a wall below its
+  // top on purpose. The flight check still measures every leg against the
+  // surface afterwards.
+  if (p.facade?.length) {
+    // Down into the street from overhead, never across. With the establishing
+    // ring in front of it, the leg from the ring (40 m) to the first station
+    // (5.6 m, in the street between two blocks) ran on a slant straight
+    // through the painted block -- Lagos 2026-11-14, one leg struck. So a
+    // transit point over the first station at the ring's height: the hop
+    // across is up there, and the drop is the column the facade itself flies.
+    const last = waypoints[waypoints.length - 1];
+    const first = p.facade[0];
+    if (last && last.alt > first.alt) {
+      waypoints.push({
+        lat: first.lat, lon: first.lon, alt: last.alt, pitch: first.pitch, photo: false,
+        pass: 'transit', heading: { mode: 'followWayline' },
+      });
+    }
+    add(p.facade.map((w) => ({ ...w })));
+    const cols = p.facade.filter((w) => w.lineStart).length;
+    passes.push({ name: 'Facade', count: p.facade.length, detail: `${cols} columns, camera facing the wall` });
+    // The bottom and the top only. Stations are floored one by one over an
+    // uneven street (js/facade.js), so every distinct altitude was a chip --
+    // 13 of them down the side of the 3D view at Lagos, for 5 rows.
+    const alts = p.facade.map((w) => w.alt);
+    for (const z of new Set([Math.min(...alts), Math.max(...alts)])) heightLevels.push({ kind: 'facade', index: 0, z });
   }
 
   // Where each camera actually points. followWayline aims along the leg to the

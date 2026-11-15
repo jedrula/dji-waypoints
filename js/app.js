@@ -24,7 +24,7 @@ import { planMission, proposePlan, splitMission, pointsFromRect, DEFAULTS, DJI_F
 import { SHAPES, DEFAULT_SHAPE, footprintOf, polygonArea } from './shape.js';
 import { frame, mPerDegLat, mPerDegLon } from './geo.js';
 import { mPerPx } from './tiles.js';
-import { PASS_COLOR, LEG_COLOR, TAP_COLOR, passColour } from './palette.js';
+import { PASS_COLOR, PASS_FALLBACK, LEG_COLOR, TAP_COLOR, passColour } from './palette.js';
 import { buildKmz } from './wpml.js';
 import { createView3D } from './view3d.js';
 import { scoreCoverage } from './coverage.js';
@@ -40,7 +40,8 @@ import { checkObstacles } from './collide.js';
 import { createHistory } from './history.js';
 import { surfaceSamples, measureViews, paintedCoverage, bridgeMission } from './views.js';
 import { toPuwg92, inPoland } from './puwg92.js';
-import { createTerrain, sitrCovers, ptCovers } from './terrain.js';
+import { createTerrain, sitrCovers, ptCovers, bareGroundAt, floorAbs, groundAt } from './terrain.js';
+import { facadeFrom, facadeStations } from './facade.js';
 
 import { bestFix, GPS_ERRORS, STALE_MS } from './gps.js';
 import { serviceUrl, serviceHeaders } from './service.js';
@@ -99,8 +100,14 @@ const map = L.map('map', { zoomControl: true, attributionControl: true, zoomSnap
   .setView([50.0614, 19.9366], 16);
 
 const layers = {
-  footprint: L.polygon([], { color: '#4da3ff', weight: 1.5, dashArray: '5,4',
-                             fill: true, fillOpacity: 0.05, interactive: false }).addTo(map),
+  // What is photographed, as a shape: white, the way Google Maps highlights a
+  // place, where everything flown wears its pass colour. It was dashed blue,
+  // the nadir grid's colour, and with a dot on every corner it was the
+  // loudest thing on the map and the one thing not flown (Lagos, 2026-11-14).
+  footprint: L.polygon([], { color: '#f4f6f8', weight: 1.5, opacity: 0.9,
+                             fill: true, fillColor: '#f4f6f8', fillOpacity: 0.12, interactive: false }).addTo(map),
+  // A painted wall: the wall, as a band along its face.
+  wall: L.polyline([], { color: '#f4f6f8', weight: 10, opacity: 0.8, lineCap: 'butt', interactive: false }),
   wires: L.layerGroup().addTo(map),
   // Saved plans switched on from the Plans pane. Added before `path` so the
   // plan you are editing draws over them: one site needs more flights than one
@@ -229,6 +236,7 @@ async function lidarView() {
   if (!lidar) {
     const { createScene3D } = await import('./scene3d.js');
     lidar = createScene3D($('lidar'));
+    window.__lidar = lidar;   // for driving it under test, like __view3d
     // What the photogrammetric mesh says about the flight. Geometry from the
     // view, judgement here: it reports what is under the flight and what the
     // flight runs into, and the readout decides whether that is too close.
@@ -647,6 +655,43 @@ const search = L.Control.geocoder({
   toast(g.name.split(',').slice(0, 3).join(',').trim());
 }).addTo(map);
 
+// A plan from somewhere else: its link pasted into the search box.
+//
+// The browser and the desktop app keep separate libraries -- the page on this
+// machine syncs to the service here, the desktop app to the hosted one, and
+// each install has its own key -- so on 2026-11-13 a plan made in Chrome
+// could not be got into the desktop app except by rebuilding its KMZ outside
+// either. A plan already IS its link (js/share.js), so the link is the
+// transfer: Copy link in the Plans sheet, paste it here, in either app. The
+// pasted plan opens as saved -- applyPlan keeps auto-fit's hands off it -- and
+// the app on this side then checks it against its own ground, as it does any
+// plan it opens.
+search.getContainer().querySelector('input').addEventListener('paste', (e) => {
+  const text = e.clipboardData?.getData('text') ?? '';
+  const plan = decodePlan(text);
+  if (!plan) return;   // a place name or a lat, lon: the geocoder's business
+  e.preventDefault();
+  e.target.value = '';
+  applyPlan(plan);
+  const b = L.latLngBounds(plan.points.map((q) => [q.lat, q.lon]));
+  map.fitBounds(b.pad(0.35), { animate: false, maxZoom: 20 });
+  toast(`Opened a plan with ${plan.points.length} point${plan.points.length === 1 ? '' : 's'} from the pasted link.`);
+});
+
+$('planCopy').addEventListener('click', async () => {
+  const code = planCode();
+  if (!code) { toast('Nothing to copy yet: tap or paint what you want captured first.'); return; }
+  const link = `${location.origin}${location.pathname}#plan=${code}`;
+  try {
+    await navigator.clipboard.writeText(link);
+    toast('Plan link copied. Paste it into the search box of the other app.');
+  } catch {
+    // No clipboard permission (an http page that is not localhost): put it
+    // where it can be copied by hand.
+    window.prompt('Copy this plan link:', link);
+  }
+});
+
 $('recentre').addEventListener('click', () => {
   const b = siteBounds();
   if (!b) return;
@@ -683,7 +728,7 @@ const PASS_IDS = ['nadir', 'oblique', 'orbit', 'transect', 'surround', 'context'
 // picker is choosing between known costs rather than adjectives:
 //
 //     ortho      32 m   88 wp   6.2 min   0.56 cm/px    8% covered
-//     building   32 m  109 wp   8.8 min   0.56 cm/px   36%
+//     building   32 m  109 wp   8.8 min   0.56 cm/px   36%   (before the outer ring joined it)
 //     map        41 m  187 wp  18.0 min   0.72 cm/px   74%, walls 49%
 //
 // and over a single 23 m tap: 2 wp, 18 wp and 46 wp -- six seconds, 1.3 minutes
@@ -704,7 +749,11 @@ const PASS_IDS = ['nadir', 'oblique', 'orbit', 'transect', 'surround', 'context'
 // site-scale want, not a building one. It stays a checkbox in Advanced.
 const PRESETS = {
   ortho: { nadir: true, oblique: false, orbit: false, transect: false, surround: false, establish: false, context: false },
-  building: { nadir: true, oblique: false, orbit: true, transect: false, surround: false, establish: false, context: false },
+  // The outer (establishing) ring is in the default since 2026-11-13, when
+  // Andrzej asked for it: on the block measured above it was the single best
+  // buy, 17 waypoints for walls 13% -> 49%, and it is the one pass that ties
+  // a building to its surroundings in every frame.
+  building: { nadir: true, oblique: false, orbit: true, transect: false, surround: false, establish: true, context: false },
   map: { nadir: true, oblique: true, orbit: true, transect: false, surround: true, establish: true, context: false },
 };
 
@@ -1059,7 +1108,9 @@ async function loadWires() {
 
 function renderPoints() {
   const wanted = new Set();
-  for (const p of site.capture()) wanted.add(syncPoint('capture', p.id, p, p.height, false));
+  // A painted area's outline is the edge of a brush stroke, not points you
+  // placed: no handles. The shape below says what it covers.
+  if (!state.paint) for (const p of site.capture()) wanted.add(syncPoint('capture', p.id, p, p.height, false));
 
   for (const [key, m] of pointMarkers) {
     if (wanted.has(key)) continue;
@@ -1072,7 +1123,12 @@ function renderPoints() {
   // taps when there is not -- it is the cheap half, and it is the half you are
   // actually looking at while you place points.
   const shown = state.mission ?? measure();
-  if (shown && shown.hull.length >= 3) {
+  // A painted wall is a line, not an area: the band along it, and no outline
+  // of the roof the stroke also crossed.
+  const wall = state.face && state.facadeInfo?.wall;
+  if (wall) layers.wall.setLatLngs(wall.map((q) => [q.lat, q.lon])).addTo(map);
+  else layers.wall.remove();
+  if (!wall && shown && shown.hull.length >= 3) {
     layers.footprint.setLatLngs(shown.hull.map((q) => {
       const ll = shown.frame.toLatLon(q.x, q.y);
       return [ll.lat, ll.lon];
@@ -1086,13 +1142,12 @@ function renderPoints() {
 function syncPoint(kind, id, at, height, bad) {
   const key = `${kind}:${id}`;
   const on = state.selected?.kind === kind && state.selected?.id === id;
-  // A painted area's outline is up to 24 points of one measured height, and
-  // as 24 numbered discs reading "35" it buried the plan it made. Painted,
-  // they are small dots: still there to nudge, saying nothing 24 times.
-  const painted = !!state.paint;
-  const size = painted ? 10 : kind === 'capture' ? 24 : 22;
-  const html = `<div class="pt ${kind}${painted ? ' painted' : ''}${on ? ' on' : ''}${bad ? ' strike' : ''}" `
-    + `style="width:${size}px;height:${size}px">${painted ? '' : Math.round(height)}</div>`;
+  // Handles, not labels: small until picked, and the height only on the one
+  // in hand (the bar below shows it too). Ten numbered discs round a building
+  // outweighed the flight they made.
+  const size = on ? 22 : 12;
+  const html = `<div class="pt ${kind}${on ? ' on' : ''}${bad ? ' strike' : ''}" `
+    + `style="width:${size}px;height:${size}px">${on ? Math.round(height) : ''}</div>`;
 
   const existing = pointMarkers.get(key);
   if (existing) {
@@ -1193,6 +1248,7 @@ $('clearMode').addEventListener('click', () => {
   detailBaseAlt = null;
   lidar?.setHeat(null);
   state.paint = null;
+  state.face = null;
   state.paintCover = null;
   savePaint();
   placePaintView();
@@ -1306,7 +1362,7 @@ function computePlan() {
   const hazards = wireHazards();
 
   try {
-    state.mission = planMission(siteForPlanner(), p, cam);
+    state.mission = planFacadeAware(p);
   } catch {
     state.mission = null;
     renderReadout();
@@ -1628,11 +1684,12 @@ function renderPath(m, { groups = PLAN_GROUPS(), dashed = false } = {}) {
   let runPass = null;
   const flush = () => {
     if (run.length > 1) {
-      if (dashed) {
-        L.polyline(run, { color: '#12181f', weight: 4.5, opacity: 0.5, interactive: false }).addTo(groups.path);
-      }
+      // A dark casing under the line, as a road on Google Maps has: the route
+      // is the thing you are planning, and at 2 px with no edge it was the
+      // quietest line on a satellite photo.
+      L.polyline(run, { color: '#0b1016', weight: dashed ? 4.5 : 5.5, opacity: 0.5, interactive: false }).addTo(groups.path);
       L.polyline(run, {
-        color: PASS_COLOR[runPass], weight: 2, opacity: dashed ? 1 : 0.85,
+        color: PASS_COLOR[runPass] ?? PASS_FALLBACK, weight: dashed ? 2 : 3, opacity: 1,
         dashArray: dashed ? '5,4' : null, interactive: false,
       }).addTo(groups.path);
     }
@@ -1658,18 +1715,41 @@ function renderPath(m, { groups = PLAN_GROUPS(), dashed = false } = {}) {
     }).addTo(groups.poses);
   });
 
-  const step = Math.max(1, Math.ceil(m.waypoints.length / 400));   // keep the map responsive
-  m.waypoints.forEach((w, i) => {
+  // One dot per place a photo is taken. Stops stacked straight up -- a
+  // facade's column, six rows over one spot of pavement -- are one dot with
+  // a count, or 51 stations read as the 16 dots you can see (Lagos,
+  // 2026-11-14). Transit points take no photo and get no dot.
+  const stacks = [];
+  for (const w of m.waypoints) {
+    if (w.photo === false) continue;
+    const top = stacks[stacks.length - 1];
+    if (top && top.pass === w.pass && Math.abs(top.lat - w.lat) < 2e-6 && Math.abs(top.lon - w.lon) < 2e-6) top.n++;
+    else stacks.push({ lat: w.lat, lon: w.lon, pass: w.pass, n: 1 });
+  }
+  const step = Math.max(1, Math.ceil(stacks.length / 400));   // keep the map responsive
+  stacks.forEach((s, i) => {
     if (i % step) return;
-    L.marker([w.lat, w.lon], {
-      icon: L.divIcon({ className: 'wpdot', iconSize: [5, 5] }), interactive: false,
-    }).addTo(groups.dots)._icon.style.background = PASS_COLOR[w.pass];
+    // The count where it changes, not on every column: sixteen "x5"s along
+    // one wall covered the stops they were counting.
+    const label = s.n > 1 && stacks[i - 1]?.n !== s.n;
+    L.marker([s.lat, s.lon], {
+      icon: L.divIcon({ className: 'wpdot', iconSize: [8, 8] }), interactive: false,
+    }).addTo(groups.dots)._icon.style.background = PASS_COLOR[s.pass] ?? PASS_FALLBACK;
+    if (label && !dashed) {
+      L.marker([s.lat, s.lon], {
+        icon: L.divIcon({ className: '', html: `<div class="wpstack">×${s.n}</div>`, iconSize: [0, 0] }),
+        interactive: false,
+      }).addTo(groups.dots);
+    }
   });
 
-  L.circleMarker([m.waypoints[0].lat, m.waypoints[0].lon],
-    { radius: 6, color: dashed ? '#12181f' : '#fff', weight: 2,
-      fillColor: PASS_COLOR[m.waypoints[0].pass], fillOpacity: 1 })
-    .addTo(groups.path).bindTooltip(dashed ? 'On the controller' : 'Start');
+  // Where it begins, said in a word rather than a colour: the ring of a
+  // circle marker in the first pass's colour did not say "start" to anyone.
+  L.marker([m.waypoints[0].lat, m.waypoints[0].lon], {
+    icon: L.divIcon({ className: '', html: `<div class="wpstart" style="width:34px">${dashed ? 'RC' : 'Start'}</div>`,
+                      iconSize: [34, 16], iconAnchor: [17, 24] }),
+    interactive: false, zIndexOffset: 1000,
+  }).addTo(groups.path);
 }
 
 /* ---------- the capture: several saved plans on the map at once ---------- */
@@ -2763,6 +2843,9 @@ $('tipPaint').addEventListener('click', async () => {
 async function paintToSite(cells) {
   const got = paintedSite(cells);
   if (!got) return;
+  // A wall, or not -- decided by which way the painted surface faces.
+  state.face = facadeFrom(cells);
+  if (state.face) tuned = true;   // auto-fit's altitudes and rings mean nothing to a facade
   detailBaseAlt = null;
   state.paint = cells;
   site.setCapture(got.points);
@@ -2921,7 +3004,66 @@ function planWith(v) {
   const p = paramsFromUi(v);
   p.subjectClearance = clearance();
   p.surfaceFloor = surveyFloor();
-  return planMission(siteForPlanner(), p, cam);
+  return planFacadeAware(p);
+}
+// planMission, with the facade (if one is painted) on the takeoff's datum.
+// The one way a plan is made from the sliders: the replan and the clearance
+// search each had their own copy, and the fix below went into one of them.
+function planFacadeAware(p) {
+  withFacade(p);
+  const m = planMission(siteForPlanner(), p, cam);
+  // The facade's altitudes are above the ground at ITS first station; the
+  // aircraft's are above wherever it takes off, which is the plan's first
+  // waypoint -- the establishing ring's, now that the ring flies first. At
+  // Lagos on 2026-11-14 those grounds were 37.4 and 38.5 m, and the whole
+  // facade flew 1.1 m off the heights it was floored and checked at. So
+  // re-base it on the real takeoff and plan again (well under a millisecond).
+  const fi = state.facadeInfo;
+  const first = (m.exported ?? m.waypoints)?.[0];
+  if (fi && first && first.pass !== 'facade') {
+    const home = fi.bare(first.lat, first.lon);
+    if (home !== null && Math.abs(home - fi.datum) >= 0.05) {
+      // Rounded UP, as js/facade.js rounds: never under the floor it was built on.
+      p.facade = p.facade.map((w) => ({ ...w, alt: Math.ceil((w.alt + fi.datum - home) * 10) / 10 }));
+      return planMission(siteForPlanner(), p, cam);
+    }
+  }
+  return m;
+}
+
+// A painted facade replaces every other pass with the facade pass and the
+// establishing ring (see js/facade.js, and the measurement below): a wall
+// wants the drone in front of it, not round and over the building it
+// belongs to. Heights from the grid the 3D view painted on
+// (DGT in Portugal): bare ground for the foot and the takeoff, surface for
+// the top. With no grid there is no facade plan -- the painted outline and
+// its orbit stand, as before.
+const FACADE_STANDOFF = 10;   // m from the wall's outermost point; asked for on 2026-11-13
+function withFacade(p) {
+  state.facadeInfo = null;
+  if (!state.face) return p;
+  const g = paintGround.grid() ?? terrain.grid();
+  if (!g) return p;
+  const st = facadeStations(state.face, {
+    standoff: FACADE_STANDOFF, sideOverlap: p.sideOverlap, frontOverlap: p.frontOverlap, speed: Math.min(p.speed, 3),
+    cam, ground: (lat, lon) => bareGroundAt(g, lat, lon), surface: (lat, lon) => groundAt(g, lat, lon),
+    floor: (lat, lon) => floorAbs(g, lat, lon, clearance()),
+  });
+  state.facadeInfo = st;
+  if (!st) return p;
+  st.bare = (lat, lon) => bareGroundAt(g, lat, lon);
+  // The wall, plus the establishing ring -- never the wall alone. Measured in
+  // simulation 2026-11-14 (sim3dgs facade_ab2: a dressed 60 m wall, 26 shared
+  // views, n = 3 each), wall LPIPS, lower is better:
+  //     facade alone, 158 frames          0.589 +- 0.035, cameras off by 0.20 m
+  //     7 orbit rings, 148 frames         0.544 +- 0.030
+  //     facade + establishing ring, 173   0.417 +- 0.001, cameras off by 0.003 m
+  // The facade pass has no long baseline and never sees the street or the
+  // roof, so it drifts; 15 frames of the outer ring tie it down. One scene,
+  // flat ground, synthetic -- but the ranking held in all three repeats.
+  Object.assign(p, { nadir: false, oblique: false, orbit: false, transect: false, surround: false,
+    context: false, establish: true, facade: st.pts });
+  return p;
 }
 // The survey as the planner's floor, when the survey view has it loaded.
 function surveyFloor() {
@@ -3221,7 +3363,11 @@ function savePaint() {
     if (!state.paint?.length) { localStorage.removeItem(PAINT_KEY); return; }
     localStorage.setItem(PAINT_KEY, JSON.stringify({
       sig: planSig(),
-      cells: state.paint.map((c) => ({ lat: +c.lat.toFixed(7), lon: +c.lon.toFixed(7), y: +c.y.toFixed(2) })),
+      // The normal too: it is what makes a painted wall a facade (js/facade.js),
+      // and without it a reload quietly turned the facade plan back into
+      // rings over the roof.
+      cells: state.paint.map((c) => ({ lat: +c.lat.toFixed(7), lon: +c.lon.toFixed(7), y: +c.y.toFixed(2),
+        ...(c.normal ? { normal: c.normal } : {}) })),
       selection: lidar?.selectionState?.() ?? null,
     }));
   } catch { /* storage full or blocked: paint lasts this load only */ }
@@ -3230,6 +3376,7 @@ function savePaint() {
   const saved = savedPaint();
   if (saved?.cells?.length && saved.sig === planSig()) {
     state.paint = saved.cells;
+    state.face = facadeFrom(saved.cells);
     // The markers were drawn at startup, before this: redrawn as the painted
     // outline's dots rather than left as 24 numbered discs after a reload.
     renderPoints();

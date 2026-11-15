@@ -221,6 +221,17 @@ ok('four corner taps are one thing, not four',
        .subjects.length === 1);
 }
 
+// The corners of one LONG building: 16 x 60 m gives links 16, 16, 60 and the
+// 60 is out of scale -- but cutting it leaves two taps a side, an edge each,
+// and the middle 40 m of building was neither orbited nor avoided.
+{
+  const long = { points: [[-8, -30], [8, -30], [8, 30], [-8, 30]].map(([e, n]) => ({
+    lat: 50.06 + n / 111132, lon: 19.93 + e / (111412 * Math.cos(50 * Math.PI / 180)), height: 20 })) };
+  const m = planMission(long, { altitude: 30, nadir: false, oblique: false, surround: false }, cam);
+  ok('four corners of a long building are one thing, not its two ends',
+     m.subjects.length === 1 && m.subjects[0].spanY > 55, m.subjects.map((s) => `${s.spanX.toFixed(0)}x${s.spanY.toFixed(0)}`).join(' '));
+}
+
 ok('two taps outline nothing, so they are two things',
    domesOf(planMission({ points: [
      { lat: 50.061, lon: 19.931, height: 6 }, { lat: 50.0615, lon: 19.9318, height: 6 },
@@ -2894,6 +2905,73 @@ console.log('\nthe ground in Portugal (DGT LiDAR through the service)');
   ok('and checks against it', t.checkFlight(m, 3).hits === 1);
   const down = createTerrain({ service: () => 'http://svc', fetch: async () => ({ ok: false, status: 404 }) });
   ok('no tiles there: nothing loaded, nothing claimed', await down.ensure(m) === false && down.checkFlight(m, 3) === null);
+}
+
+console.log('\na painted facade (js/facade.js)');
+{
+  const { facadeFrom, facadeStations } = await import('../js/facade.js');
+  const { frame: fr } = await import('../js/geo.js');
+  // A wall facing EAST, its face at x = 0, 30 m long north-south, at Lagos.
+  const f0 = fr(37.0936, -8.6697);
+  const wallCells = [];
+  for (let y = -15; y <= 15; y += 2) for (let x = -1; x <= 0; x += 1) {
+    const g = f0.toLatLon(x, y);
+    wallCells.push({ ...g, y: 5, normal: { e: 1, u: 0.05, n: 0.02 } });
+  }
+  const roofCells = wallCells.map((c) => ({ ...c, normal: { e: 0, u: 1, n: 0 } }));
+  const w = facadeFrom(wallCells);
+  ok('steep cells facing one way are a facade', !!w);
+  ok('facing east', w && Math.abs(w.out.e - 1) < 0.01);
+  ok('a painted roof is not', facadeFrom(roofCells) === null);
+  // The wall is as long as what was painted, not as the steep part of it:
+  // at Lagos the steep cells were all at one end and the plan covered 37 m of
+  // a 64 m stroke.
+  {
+    const oneEnd = wallCells.map((c) => (f0.toLocal(c.lat, c.lon).y > 0 ? { ...c, normal: { e: 0, u: 1, n: 0 } } : c));
+    const ww = facadeFrom(oneEnd);
+    ok('a wall half painted on balconies still spans the whole stroke', ww && ww.s1 - ww.s0 > 29, ww && (ww.s1 - ww.s0).toFixed(1));
+  }
+  ok('nor cells with no normal (painted before the brush recorded one)', facadeFrom(wallCells.map(({ normal, ...c }) => c)) === null);
+  // Ground 10 m everywhere, the building 25 m behind the face (x < 0).
+  const ground = () => 10;
+  const surface = (lat, lon) => (f0.toLocal(lat, lon).x < -0.01 ? 25 : 10);
+  const st = facadeStations(w, { standoff: 10, cam: CAMERAS.mini5pro, ground, surface });
+  ok('stations are found', st && st.pts.length > 0, JSON.stringify(st && { cols: st.cols, rows: st.rows }));
+  const xs = st.pts.map((p) => f0.toLocal(p.lat, p.lon).x);
+  ok('every station stands 10 m off the wall face', xs.every((x) => Math.abs(x - 10) < 0.2), xs.slice(0, 3).join());
+  ok('camera facing the wall: heading west', st.pts.every((p) => Math.abs(Math.abs(p.heading.angle) - 90) < 1 && p.heading.angle < 0), String(st.pts[0].heading.angle));
+  ok('level, except the top row looking down over the roof edge',
+     st.pts.filter((p) => p.pitch === 0).length > 0 && st.pts.filter((p) => p.pitch === -20).length === st.cols);
+  ok('the lowest row 3 m above the foot of the wall', Math.min(...st.pts.map((p) => p.alt)) === 3);
+  ok('the top row above the 15 m wall', Math.max(...st.pts.map((p) => p.alt)) > 15);
+  ok('columns run along the whole wall', st.cols >= 3);
+  // Into the planner: only the facade flies, and it is not lifted.
+  const m = planMission({ points: wallCells.slice(0, 4).map((c, i) => ({ id: 'w' + i, lat: c.lat, lon: c.lon, height: 15 })), shape: 'hull' },
+    { ...DEFAULTS, nadir: false, oblique: false, transect: false, orbit: false, surround: false, context: false, establish: false, facade: st.pts, surfaceFloor: () => 40 },
+    CAMERAS.mini5pro);
+  ok('the plan is the facade pass alone', m.passes.length === 1 && m.passes[0].name === 'Facade' && m.exported.length === st.pts.length);
+  ok('and a surface floor does not lift it over the roof', m.exported.every((w2, i) => w2.alt === st.pts[i].alt));
+  ok('one photo per waypoint', m.stats.photos === m.exported.length);
+
+  // The paint 6 m inside the block, a 15 m street, and the NEXT block from
+  // x = 25: the wall is the first open ground after the building, not the
+  // last (which was the far side of the next block, 35 m out at Lagos).
+  const inside = facadeFrom(wallCells.map((c) => ({ ...c, ...f0.toLatLon(f0.toLocal(c.lat, c.lon).x - 6, f0.toLocal(c.lat, c.lon).y) })));
+  const street = (lat, lon) => { const x = f0.toLocal(lat, lon).x; return x < -0.01 || x > 25 ? 25 : 10; };
+  const st2 = facadeStations(inside, { standoff: 10, cam: CAMERAS.mini5pro, ground, surface: street });
+  const xs2 = st2.pts.map((p) => f0.toLocal(p.lat, p.lon).x);
+  ok('the wall is the near edge of the street, not the far block', xs2.every((x) => Math.abs(x - 10) < 0.7), xs2.slice(0, 3).join());
+  // A 2.4 m bump (a parked van) in front of the wall's middle: the stations
+  // there rise to clear it by the clearance, the others do not, and no lifted
+  // row lands on top of the next one.
+  const floor = (lat, lon) => { const q = f0.toLocal(lat, lon); return Math.abs(q.y) < 3 ? 12.4 + 3 : 13; };
+  const st3 = facadeStations(w, { standoff: 10, cam: CAMERAS.mini5pro, ground, surface, floor });
+  const mid = st3.pts.filter((p) => Math.abs(f0.toLocal(p.lat, p.lon).y) < 3);
+  ok('stations over the van are lifted above it', mid.length > 0 && mid.every((p) => p.alt >= 5.4 - 1e-9), mid.map((p) => p.alt).join());
+  ok('elsewhere the bottom row stays at 3 m', st3.pts.some((p) => p.alt === 3));
+  const byCol = new Map();
+  for (const p of st3.pts) { const k = p.lat.toFixed(7) + p.lon.toFixed(7); byCol.set(k, [...(byCol.get(k) ?? []), p.alt].sort((a, b) => a - b)); }
+  ok('no two rows in a column closer than half a row', [...byCol.values()].every((a) => a.every((z, i) => i === 0 || z - a[i - 1] >= st3.dRow / 2 - 0.11)));
 }
 
 console.log(`\n${fails === 0 ? 'ALL PASS' : fails + ' FAILURES'}`);

@@ -167,9 +167,16 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 .pt { display: flex; align-items: center; justify-content: center;
       border-radius: 50%; border: 2px solid #04101d; color: #04101d;
       font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.pt.capture { background: var(--capture); }
-.pt.painted { border-width: 1.5px; box-shadow: none; }
-.pt.on { outline: 2px solid #fff; outline-offset: 1px; }
+.pt.capture { background: #f4f6f8; }   /* palette.js TAP_COLOR: what is photographed */
+.pt.on { outline: 2px solid var(--capture); outline-offset: 1px; }
+/* The route's stops: the pass colour on a white rim, so a 7 px dot reads on a
+   dark roof and a pale one alike. A count where stops stack straight up. */
+.wpdot { border-radius: 50%; border: 1.5px solid #fff; box-sizing: border-box;
+         box-shadow: 0 0 0 1px rgba(0,0,0,0.45); }
+.wpstack { font: 700 10px/1 system-ui, sans-serif; color: #fff; background: rgba(12,16,22,0.85);
+           border-radius: 7px; padding: 2px 4px; white-space: nowrap; transform: translate(6px, -14px); }
+.wpstart { font: 700 10px/16px system-ui, sans-serif; color: #04101d; background: #fff; text-align: center;
+           border-radius: 8px; box-shadow: 0 0 0 1.5px rgba(0,0,0,0.6); }
 .pt.strike { background: #ff5d5d; color: #fff; }
 .gpsdot { background: var(--capture); border: 2px solid #fff; border-radius: 50%;
           box-shadow: 0 0 0 1px rgba(0,0,0,0.5); }
@@ -272,7 +279,10 @@ fieldset.passes legend { color: var(--dim); font-size: 11px; text-transform: upp
 /* The link sits ON the divider in a split -- it ties the two panes, so it
    belongs to neither -- and under the view tabs otherwise. */
 #linkBtn { top: 82px; left: auto; right: 10px; }
-#stage.split #linkBtn { top: 10px; right: auto; left: var(--split); transform: translateX(-50%); }
+/* Above the divider (z 600): sitting on it at 500, every click on the link
+   landed on the splitter instead, and linking could not be switched at all
+   in the one layout it exists for (found 2026-11-13). */
+#stage.split #linkBtn { top: 10px; right: auto; left: var(--split); transform: translateX(-50%); z-index: 610; }
 #linkBtn.on { color: var(--accent); border-color: var(--accent); }
 /* Under the two sync buttons on the 3D pane's own right-hand stack, because it
    acts on the 3D and nothing else. */
@@ -569,3 +579,15 @@ code { background: var(--panel2); border-radius: 4px; padding: 1px 5px; font-siz
 .detailrow[hidden] { display: none; }
 .detailrow .ctl input[type=range] { max-width: none; }
 .detailrow .ctl output { width: 84px; color: var(--text); font-weight: 600; }
+
+/* The 3D view's compass (scene3d northUp): the needle shows north, a click
+   turns the view back to north up. */
+.nav3d { position: absolute; right: 14px; bottom: 34px; z-index: 6; display: flex; gap: 6px; align-items: center; }
+.nav3d > button:not(.compass3d) { width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--line, #3334);
+  background: var(--panel, #1b1f24); color: var(--fg, #ddd); font: 600 13px system-ui, sans-serif; cursor: pointer;
+  box-shadow: 0 1px 4px #0006; padding: 0; }
+.compass3d { width: 36px; height: 36px;
+  border-radius: 50%; border: 1px solid var(--line, #3334); background: var(--panel, #1b1f24); color: var(--dim, #aaa);
+  padding: 6px; cursor: pointer; box-shadow: 0 1px 4px #0006; }
+.compass3d svg { width: 100%; height: 100%; display: block; }
+#lidar[hidden] ~ .nav3d { display: none; }

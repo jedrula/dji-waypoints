@@ -338,6 +338,14 @@ const cornerMin = (g, e, n) => corners(g, e, n, Math.min);
 // under would become the zero every altitude is added to.
 const datumAt = (g, e, n) => cornerMin(g.ground ? { ...g, z: g.ground } : g, e, n);
 
+// The bare ground at a point, metres above sea level, read low (the lowest of
+// the four cells) -- what the takeoff stands on, and the foot of a facade.
+// Null off the grid.
+export const bareGroundAt = (g, lat, lon) => {
+  const { east, north } = gridXY(g, lat, lon);
+  return datumAt(g, east, north);
+};
+
 export const groundAt = (g, lat, lon) => {
   const { east, north } = gridXY(g, lat, lon);
   return cornerMax(g, east, north);
@@ -361,6 +369,16 @@ function nearMax(g, e, n, reach) {
     }
   }
   return top;
+}
+
+// The lowest a point may be flown at, metres above sea level: the tallest
+// surface within the clearance (and a metre more, so the check that uses
+// exactly `clr` cannot disagree by a cell), plus the clearance. Null off the
+// grid. For the facade's stations, which stand in streets.
+export function floorAbs(g, lat, lon, clr) {
+  const { east, north } = gridXY(g, lat, lon);
+  const top = nearMax(g, east, north, clr + 1);
+  return top === null ? null : top + clr;
 }
 
 // Would this flight come within `clr` metres of the ground?

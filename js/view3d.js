@@ -498,6 +498,43 @@ export function createView3D(canvas) {
   // height leans away from nadir, so a roof is painted metres from the walls
   // holding it up. That is why this is off unless asked for, and why the boxes
   // are the thing to judge clearance against.
+  // The deepest zoom the service HOLDS here, not the deepest it declares.
+  // `ground.maxZoom` is one number for the world (21 for Esri's imagery), and
+  // over Lagos on 2026-11-14 its tilemap held z19 and nothing at z20 or z21:
+  // every tile asked there came back as the same 2521-byte grey "Map data not
+  // yet available", painted across the ground of this view while the map
+  // beside it, which already asked (js/basemap.js capZoom), looked fine. So
+  // ask the tilemap too, deepest first, per z16 neighbourhood, and redraw
+  // when it answers. Until it does, 19 -- the ceiling this view had before
+  // it was raised to 21; a probe that fails keeps the declared maximum, as
+  // the map does.
+  const held = new Map();
+  function heldHere(lat, lon) {
+    const top = ground.maxZoom ?? 19;
+    if (!ground.tilemap) return top;
+    const tileOf = (z) => {
+      const n = 2 ** z;
+      const r = (lat * Math.PI) / 180;
+      return { x: Math.floor(((lon + 180) / 360) * n),
+               y: Math.floor(((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * n) };
+    };
+    const t16 = tileOf(16);
+    const key = `${ground.url(0, 0, 0)}|${t16.x}|${t16.y}`;
+    if (!held.has(key)) {
+      held.set(key, null);
+      (async () => {
+        for (let z = top; z >= 16; z--) {
+          const t = tileOf(z);
+          const j = await fetch(ground.tilemap(z, t.x, t.y, 1, 1)).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+          if (!Array.isArray(j?.data)) return top;
+          if (j.data[0]) return z;
+        }
+        return 16;
+      })().then((z) => { held.set(key, z); draw(); });
+    }
+    return held.get(key) ?? Math.min(top, 19);
+  }
+
   function drawGround(b, w, h, f, dpr) {
     // `scene.frame`, not `mission.frame`: with a capture switched on and no
     // plan loaded there is no live mission, and this used to return here --
@@ -515,7 +552,7 @@ export function createView3D(canvas) {
     // buys ground by dropping a zoom level. 48 tiles of 256 px is about three
     // megapixels and the cache holds 200.
     const z = pickZoom({ south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon },
-                       { maxZoom: ground.maxZoom ?? 19, maxTiles: 48 });
+                       { maxZoom: heldHere((sw.lat + ne.lat) / 2, (sw.lon + ne.lon) / 2), maxTiles: 48 });
     const r = tileRange({ south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon }, z);
     const tris = [];
     // Quads per tile side over relief, so the whole ground stays near TRI_BUDGET.

@@ -2948,6 +2948,20 @@ console.log('\na painted facade (js/facade.js)');
   ok('the plan is the facade pass alone', m.passes.length === 1 && m.passes[0].name === 'Facade' && m.exported.length === st.pts.length);
   ok('and a surface floor does not lift it over the roof', m.exported.every((w2, i) => w2.alt === st.pts[i].alt));
   ok('one photo per waypoint', m.stats.photos === m.exported.length);
+  // With the outer ring, which the app always adds to a wall: it goes ROUND
+  // the wall's stations. Sized from the stops planned before it -- none, with
+  // a facade -- it was a 15 m ring beside the column at Lagos, 2026-11-16.
+  {
+    const site = { points: wallCells.slice(0, 4).map((c, i) => ({ id: 'w' + i, lat: c.lat, lon: c.lon, height: 15 })), shape: 'hull' };
+    const me = planMission(site,
+      { ...DEFAULTS, nadir: false, oblique: false, transect: false, orbit: false, surround: false, context: false, establish: true, facade: st.pts },
+      CAMERAS.mini5pro);
+    const fr = me.frame;
+    const rad = (q) => { const l = fr.toLocal(q.lat, q.lon); return Math.hypot(l.x, l.y); };
+    const ringR2 = Math.min(...me.exported.filter((q) => q.pass === 'establish').map(rad));
+    const wallR = Math.max(...st.pts.map(rad));
+    ok(`a wall's outer ring stands outside its stations (${ringR2.toFixed(0)} m vs ${wallR.toFixed(0)} m)`, ringR2 >= wallR + 9);
+  }
 
   // The paint 6 m inside the block, a 15 m street, and the NEXT block from
   // x = 25: the wall is the first open ground after the building, not the

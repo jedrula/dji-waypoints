@@ -1230,9 +1230,13 @@ export function planMission(site, opts, cam) {
   // around!" -- the ring is for what surrounds the subject, so it stands 10 m
   // beyond the furthest photo stop and looks in across it.
   if (p.establish) {
+    // The facade's stations too, though they are added below it: with a
+    // painted wall they are the ONLY other photo stops, and measuring just
+    // what came before left `beyond` at 0 -- at Lagos on 2026-11-16 a 15 m
+    // ring flew beside the wall's column, not round it ("no outer ring again
+    // as i draw").
     let beyond = 0;
-    for (const w of waypoints) {
-      if (!w.photo) continue;
+    for (const w of [...waypoints.filter((x) => x.photo), ...(p.facade ?? [])]) {
       const l = f.toLocal(w.lat, w.lon);
       beyond = Math.max(beyond, Math.hypot(l.x, l.y));
     }

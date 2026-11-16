@@ -1935,12 +1935,24 @@ export function createScene3D(canvas) {
     if (grew) { buildPaint(); render(); }
   }
 
+  // The plan waits until you have stopped painting, not just lifted the
+  // button: it used to be built on every pointerup, so a pause mid-stroke or
+  // the gap between two strokes drew a whole mission over what you were still
+  // painting (Lagos, 2026-11-16: "let me finish the paint stroke!"). A new
+  // stroke inside the pause cancels it, so a wall painted in five strokes is
+  // planned once.
+  const PAINT_SETTLE_MS = 900;
+  let paintTimer = null;
   function endPaint() {
     if (!painting) return;
     painting = false;
     selOn.value = selView ? 1 : 0;
-    if (cloud?.points && cloudOn) { onPaint(selectedCells()); return; }
-    onPaint([...painted.values()]);
+    clearTimeout(paintTimer);
+    paintTimer = setTimeout(() => {
+      paintTimer = null;
+      if (cloud?.points && cloudOn) { onPaint(selectedCells()); return; }
+      onPaint([...painted.values()]);
+    }, PAINT_SETTLE_MS);
   }
 
   // A 2 m grid over the points' local x/y, as a counting sort: `order` holds
@@ -2443,6 +2455,8 @@ export function createScene3D(canvas) {
   function meshDown(ev) {
     dragged = false;
     if (paintOn && ev.button === 0) {
+      clearTimeout(paintTimer);
+      paintTimer = null;
       painting = true;
       dragged = true;
       selOn.value = 1;
@@ -3424,33 +3438,18 @@ export function createScene3D(canvas) {
     // ENU (x east, y north, z up) to three.js (x east, y up, z south).
     const dir = (o) => new THREE.Vector3(o.x, o.z, -o.y);
 
-    // How far a wedge reaches: to whatever its camera is actually looking at.
-    //
-    // It used to be a tenth of the FLIGHT's extent, capped by the altitude --
-    // which on a tight site is 5.4 m, so every wedge was a stub, and the low
-    // orbit rings were stubs hidden behind the buildings they were pointing at.
-    // Length carried no information either: a camera aimed at a wall ten metres
-    // away drew the same cone as one aimed at the ground forty metres below.
-    //
-    // Now each one is marched along its own axis against the height grid the
-    // collision check uses, and stops where it meets something. So the wedge
-    // lands ON the roof or facade it is framing, which is the thing you wanted
-    // to see, and its length tells you the shot distance. 8,400 grid lookups
-    // for seventy wedges, which is nothing.
+    // How far a wedge reaches: a short pyramid at the aircraft, not out to
+    // what it frames. Marched to the ground (until 2026-11-16) every wedge was
+    // a full set of lines across the scene, and the Lagos facade's sixteen
+    // drew a cage over the block the photos were of; Andrzej: "i wanted just
+    // to see where the camera is pointed from the waypoint". A twentieth of
+    // the flight's extent, 3-8 m, is big enough to read the direction and
+    // small enough that neighbouring stops (~5 m apart on a facade) do not
+    // overlap.
     const box = new THREE.Box3();
     for (const w of path) box.expandByPoint(at(w));
-    const span = Math.max(box.getSize(new THREE.Vector3()).x, 20);
-    const fallback = Math.max(6, Math.min(span * 0.25, Math.max(box.max.y, 1) * 0.8));
-    const REACH = 140;
-    const reachOf = (apex, fwd) => {
-      if (!heights) return fallback;
-      for (let d = 2; d <= REACH; d += 1) {
-        const g = groundUnder(apex.x + fwd.x * d, apex.z + fwd.z * d);
-        if (g !== null && apex.y + fwd.y * d <= g) return d;
-      }
-      // Nothing in shot -- pointing at the sky, or off the fetched ground.
-      return fallback;
-    };
+    const span = Math.max(box.getSize(new THREE.Vector3()).x, box.getSize(new THREE.Vector3()).z, 20);
+    const len = Math.max(3, Math.min(8, span / 20));
 
     // Every waypoint is too many to see through, and this is a diagram of the
     // camera work rather than an inventory.
@@ -3469,7 +3468,6 @@ export function createScene3D(canvas) {
         const f = dir(o.forward);
         const r = dir(o.right);
         const u = dir(o.up);
-        const len = reachOf(apex, f);
         const far = corners.map(([sx, sy]) => apex.clone().add(
           f.clone().addScaledVector(r, sx * th).addScaledVector(u, sy * tv)
             .normalize().multiplyScalar(len)));
@@ -4091,6 +4089,8 @@ export function createScene3D(canvas) {
       if (!paintOn) canvas.style.cursor = '';
     },
     clearPaint() {
+      clearTimeout(paintTimer);
+      paintTimer = null;
       painted.clear();
       if (cloud?.sel) {
         cloud.sel.fill(0);
